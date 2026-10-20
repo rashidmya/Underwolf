@@ -98,7 +98,8 @@ the game runs through XWayland in both).
    is installed, but linking the DLL needs mingw; without it the DLL only type-checks).
 2. `cargo build --release --target x86_64-pc-windows-gnu -p uw-spike-input` →
    `target/x86_64-pc-windows-gnu/release/uw_spike_input.dll`.
-3. Install the hook, injector and launcher: `spikes/inject/install.sh` (builds the DLL and
+3. Install the layer, hook, injector and launcher: `spikes/inject/install.sh` (reinstalls the
+   Vulkan layer, builds the DLL and
    `uw-spike-inject-win.exe` for Windows and the `uw-spike-inject` launcher, and copies them to
    `~/.local/share/underwolf-spike/`). Loading needs no game-side setup: the host injects the DLL
    itself (see "How the DLL is loaded").
@@ -143,6 +144,20 @@ where C2 leaked the mouse — while the session-wide Wine event
 are in Proton 11's `winex11.so`/`lsteamclient.dll`: "HACK: Steam overlay activated, disabling all
 input events"). Steam's overlay sets it; the Vulkan layer could set it with no DLL. Risks: key
 releases dropped too (stuck keys), Steam's overlay closing resets it, absent from `winewayland`.
+
+**In-game run 1 (2026-10-21, KDE Wayland) — invalid, two causes found:**
+- The installed Vulkan layer predated the C3 wiring, so it ignored `UW_SPIKE_CAPTURE=win32` and ran
+  C2 (Proton log: `input filter installed in winex11.so`) alongside the hook. Both toggled edit mode
+  on Ctrl+Tab. Symptoms: W blocked (C2 filter), mouse leaked, no overlay cursor/clicks/typing, and
+  after W-in-edit-mode + exit the game took no input until another enter/exit (the two edit modes
+  out of sync — to re-check). Fix: `install.sh` now reinstalls the layer.
+- The raw-input hook patched only `deadlock.exe`'s imports, which has no raw-input imports.
+  Deadlock reads the mouse through `SDL3.dll`'s raw-input thread with `GetRawInputBuffer` (SDL
+  `WIN_PollRawInput`); `GetRawInputData` is only imported by `toolframework2.dll` (tools). Fix:
+  hook `GetRawInputData` and `GetRawInputBuffer` in every loaded module, walking `GetRawInputBuffer`
+  batches record by record (`raw_buffer_records`, 8-byte `NEXTRAWINPUTBLOCK` alignment; tests in
+  `input/tests/rawinput.rs`). The DLL logs the patched-module counts to the Proton log.
+- What worked: automatic injection by the host, Ctrl+Tab reaching the host, widgets visible.
 
 **Risks (for the hardware run).**
 - **Keyboard assumed legacy `WM_KEY*`.** The WndProc gate catches keyboard; a game using *raw*

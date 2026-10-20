@@ -11,8 +11,9 @@
 //! - **Keyboard** goes through a `WndProc` subclass: every key message passes through the gate,
 //!   which detects Ctrl+Tab and swallows game input while editing. Deadlock delivers keyboard as
 //!   legacy `WM_KEY*`, so releases synthesized on edit entry reach it via `CallWindowProcW`.
-//! - **Mouse** goes through an IAT hook of `user32!GetRawInputData`. Source 2 reads mouse-look as
-//!   raw input, which a `WndProc` subclass never sees (this was C2's mouse leak and C3 review I5).
+//! - **Mouse** goes through IAT hooks of `user32!GetRawInputData` and `user32!GetRawInputBuffer` in
+//!   every loaded module. Deadlock reads mouse-look as raw input through `SDL3.dll`'s raw-input
+//!   thread (`GetRawInputBuffer`), which a `WndProc` subclass never sees (C2's mouse leak, C3 I5).
 //!   The hook lets the real call fill the game's buffer, forwards the motion/clicks to the host,
 //!   and — while editing — zeroes the buffer in place so the camera does not move (P2).
 //! - **Held-button release (P5, "no stuck fire").** On edit entry the gate asks to release any
@@ -25,8 +26,9 @@
 //! for the C3 path (`docs/spikes/01-linux-input.md`).
 //!
 //! Known gaps for hardware verification: keyboard is assumed legacy `WM_KEY*` (a raw-keyboard game
-//! would bypass the WndProc gate); the IAT hook assumes `GetRawInputData` is statically imported
-//! from user32 (a dynamically resolved call would need an inline detour instead).
+//! would bypass the WndProc gate); the IAT hooks assume the raw-input functions are statically
+//! imported from user32 by a module loaded before injection (a dynamically resolved call would
+//! need an inline detour instead).
 
 use std::ffi::c_void;
 use std::net::TcpStream;
@@ -35,8 +37,10 @@ use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use windows::Win32::Foundation::{BOOL, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::Foundation::{BOOL, CloseHandle, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, MODULEENTRY32W, Module32FirstW, Module32NextW, TH32CS_SNAPMODULE,
+};
 use windows::Win32::System::Memory::{PAGE_PROTECTION_FLAGS, PAGE_READWRITE, VirtualProtect};
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -49,15 +53,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use uw_spike_ipc::{InputEvent, Msg, PROTOCOL, write_msg};
 
-use super::{BTN_MIDDLE, BTN_RIGHT, HostSink, MessageOutcome, handle_message, handle_raw_mouse, wm};
+use super::{BTN_MIDDLE, BTN_RIGHT, HostSink, MessageOutcome, handle_message, handle_raw_buffer, handle_raw_record, wm};
 use crate::gate::{GameAction, InputGate};
 
 /// Tag on our synthetic releases so the raw hook lets them reach the game unmolested.
 const SYNTH_EXTRA_INFO: u32 = 0x5557_4F4C; // "UWOL"
 /// `GetRawInputData(.., RID_INPUT, ..)` copies the RAWINPUT itself (vs. just the header).
 const RID_INPUT: u32 = 0x1000_0003;
-/// `ulExtraInformation` is the last `ULONG` of the RAWMOUSE on x86_64.
-const RAW_EXTRA_INFO_OFF: usize = 44;
 
 struct HookState {
     gate: InputGate,
@@ -69,6 +71,9 @@ static ORIG_WNDPROC: AtomicIsize = AtomicIsize::new(0);
 
 type GetRawInputDataFn = unsafe extern "system" fn(*mut c_void, u32, *mut c_void, *mut u32, u32) -> u32;
 static REAL_GET_RAW_INPUT_DATA: AtomicUsize = AtomicUsize::new(0);
+
+type GetRawInputBufferFn = unsafe extern "system" fn(*mut c_void, *mut u32, u32) -> u32;
+static REAL_GET_RAW_INPUT_BUFFER: AtomicUsize = AtomicUsize::new(0);
 
 type RegisterRawInputDevicesFn = unsafe extern "system" fn(*const c_void, u32, u32) -> BOOL;
 static REAL_REGISTER_RAW_INPUT_DEVICES: AtomicUsize = AtomicUsize::new(0);
@@ -168,15 +173,29 @@ unsafe extern "system" fn hooked_get_raw_input_data(
 
     if ui_command == RID_INPUT && !p_data.is_null() && ret != u32::MAX && (ret as usize) >= super::ri_min_len() {
         let buf = unsafe { std::slice::from_raw_parts_mut(p_data as *mut u8, ret as usize) };
-        if super::raw_mouse_extra_info(buf) == Some(SYNTH_EXTRA_INFO) {
-            // Our own synthetic release: strip the tag and let the game have the release unchanged.
-            buf[RAW_EXTRA_INFO_OFF..RAW_EXTRA_INFO_OFF + 4].fill(0);
-        } else if let Some(mut st) = STATE.get().and_then(|s| s.lock().ok()) {
+        if let Some(mut st) = STATE.get().and_then(|s| s.lock().ok()) {
             let st = &mut *st;
-            handle_raw_mouse(buf, &mut st.gate, &mut st.host);
+            handle_raw_record(buf, SYNTH_EXTRA_INFO, &mut st.gate, &mut st.host);
         }
     }
     ret
+}
+
+/// IAT hook for `user32!GetRawInputBuffer`, the batched read SDL3's raw-input thread uses (this is
+/// how Deadlock reads the mouse). Same treatment as [`hooked_get_raw_input_data`], per record.
+unsafe extern "system" fn hooked_get_raw_input_buffer(p_data: *mut c_void, pcb_size: *mut u32, cb_size_header: u32) -> u32 {
+    let real: GetRawInputBufferFn = unsafe { std::mem::transmute(REAL_GET_RAW_INPUT_BUFFER.load(Ordering::Acquire)) };
+    let count = unsafe { real(p_data, pcb_size, cb_size_header) };
+
+    if count != 0 && count != u32::MAX && !p_data.is_null() && !pcb_size.is_null() {
+        let len = unsafe { *pcb_size } as usize;
+        let buf = unsafe { std::slice::from_raw_parts_mut(p_data as *mut u8, len) };
+        if let Some(mut st) = STATE.get().and_then(|s| s.lock().ok()) {
+            let st = &mut *st;
+            handle_raw_buffer(buf, count, SYNTH_EXTRA_INFO, &mut st.gate, &mut st.host);
+        }
+    }
+    count
 }
 
 /// IAT hook for `user32!RegisterRawInputDevices`. Transparent for now (the hook point exists so a
@@ -266,23 +285,46 @@ unsafe fn hook_iat(module: HMODULE, dll: &str, func: &str, replacement: *const c
     }
 }
 
-fn install_raw_input_hooks() {
+/// Every module loaded in this process (the game exe and its DLLs).
+fn loaded_modules() -> Vec<HMODULE> {
+    let mut out = Vec::new();
     unsafe {
-        let Ok(module) = GetModuleHandleW(None) else { return };
-        if let Some(orig) =
-            hook_iat(module, "user32.dll", "GetRawInputData", hooked_get_raw_input_data as *const c_void)
-        {
-            REAL_GET_RAW_INPUT_DATA.store(orig as usize, Ordering::Release);
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId()) else { return out };
+        let mut entry = MODULEENTRY32W { dwSize: std::mem::size_of::<MODULEENTRY32W>() as u32, ..Default::default() };
+        let mut ok = Module32FirstW(snap, &mut entry).is_ok();
+        while ok {
+            out.push(entry.hModule);
+            ok = Module32NextW(snap, &mut entry).is_ok();
         }
-        if let Some(orig) = hook_iat(
-            module,
-            "user32.dll",
-            "RegisterRawInputDevices",
-            hooked_register_raw_input_devices as *const c_void,
-        ) {
-            REAL_REGISTER_RAW_INPUT_DEVICES.store(orig as usize, Ordering::Release);
+        let _ = CloseHandle(snap);
+    }
+    out
+}
+
+/// Patch `user32!func` in the import table of every loaded module that imports it — the game's
+/// input may live in a DLL rather than the exe (Deadlock: `SDL3.dll`). Remembers the real pointer.
+fn hook_everywhere(func: &str, replacement: *const c_void, real: &AtomicUsize) -> usize {
+    let mut patched = 0;
+    for module in loaded_modules() {
+        if let Some(orig) = unsafe { hook_iat(module, "user32.dll", func, replacement) } {
+            let _ = real.compare_exchange(0, orig as usize, Ordering::AcqRel, Ordering::Acquire);
+            patched += 1;
         }
     }
+    patched
+}
+
+fn install_raw_input_hooks() {
+    let data = hook_everywhere("GetRawInputData", hooked_get_raw_input_data as *const c_void, &REAL_GET_RAW_INPUT_DATA);
+    let buffer =
+        hook_everywhere("GetRawInputBuffer", hooked_get_raw_input_buffer as *const c_void, &REAL_GET_RAW_INPUT_BUFFER);
+    // Ends up in the Proton log (~/steam-<appid>.log with PROTON_LOG=1).
+    eprintln!("[uw-spike-input] raw-input hooks: GetRawInputData in {data} module(s), GetRawInputBuffer in {buffer}");
+    hook_everywhere(
+        "RegisterRawInputDevices",
+        hooked_register_raw_input_devices as *const c_void,
+        &REAL_REGISTER_RAW_INPUT_DEVICES,
+    );
 }
 
 /// Subclass `hwnd` and install the raw-input IAT hooks so input flows through the gate.

@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # Builds the C3 hook DLL, the Windows injector and the Linux launcher, and installs them next to
 # the spike layer. The host (--capture win32) runs the launcher when a game's layer connects.
+# Also reinstalls the layer: a layer older than the C3 wiring ignores UW_SPIKE_CAPTURE=win32 and
+# runs C2 alongside the hook (seen in the first in-game C3 run).
 # Needs the x86_64-pc-windows-gnu Rust target and mingw (`sudo pacman -S mingw-w64-gcc`).
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
 manifest="$root/Cargo.toml"
+
+"$root/spikes/vk-layer/install.sh"
 
 cargo build --release --manifest-path "$manifest" --target x86_64-pc-windows-gnu -p uw-spike-input -p uw-spike-inject
 cargo build --release --manifest-path "$manifest" -p uw-spike-inject --bin uw-spike-inject

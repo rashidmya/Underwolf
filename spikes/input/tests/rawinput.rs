@@ -3,7 +3,8 @@
 //! and the in-place neutralization that stops the camera while edit mode is on.
 
 use uw_spike_input::capture_win32_hook::{
-    BTN_LEFT, BTN_RIGHT, HostSink, handle_raw_mouse, neutralize_raw_mouse, parse_raw_mouse, raw_mouse_extra_info,
+    BTN_LEFT, BTN_RIGHT, HostSink, handle_raw_buffer, handle_raw_mouse, neutralize_raw_mouse, parse_raw_mouse,
+    raw_buffer_records, raw_mouse_extra_info,
 };
 use uw_spike_input::gate::{InputGate, RawInput, vk};
 use uw_spike_ipc::InputEvent;
@@ -137,4 +138,89 @@ fn raw_mouse_is_blocked_from_the_game_and_forwarded_in_edit_mode() {
 
     assert_eq!(host.inputs, vec![InputEvent::MouseMove { x: 5.0, y: -5.0 }], "overlay sees the motion");
     assert!(parse_raw_mouse(&b).is_empty(), "the game's camera must not move (P2)");
+}
+
+// ---- GetRawInputBuffer (SDL3's raw-input thread: Deadlock reads the mouse this way) ----------
+
+const SYNTH_TAG: u32 = 0x5557_4F4C;
+
+/// A record as it sits in a `GetRawInputBuffer` batch: `dwSize` (offset 4) is set.
+fn sized(mut rec: Vec<u8>) -> Vec<u8> {
+    let size = rec.len() as u32;
+    rec[4..8].copy_from_slice(&size.to_le_bytes());
+    rec
+}
+
+fn raw_keyboard() -> Vec<u8> {
+    let mut b = vec![0u8; 40]; // 24-byte header + 16-byte RAWKEYBOARD
+    b[0..4].copy_from_slice(&1u32.to_le_bytes()); // RIM_TYPEKEYBOARD
+    sized(b)
+}
+
+/// Concatenate records the way `NEXTRAWINPUTBLOCK` walks them: each starts 8-byte aligned.
+fn batch(records: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for r in records {
+        out.extend_from_slice(r);
+        out.resize(out.len().next_multiple_of(8), 0);
+    }
+    out
+}
+
+#[test]
+fn raw_buffer_records_are_walked_with_8_byte_alignment() {
+    let mut odd = sized(raw_mouse(0, 0, 1, 1));
+    odd.truncate(46); // a 46-byte record: the next one starts at 48
+    odd[4..8].copy_from_slice(&46u32.to_le_bytes());
+    let buf = batch(&[odd, raw_keyboard(), sized(raw_mouse(0, 0, 2, 2))]);
+    assert_eq!(raw_buffer_records(&buf, 3), vec![0..46, 48..88, 88..136]);
+}
+
+#[test]
+fn raw_buffer_records_stop_at_the_end_of_the_buffer() {
+    let buf = batch(&[sized(raw_mouse(0, 0, 1, 1))]);
+    assert_eq!(raw_buffer_records(&buf, 5), vec![0..48], "a count larger than the buffer must not overrun");
+}
+
+#[test]
+fn raw_buffer_mouse_is_blocked_and_forwarded_in_edit_mode() {
+    let mut gate = InputGate::new();
+    let mut host = FakeHost::default();
+    enter_edit_mode(&mut gate);
+
+    let mut buf = batch(&[sized(raw_mouse(0, 0, 3, 4)), raw_keyboard(), sized(raw_mouse(RI_MOUSE_LEFT_DOWN, 0, 0, 0))]);
+    handle_raw_buffer(&mut buf, 3, SYNTH_TAG, &mut gate, &mut host);
+
+    assert_eq!(
+        host.inputs,
+        vec![InputEvent::MouseMove { x: 3.0, y: 4.0 }, InputEvent::MouseButton { button: BTN_LEFT, down: true }]
+    );
+    assert!(parse_raw_mouse(&buf[0..48]).is_empty(), "camera must not move (P2)");
+    assert!(parse_raw_mouse(&buf[88..136]).is_empty(), "the click must not shoot (P2)");
+}
+
+#[test]
+fn raw_buffer_passes_through_outside_edit_mode() {
+    let mut gate = InputGate::new();
+    let mut host = FakeHost::default();
+    let mut buf = batch(&[sized(raw_mouse(0, 0, 3, 4))]);
+    handle_raw_buffer(&mut buf, 1, SYNTH_TAG, &mut gate, &mut host);
+    assert!(host.inputs.is_empty());
+    assert_eq!(parse_raw_mouse(&buf), vec![RawInput::MouseMove { x: 3.0, y: 4.0 }]);
+}
+
+#[test]
+fn raw_buffer_lets_our_synthetic_release_reach_the_game_in_edit_mode() {
+    let mut gate = InputGate::new();
+    let mut host = FakeHost::default();
+    enter_edit_mode(&mut gate);
+
+    let mut release = sized(raw_mouse(RI_MOUSE_LEFT_UP, 0, 0, 0));
+    release[44..48].copy_from_slice(&SYNTH_TAG.to_le_bytes());
+    let mut buf = batch(&[release]);
+    handle_raw_buffer(&mut buf, 1, SYNTH_TAG, &mut gate, &mut host);
+
+    assert_eq!(parse_raw_mouse(&buf), vec![RawInput::MouseButton { button: BTN_LEFT, down: false }]);
+    assert_eq!(raw_mouse_extra_info(&buf), Some(0), "tag stripped before the game reads it");
+    assert!(host.inputs.is_empty(), "our own release is not overlay input");
 }

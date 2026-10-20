@@ -251,6 +251,43 @@ pub fn handle_raw_mouse(buf: &mut [u8], gate: &mut InputGate, host: &mut impl Ho
     }
 }
 
+/// The byte ranges of the first `count` records in a `GetRawInputBuffer` batch. Each record's
+/// `dwSize` gives its length and the next starts 8-byte aligned (`NEXTRAWINPUTBLOCK` on x86_64;
+/// the caller's buffer is aligned). Stops early rather than run past the buffer.
+pub fn raw_buffer_records(buf: &[u8], count: u32) -> Vec<std::ops::Range<usize>> {
+    const DW_SIZE: usize = 4;
+    let mut out = Vec::new();
+    let mut off = 0usize;
+    for _ in 0..count {
+        let Some(size) = buf.get(off + DW_SIZE..off + DW_SIZE + 4) else { break };
+        let size = u32::from_le_bytes(size.try_into().unwrap()) as usize;
+        if size == 0 || off + size > buf.len() {
+            break;
+        }
+        out.push(off..off + size);
+        off = (off + size).next_multiple_of(8);
+    }
+    out
+}
+
+/// One RAWINPUT record from either `GetRawInputData` or a `GetRawInputBuffer` batch: our own
+/// tagged synthetic release passes through to the game with the tag stripped; any other mouse
+/// record goes through [`handle_raw_mouse`].
+pub fn handle_raw_record(rec: &mut [u8], synth_tag: u32, gate: &mut InputGate, host: &mut impl HostSink) {
+    if raw_mouse_extra_info(rec) == Some(synth_tag) {
+        rec[ri::EXTRA_INFO..ri::EXTRA_INFO + 4].fill(0);
+    } else {
+        handle_raw_mouse(rec, gate, host);
+    }
+}
+
+/// [`handle_raw_record`] for every record of a `GetRawInputBuffer` batch of `count` records.
+pub fn handle_raw_buffer(buf: &mut [u8], count: u32, synth_tag: u32, gate: &mut InputGate, host: &mut impl HostSink) {
+    for range in raw_buffer_records(buf, count) {
+        handle_raw_record(&mut buf[range], synth_tag, gate, host);
+    }
+}
+
 /// Full per-message path: translate, run the gate, forward to the host, and tell
 /// the caller what to do with the game.
 pub fn handle_message(
