@@ -1,0 +1,43 @@
+[package]
+name = "uw-spike-inject"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Runtime DLL injection, the way Overwolf/Discord load into a running game on Windows.
+# - `uw-spike-inject-win` (Windows PE, built for x86_64-pc-windows-gnu): the injector. Finds the
+#   target process by exe name and makes it `LoadLibraryW` our DLL via `CreateRemoteThread`.
+#   The same binary is the Windows injector for milestone 2.
+# - `uw-spike-inject` (Linux): runs the injector inside the game's running Wine session under
+#   Proton (same Proton `wine`, prefix and sync settings), so it sees `deadlock.exe`.
+[lib]
+name = "uw_spike_inject"
+
+[[bin]]
+name = "uw-spike-inject"
+path = "src/bin/uw-spike-inject.rs"
+
+[[bin]]
+name = "uw-spike-inject-win"
+path = "src/bin/uw-spike-inject-win.rs"
+
+[[example]]
+name = "wine_sleeper"   # Windows-only stand-in target for tests/wine_e2e.rs
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+uw-spike-ipc = { path = "../ipc" }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+] }

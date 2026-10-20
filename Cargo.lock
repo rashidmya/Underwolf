@@ -526,6 +526,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "uw-spike-inject"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "uw-spike-ipc",
+ "windows",
+]
+
+[[package]]
 name = "uw-spike-input"
 version = "0.0.0"
 dependencies = [

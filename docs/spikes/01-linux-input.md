@@ -98,13 +98,48 @@ the game runs through XWayland in both).
    is installed, but linking the DLL needs mingw; without it the DLL only type-checks).
 2. `cargo build --release --target x86_64-pc-windows-gnu -p uw-spike-input` →
    `target/x86_64-pc-windows-gnu/release/uw_spike_input.dll`.
-3. Load it into the game under Proton (owner decision — record which works through the container):
-   **DLL proxy/hijack** (ship it as a proxy for a DLL the game loads, e.g. `dxgi.dll`/`version.dll`,
-   next to the game binary, forwarding the real exports — how ReShade/SpecialK load under Proton),
-   or **`WINEDLLOVERRIDES`** in the Steam launch options.
+3. Install the hook, injector and launcher: `spikes/inject/install.sh` (builds the DLL and
+   `uw-spike-inject-win.exe` for Windows and the `uw-spike-inject` launcher, and copies them to
+   `~/.local/share/underwolf-spike/`). Loading needs no game-side setup: the host injects the DLL
+   itself (see "How the DLL is loaded").
 4. Start the host in C3 mode: `cd spikes/osr-host && npm start -- --capture win32 --widget input --widget static`.
+   When the game's layer connects, the host runs `uw-spike-inject` and logs
+   `C3: injector exited with 0 (hook loaded)`. To retry by hand: `~/.local/share/underwolf-spike/uw-spike-inject`.
 5. Launch Deadlock with `UW_SPIKE_MODE=composite UW_SPIKE_CAPTURE=win32 %command%`, enter the
    Hideout, and fill in the matrix.
+
+**How the DLL is loaded (owner decision: exactly what Overwolf does, no setup).** An outside
+injector process makes the running game load the DLL: it writes the DLL's path into the game and
+starts a remote thread on `LoadLibraryW` (`spikes/inject`, `uw-spike-inject-win.exe`; the same
+binary is the Windows injector for milestone 2). Nothing goes into the game folder, the prefix or
+the Steam launch options. The only Proton-specific part: the injector has to run inside the game's
+Wine session to see `deadlock.exe`, so the Linux launcher (`uw-spike-inject`):
+- finds `deadlock.exe` by argv0 and copies `WINEPREFIX` and the `WINE*SYNC` settings from its
+  `/proc/<pid>/environ` (the sync mode must match the running wineserver);
+- takes the game's Proton from `compatdata/<appid>/config_info` and runs the injector with that
+  Proton's `files/bin/wine`;
+- first checks that the game's wineserver socket exists (`/tmp/.wine-<uid>/server-<dev>-<ino>/socket`
+  for the prefix); otherwise it stops, because Wine would start an empty session for the injector.
+  Evidence that this works from outside Steam's container: Deadlock's prefix (dev `0x24`, inode
+  `0x17e2e`) has its server directory `server-24-17e2e` in the host's `/tmp`, so the container
+  shares `/tmp` with the host.
+- Proven without the game: `spikes/inject/tests/wine_e2e.rs` (ignored by default) starts a Windows
+  process under Proton 11's own `wine` in a scratch prefix, runs the launcher from outside, and the
+  real C3 DLL loads and greets over TCP — PASS. Not yet proven: the same through Deadlock's
+  pressure-vessel container (if the container used its own PID namespace, the wineserver could
+  reject the outside injector — the in-game run answers this).
+- The DLL cannot be unloaded; quitting the game removes it. If the host restarts while the game
+  runs, re-injection is a no-op and the already-loaded hook stops forwarding (its sender exits when
+  the host goes away) — restart the game too.
+
+**Alternative found while researching (not built): Steam's own method.** Proton's `winex11.so`
+drops all keyboard and mouse events (raw XI2 included) in every Wine process — `explorer.exe` too,
+where C2 leaked the mouse — while the session-wide Wine event
+`\Sessions\<id>\BaseNamedObjects\__wine_steamclient_GameOverlayActivated` is signalled
+(`process_events` in `dlls/winex11.drv/event.c`, ValveSoftware/wine `proton_10.0`; the same strings
+are in Proton 11's `winex11.so`/`lsteamclient.dll`: "HACK: Steam overlay activated, disabling all
+input events"). Steam's overlay sets it; the Vulkan layer could set it with no DLL. Risks: key
+releases dropped too (stuck keys), Steam's overlay closing resets it, absent from `winewayland`.
 
 **Risks (for the hardware run).**
 - **Keyboard assumed legacy `WM_KEY*`.** The WndProc gate catches keyboard; a game using *raw*
@@ -115,7 +150,8 @@ the game runs through XWayland in both).
   `GetRawInputData`. If Source 2 resolves it via `GetProcAddress` instead of a static import, the
   IAT patch misses it and an inline detour (MinHook/retour) is needed. Confirm the camera actually
   stops in edit mode (P2) first.
-- **DLL load method under Proton** (proxy vs. override) is unverified.
+- **DLL load method under Proton:** runtime injection from outside Steam's container is proven
+  against a plain Wine session, not yet against Deadlock's container (see above).
 - **Proton-version fragility.** Depends on Wine delivering keyboard as `WM_KEY*`, `SetWindowLongPtrW`
   subclassing working in the container, and user32 raw-input semantics. Record the Proton version
   tested and re-check on upgrades.
@@ -141,8 +177,8 @@ under Proton — all resolved by the hardware run.
 
 ## Decisions needed from owner
 
-1. **DLL load method under Proton** — DLL proxy/hijack (e.g. `dxgi.dll` next to the game) vs.
-   `WINEDLLOVERRIDES`. Pick after the hardware run shows which loads reliably in the container.
+1. ~~DLL load method under Proton~~ — decided: runtime injection, exactly as Overwolf does, with
+   no game-side setup (see "How the DLL is loaded").
    Parallel to the reader's access-method question (Spike 3).
 2. **Transport** — keep localhost TCP for the hook→host path, or unify on the Unix socket if AF_UNIX
    turns out reachable from inside Wine.

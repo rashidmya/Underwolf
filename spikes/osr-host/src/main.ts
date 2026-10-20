@@ -13,6 +13,8 @@
 //  - C3 (--capture win32): an in-game Win32 hook (injected DLL) owns Ctrl+Tab and input and
 //    forwards them over localhost TCP; edit mode is DLL-authoritative, and the host accumulates an
 //    absolute cursor from the hook's relative mouse motion and relays it to the layer to draw.
+//    The host injects the DLL itself, Overwolf-style, each time a game's layer connects
+//    (uw-spike-inject, installed by spikes/inject/install.sh).
 // Drag a widget by the bar above it; clicks and typing inside a widget go to that widget. For
 // wine/surface, Ctrl+Tab, Escape or a click outside every widget leaves edit mode; for win32 only
 // the hook leaves edit mode. Runs on X11 (XWayland) so the surface can be positioned.
@@ -20,6 +22,7 @@
 //   npm start -- [--consumer] [--capture wine|surface|win32] [--widget solid|animated|static|input]...
 
 import { app, BrowserWindow, ipcMain, screen } from 'electron';
+import { spawn } from 'node:child_process';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -100,6 +103,25 @@ function parseArgs(argv: string[]): { consumer: boolean; capture: Capture; widge
 
 /// The C3 hook connects here (must match UW_SPIKE_HOST_PORT / the hook's default).
 const HOST_PORT = Number(process.env.UW_SPIKE_HOST_PORT ?? 48610);
+
+/// C3: inject the hook DLL into the running game. Called when a game's layer connects, which means
+/// the game is up. Injecting a DLL that is already loaded is a no-op in the game.
+const INJECT = path.join(os.homedir(), '.local/share/underwolf-spike/uw-spike-inject');
+let injecting = false;
+function injectHook() {
+  if (injecting) return;
+  injecting = true;
+  console.log(`[osr-host] C3: injecting via ${INJECT}`);
+  const child = spawn(INJECT, [], { stdio: 'inherit' });
+  child.on('error', (e) => {
+    injecting = false;
+    console.error(`[osr-host] C3: could not run ${INJECT}: ${e.message} (run spikes/inject/install.sh)`);
+  });
+  child.on('exit', (code) => {
+    injecting = false;
+    console.log(`[osr-host] C3: injector exited with ${code}${code === 0 ? ' (hook loaded)' : ''}`);
+  });
+}
 
 /// Hard-coded starting layout: widgets stacked down the left side, starting at (100, 100).
 function layout(names: string[]): Widget[] {
@@ -454,6 +476,7 @@ app.whenReady().then(() => {
     if (g !== generation) {
       generation = g;
       if (editOn) setEdit(false, 'layer reconnected');
+      if (captureMode === 'win32' && g !== 0) injectHook();
       for (const w of widgets) w.win?.webContents.invalidate();
     }
     for (const on of bridge.takeEditRequests()) setEdit(on, `hotkey (${captureMode})`);
