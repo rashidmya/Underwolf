@@ -1,0 +1,9 @@
+[workspace]
+resolver = "3"
+members = ["spikes/*"]
+exclude = ["spikes/osr-host"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+publish = false
