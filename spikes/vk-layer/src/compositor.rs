@@ -70,6 +70,8 @@ struct Import {
 }
 
 pub struct WidgetImage {
+    /// Unique per image ever created (handles can be reused after destruction).
+    pub serial: u64,
     pub image: vk::Image,
     memory: vk::DeviceMemory,
     pub view_unorm: vk::ImageView,
@@ -106,6 +108,7 @@ pub struct Compositor {
     /// Incremented once per present that draws; submissions are tagged with it.
     epoch: u64,
     graveyard: Graveyard<Garbage>,
+    next_serial: u64,
 }
 
 impl Compositor {
@@ -153,6 +156,7 @@ impl Compositor {
                 connection: 0,
                 epoch: 0,
                 graveyard: Graveyard::default(),
+                next_serial: 0,
             })
         }
     }
@@ -267,7 +271,9 @@ impl Compositor {
             if let Some(old) = self.widgets.remove(&id) {
                 self.graveyard.retire(self.epoch, Garbage::Widget(old));
             }
-            let w = unsafe { self.create_widget(width, height)? };
+            let mut w = unsafe { self.create_widget(width, height)? };
+            self.next_serial += 1;
+            w.serial = self.next_serial;
             self.widgets.insert(id, w);
         }
         Ok(self.widgets.get_mut(&id).expect("present"))
@@ -293,6 +299,7 @@ impl Compositor {
                 None,
             )?;
             let mut w = WidgetImage {
+                serial: 0,
                 image,
                 memory: vk::DeviceMemory::null(),
                 view_unorm: vk::ImageView::null(),

@@ -19,8 +19,8 @@ const MAX_WIDGETS: u32 = 32;
 pub enum QuadSource {
     /// Premultiplied RGBA.
     Solid([f32; 4]),
-    /// A widget image (premultiplied), sampled through `view`.
-    Image { widget: u32, view: vk::ImageView, sampler: vk::Sampler },
+    /// A widget image (premultiplied), sampled through `view`. `serial` identifies the image.
+    Image { widget: u32, serial: u64, view: vk::ImageView, sampler: vk::Sampler },
 }
 
 pub struct Quad {
@@ -55,6 +55,39 @@ struct Frame {
     epoch: u64,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum Lookup<T> {
+    Hit(T),
+    /// No current set; `stale` is the previous one for this widget, to retire.
+    Miss { stale: Option<T> },
+}
+
+/// Descriptor set per widget, keyed by the widget image's serial. Vulkan handle values can be
+/// reused after an object is destroyed, so they can't tell a new image from an old one.
+pub struct SetCache<T> {
+    map: HashMap<u32, (T, u64)>,
+}
+
+impl<T> Default for SetCache<T> {
+    fn default() -> Self {
+        SetCache { map: HashMap::new() }
+    }
+}
+
+impl<T: Copy> SetCache<T> {
+    pub fn lookup(&mut self, widget: u32, serial: u64) -> Lookup<T> {
+        match self.map.get(&widget) {
+            Some(&(set, s)) if s == serial => Lookup::Hit(set),
+            Some(_) => Lookup::Miss { stale: self.map.remove(&widget).map(|(set, _)| set) },
+            None => Lookup::Miss { stale: None },
+        }
+    }
+
+    pub fn insert(&mut self, widget: u32, serial: u64, set: T) {
+        self.map.insert(widget, (set, serial));
+    }
+}
+
 /// `frames` are (epoch of last submission, fence signaled). True when every submission tagged
 /// `epoch` or earlier has completed.
 pub fn frames_done(frames: &[(u64, bool)], epoch: u64) -> bool {
@@ -73,8 +106,7 @@ pub struct Overlay {
     /// Samples widget images; only when the device has a compositor.
     tex_pipeline: vk::Pipeline,
     descriptor_pool: vk::DescriptorPool,
-    /// Widget id → its descriptor set and the view it currently points at.
-    sets: HashMap<u32, (vk::DescriptorSet, vk::ImageView)>,
+    sets: SetCache<vk::DescriptorSet>,
     /// Descriptor sets replaced while older submissions may still use them.
     old_sets: Graveyard<vk::DescriptorSet>,
     frames: Vec<Frame>,
@@ -105,7 +137,7 @@ impl Overlay {
             pipeline: vk::Pipeline::null(),
             tex_pipeline: vk::Pipeline::null(),
             descriptor_pool: vk::DescriptorPool::null(),
-            sets: HashMap::new(),
+            sets: SetCache::default(),
             old_sets: Graveyard::default(),
             frames: Vec::new(),
             pool: None,
@@ -335,21 +367,23 @@ impl Overlay {
         frames_done(&frames, epoch)
     }
 
-    /// The descriptor set sampling `view` for `widget`. A set is never rewritten (older
-    /// submissions may still use it): a new view gets a new set and the old one is retired.
+    /// The descriptor set sampling widget image `serial` through `view`. A set is never
+    /// rewritten (older submissions may still use it): a new image gets a new set and the old
+    /// one is retired.
     unsafe fn widget_set(
         &mut self,
         widget: u32,
+        serial: u64,
         view: vk::ImageView,
         sampler: vk::Sampler,
         epoch: u64,
     ) -> Option<vk::DescriptorSet> {
         let set_layout = self.set_layout?;
         unsafe {
-            match self.sets.get(&widget) {
-                Some(&(set, current)) if current == view => return Some(set),
-                Some(&(old, _)) => self.old_sets.retire(epoch, old),
-                None => {}
+            match self.sets.lookup(widget, serial) {
+                Lookup::Hit(set) => return Some(set),
+                Lookup::Miss { stale: Some(old) } => self.old_sets.retire(epoch, old),
+                Lookup::Miss { stale: None } => {}
             }
             let layouts = [set_layout];
             let set = self
@@ -371,7 +405,7 @@ impl Overlay {
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .image_info(&image_info);
             self.device.update_descriptor_sets(&[write], &[]);
-            self.sets.insert(widget, (set, view));
+            self.sets.insert(widget, serial, set);
             Some(set)
         }
     }
@@ -415,7 +449,7 @@ impl Overlay {
             for q in quads {
                 let set = match q.source {
                     QuadSource::Solid(_) => None,
-                    QuadSource::Image { widget, view, sampler } => match self.widget_set(widget, view, sampler, epoch) {
+                    QuadSource::Image { widget, serial, view, sampler } => match self.widget_set(widget, serial, view, sampler, epoch) {
                         Some(set) => Some(set),
                         None => continue,
                     },
@@ -607,6 +641,18 @@ impl Drop for Overlay {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_cache_keys_on_image_serial_not_handle() {
+        let mut c: SetCache<&str> = SetCache::default();
+        assert_eq!(c.lookup(0, 1), Lookup::Miss { stale: None });
+        c.insert(0, 1, "A");
+        assert_eq!(c.lookup(0, 1), Lookup::Hit("A"));
+        // A new image for widget 0 (even if the driver reused the old view's handle value).
+        assert_eq!(c.lookup(0, 2), Lookup::Miss { stale: Some("A") });
+        assert_eq!(c.lookup(0, 2), Lookup::Miss { stale: None }, "stale set handed out once");
+        assert_eq!(c.lookup(1, 1), Lookup::Miss { stale: None });
+    }
 
     #[test]
     fn epoch_is_done_when_older_submissions_completed() {

@@ -486,6 +486,7 @@ fn widget_quads(d: &DeviceData, swapchain_format: vk::Format) -> Vec<Quad> {
                     h: w.height,
                     source: QuadSource::Image {
                         widget: id,
+                        serial: w.serial,
                         view: if srgb { w.view_srgb } else { w.view_unorm },
                         sampler: comp.sampler,
                     },
