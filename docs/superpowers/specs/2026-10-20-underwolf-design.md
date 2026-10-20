@@ -50,7 +50,7 @@ v1 is "done" when all of these are true:
 - **Deadlock uses VAC** (not a kernel anti-cheat). VAC targets known cheats; Overwolf, Discord, Steam overlay and OBS all inject into games. Ban risk from a read/draw-only overlay is low but not zero.
 - **No official Valve live-data feed exists for Deadlock** (unlike CS2/Dota 2 Game State Integration). Overwolf ships its own Deadlock event provider; how it gets the data is undocumented.
 - **The community Deadlock API** (deadlock-api.com) provides profiles, match history and a live spectator feed. The live feed runs 60–90 s behind the real game.
-- **Overwolf's API is publicly documented** at dev.overwolf.com. Underwolf is a clean-room implementation against those docs. **No reverse engineering of the Overwolf client, no redistribution of Overwolf code or apps.**
+- **Overwolf's API is publicly documented** at dev.overwolf.com. Underwolf implements against those docs. **No redistribution of Overwolf code or apps.** (Owner decision 2026-10-21: the earlier "no reverse engineering of the Overwolf client" / clean-room rule is lifted; the owner's own research in `~/Dev/underlock` may be consulted for how Overwolf implements things. Underwolf itself does no reverse engineering.)
 - **Overwolf's sample apps** (the official basic sample app on GitHub, and the Deadlock sample linked from Overwolf's Deadlock GEP docs if available) are legitimate compatibility test targets.
 
 ## 6. The design

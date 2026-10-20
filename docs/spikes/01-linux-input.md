@@ -237,7 +237,10 @@ must reconnect in milestone 1.
    Parallel to the reader's access-method question (Spike 3).
 2. ~~Transport~~ — owner: "do whatever Overwolf does". How Overwolf's in-game module talks to its
    client isn't publicly documented, and the spec rules out reverse engineering the client, so it
-   can't be copied. Decided (assistant's call under that instruction): **keep localhost TCP**. It
+   can't be copied. (After the owner lifted the clean-room rule, the owner's research in
+   `~/Dev/underlock` was checked: it covers Overwolf's app API and game-event providers, not the
+   overlay's injection or its in-game ↔ client channel.) Decided (assistant's call under that
+   instruction): **keep localhost TCP**. It
    works the same on Windows and under Proton. A Windows named pipe or shared memory would stay
    inside Wine, where the Linux host can't reach it.
 3. ~~Accept C3's input-path surface~~ — owner: "do whatever Overwolf does". Overwolf's injected

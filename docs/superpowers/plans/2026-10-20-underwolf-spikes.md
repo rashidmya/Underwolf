@@ -14,7 +14,7 @@
 
 - "Underwolf must never write to game memory or alter game behavior. Anything inside the game process is read/draw-only."
 - "never write to game memory, never inject code for data collection, never alter game behavior."
-- "No reverse engineering of the Overwolf client, no redistribution of Overwolf code or apps."
+- "No redistribution of Overwolf code or apps." (The clean-room / no-reverse-engineering rule was lifted by the owner on 2026-10-21; see spec §3.)
 - "If a spike fails, stop and bring the finding back to the owner before re-planning. Do not quietly add a windowed fallback or a memory-writing workaround."
 - "If the Deadlock provider can't get a value, the event/field is simply not emitted. No fabricated or estimated values."
 - Performance gate: "overlay costs under ~2–3% FPS; no visible stutter". This plan measures it as: average FPS loss ≤ 3.0% **and** p99 frame-time increase ≤ 3.0%, using the bench procedure in `spikes/README.md`.
