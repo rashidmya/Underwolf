@@ -125,9 +125,12 @@ Wine session to see `deadlock.exe`, so the Linux launcher (`uw-spike-inject`):
   shares `/tmp` with the host.
 - Proven without the game: `spikes/inject/tests/wine_e2e.rs` (ignored by default) starts a Windows
   process under Proton 11's own `wine` in a scratch prefix, runs the launcher from outside, and the
-  real C3 DLL loads and greets over TCP — PASS. Not yet proven: the same through Deadlock's
-  pressure-vessel container (if the container used its own PID namespace, the wineserver could
-  reject the outside injector — the in-game run answers this).
+  real C3 DLL loads and greets over TCP — PASS.
+- **In Deadlock — PASS (2026-10-21, Proton 11.0, SLR 4):** with the game started normally (no
+  launch options), `uw-spike-inject` from a plain terminal loaded `uw_spike_input.dll` into
+  `deadlock.exe` (Wine pid 300, Linux pid 2242918; the DLL appears in `/proc/<pid>/maps`), and the
+  game kept running. The pressure-vessel container has its own mount namespace but shares the
+  host's PID namespace and `/tmp`, which is why the outside injector can join the session.
 - The DLL cannot be unloaded; quitting the game removes it. If the host restarts while the game
   runs, re-injection is a no-op and the already-loaded hook stops forwarding (its sender exits when
   the host goes away) — restart the game too.
