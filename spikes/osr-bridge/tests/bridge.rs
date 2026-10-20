@@ -1,9 +1,10 @@
+use std::net::TcpStream;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use uw_spike_ipc::{Msg, recv, send};
+use uw_spike_ipc::{InputEvent, Msg, recv, send, write_msg};
 use uw_spike_osr_bridge::{FrameInfo, PlaneFd, SendResult, Server};
 
 const TIMEOUT: Duration = Duration::from_millis(100);
@@ -110,6 +111,38 @@ fn bind_replaces_stale_socket_file() {
     let server = Server::bind(&path).unwrap();
     let _client = UnixStream::connect(&path).unwrap();
     wait_until(|| server.has_peer());
+}
+
+/// Candidate C3: the in-game Win32 hook forwards over localhost TCP. Its edit-mode toggles and
+/// input must land in the same queues the host drains for the C2 path.
+#[test]
+fn c3_tcp_peer_feeds_edit_and_input_queues() {
+    let server = Server::bind(&socket_path("g.sock")).unwrap();
+    let port = 40000 + (std::process::id() % 20000) as u16;
+    server.bind_input_tcp(port).unwrap();
+    let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write_msg(&mut client, &Msg::Hello { protocol: 1, pid: 1 }).unwrap();
+    write_msg(&mut client, &Msg::EditMode { on: true }).unwrap();
+    write_msg(&mut client, &Msg::Input(InputEvent::MouseMove { x: 3.0, y: -4.0 })).unwrap();
+
+    wait_until(|| server.pending_edit_requests() >= 1 && server.pending_inputs() >= 1);
+    assert_eq!(server.take_edit_requests(), vec![true]);
+    assert_eq!(server.take_inputs(), vec![InputEvent::MouseMove { x: 3.0, y: -4.0 }]);
+}
+
+#[test]
+fn c3_tcp_disconnect_while_editing_requests_edit_off() {
+    let server = Server::bind(&socket_path("h.sock")).unwrap();
+    let port = 40001 + (std::process::id() % 20000) as u16;
+    server.bind_input_tcp(port).unwrap();
+    let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write_msg(&mut client, &Msg::EditMode { on: true }).unwrap();
+    wait_until(|| server.pending_edit_requests() >= 1);
+    assert_eq!(server.take_edit_requests(), vec![true]);
+
+    drop(client);
+    wait_until(|| server.pending_edit_requests() >= 1);
+    assert_eq!(server.take_edit_requests(), vec![false], "a dead hook must not leave the game frozen");
 }
 
 #[test]

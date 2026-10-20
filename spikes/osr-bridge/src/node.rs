@@ -110,6 +110,23 @@ pub fn set_edit_mode(on: bool) -> bool {
     SERVER.get().is_some_and(|s| s.set_edit_mode(on))
 }
 
+/// Starts the localhost TCP listener for the C3 in-game Win32 hook (candidate C3). Its edit-mode
+/// toggles and input join the same queues as `takeEditRequests`/`takeInputs`.
+#[napi]
+pub fn start_input_server(port: u32) -> Result<()> {
+    SERVER
+        .get()
+        .ok_or_else(|| Error::from_reason("server not started"))?
+        .bind_input_tcp(port as u16)
+        .map_err(|e| Error::from_reason(e.to_string()))
+}
+
+/// C3 path: tells the layer where to draw the edit-mode cursor (swapchain px).
+#[napi]
+pub fn set_cursor(x: f64, y: f64) -> bool {
+    SERVER.get().is_some_and(|s| s.set_cursor(x as f32, y as f32))
+}
+
 #[napi]
 pub fn set_layout(widget: u32, x: i32, y: i32, visible: bool) -> bool {
     SERVER.get().is_some_and(|s| s.set_layout(widget, x, y, visible))

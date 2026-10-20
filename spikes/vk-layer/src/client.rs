@@ -105,6 +105,16 @@ struct Shared {
 /// Edit mode as last set by the host.
 static EDIT: AtomicBool = AtomicBool::new(false);
 
+/// Capture candidate. Default `wine` (H1 hotkey + C2 filter, both owned by the layer). In `win32`
+/// (candidate C3) the in-game Win32 hook owns the hotkey and input and the host relays the cursor,
+/// so the layer only draws the overlay — it starts no XInput2 thread and installs no Wine filter.
+static CAPTURE_WIN32: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("UW_SPIKE_CAPTURE").is_ok_and(|v| v == "win32"));
+
+fn win32() -> bool {
+    *CAPTURE_WIN32
+}
+
 /// Raw-input state from the layer's own XInput2 connection.
 #[derive(Default)]
 struct Raw {
@@ -195,6 +205,10 @@ fn on_edit_mode(on: bool) {
     if on == was {
         return;
     }
+    if win32() {
+        // C3: the in-game hook captures input and the host relays the cursor; the layer only draws.
+        return;
+    }
     let mut raw = RAW.lock().unwrap();
     if on {
         let (w, h) = swapchain_extent();
@@ -229,12 +243,17 @@ pub fn start() {
     static START: Once = Once::new();
     START.call_once(|| {
         let _ = std::thread::Builder::new().name("uw-spike-client".into()).spawn(connection_loop);
-        // Spike 1: H1 hotkey + C2 capture.
-        match capture_wine_x11::install() {
-            Ok(n) => eprintln!("[underwolf-spike] input filter installed in winex11.so ({n} imports)"),
-            Err(e) => eprintln!("[underwolf-spike] input filter not installed: {e}"),
+        if win32() {
+            // Spike 1: C3 capture — the in-game Win32 hook owns the hotkey and input (via the host).
+            eprintln!("[underwolf-spike] C3 capture mode: input comes from the in-game Win32 hook");
+        } else {
+            // Spike 1: H1 hotkey + C2 capture.
+            match capture_wine_x11::install() {
+                Ok(n) => eprintln!("[underwolf-spike] input filter installed in winex11.so ({n} imports)"),
+                Err(e) => eprintln!("[underwolf-spike] input filter not installed: {e}"),
+            }
+            let _ = hotkey_xi2::spawn_raw(on_raw);
         }
-        let _ = hotkey_xi2::spawn_raw(on_raw);
     });
 }
 
@@ -341,6 +360,9 @@ fn connection_loop() {
                 // GPU shared textures aren't used on this path (plan Amendment A).
                 Msg::Frame { id, .. } => ack([id]),
                 Msg::EditMode { on } => on_edit_mode(on),
+                // C3: the host relays the accumulated edit-mode cursor (swapchain px) for the layer
+                // to draw, since the capturing hook lives in the game process, not the layer.
+                Msg::Input(InputEvent::MouseMove { x, y }) => RAW.lock().unwrap().cursor = (x, y),
                 Msg::Layout { widget, x, y, visible } => {
                     SHARED.lock().unwrap().layouts.insert(widget, (x, y, visible));
                 }

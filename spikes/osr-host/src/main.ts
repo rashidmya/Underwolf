@@ -5,15 +5,19 @@
 // shared-texture mode delivers empty frames on the NVIDIA driver; the owner chose this CPU copy
 // instead (plan Amendment A, docs/spikes/02-shared-texture.md).
 //
-// Edit mode (Spike 1): the layer reports Ctrl+Tab (candidate H1). Input then comes either from
-// the layer itself (candidate C2, default: the layer filters it out of the game in Wine's X11
-// driver, so the game keeps focus, and draws its own cursor), or from a transparent always-on-top
-// "surface" window over the game (candidate C1, --capture surface; fails P6: the game loses focus).
-// Drag a widget by the bar above it; clicks and typing inside a widget go to that widget; Ctrl+Tab,
-// Escape or a click outside every widget leaves edit mode. Runs on X11 (XWayland) so the surface
-// can be positioned (see package.json).
+// Edit mode (Spike 1): input comes from one of three capture candidates:
+//  - C2 (--capture wine, default): the layer filters input out of the game in Wine's X11 driver,
+//    keeps the game focused, and draws its own cursor; it reports Ctrl+Tab (H1) and the input.
+//  - C1 (--capture surface): a transparent always-on-top window over the game (fails P6: the game
+//    loses focus).
+//  - C3 (--capture win32): an in-game Win32 hook (injected DLL) owns Ctrl+Tab and input and
+//    forwards them over localhost TCP; edit mode is DLL-authoritative, and the host accumulates an
+//    absolute cursor from the hook's relative mouse motion and relays it to the layer to draw.
+// Drag a widget by the bar above it; clicks and typing inside a widget go to that widget. For
+// wine/surface, Ctrl+Tab, Escape or a click outside every widget leaves edit mode; for win32 only
+// the hook leaves edit mode. Runs on X11 (XWayland) so the surface can be positioned.
 //
-//   npm start -- [--consumer] [--capture wine|surface] [--widget solid|animated|static|input]...
+//   npm start -- [--consumer] [--capture wine|surface|win32] [--widget solid|animated|static|input]...
 
 import { app, BrowserWindow, ipcMain, screen } from 'electron';
 import * as os from 'node:os';
@@ -23,6 +27,8 @@ type SendResult = 'acked' | 'dropped' | 'timeout';
 
 interface Bridge {
   startServer(socketPath: string): void;
+  startInputServer(port: number): void;
+  setCursor(x: number, y: number): boolean;
   peerGeneration(): number;
   takeEditRequests(): boolean[];
   takeInputs(): {
@@ -75,17 +81,25 @@ interface Widget {
   win?: BrowserWindow;
 }
 
-function parseArgs(argv: string[]): { consumer: boolean; capture: 'wine' | 'surface'; widgets: string[] } {
+type Capture = 'wine' | 'surface' | 'win32';
+
+function parseArgs(argv: string[]): { consumer: boolean; capture: Capture; widgets: string[] } {
   const widgets: string[] = [];
   let consumer = false;
-  let capture: 'wine' | 'surface' = 'wine';
+  let capture: Capture = 'wine';
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--consumer') consumer = true;
     else if (argv[i] === '--widget' && argv[i + 1]) widgets.push(argv[++i]);
-    else if (argv[i] === '--capture' && argv[i + 1]) capture = argv[++i] === 'surface' ? 'surface' : 'wine';
+    else if (argv[i] === '--capture' && argv[i + 1]) {
+      const c = argv[++i];
+      capture = c === 'surface' ? 'surface' : c === 'win32' ? 'win32' : 'wine';
+    }
   }
   return { consumer, capture, widgets: widgets.length ? widgets : ['animated'] };
 }
+
+/// The C3 hook connects here (must match UW_SPIKE_HOST_PORT / the hook's default).
+const HOST_PORT = Number(process.env.UW_SPIKE_HOST_PORT ?? 48610);
 
 /// Hard-coded starting layout: widgets stacked down the left side, starting at (100, 100).
 function layout(names: string[]): Widget[] {
@@ -142,8 +156,12 @@ function startWidget(w: Widget, consumer: boolean) {
 // ---- Edit mode -------------------------------------------------------------------------------
 
 let editOn = false;
-let captureMode: 'wine' | 'surface' = 'wine';
+let captureMode: Capture = 'wine';
 let surface: BrowserWindow | undefined;
+/// C3: absolute edit-mode cursor (swapchain px), accumulated from the hook's relative motion.
+let winCursor = { x: 0, y: 0 };
+let winCtrl = false;
+let winShift = false;
 let dragging: { w: Widget; dx: number; dy: number } | undefined;
 let focused: Widget | undefined;
 let pointerOver: Widget | undefined;
@@ -168,7 +186,13 @@ function setEdit(on: boolean, why: string) {
   editOn = on;
   bridge.setEditMode(on);
   console.log(`[osr-host] edit mode ${on ? 'ON' : 'OFF'} (${why}) at ${new Date().toISOString()}`);
-  if (captureMode === 'wine' || !surface) {
+  if (captureMode !== 'surface' || !surface) {
+    if (on && captureMode === 'win32') {
+      // The hook sends relative motion; start the cursor centered and tell the layer to draw it.
+      const sw = bridge.swapchainSize() ?? { width: 2560, height: 1440 };
+      winCursor = { x: sw.width / 2, y: sw.height / 2 };
+      bridge.setCursor(winCursor.x, winCursor.y);
+    }
     if (!on) {
       dragging = undefined;
       if (pointerOver) leaveWidget(pointerOver);
@@ -236,7 +260,9 @@ interface SurfaceEvent {
 }
 
 function onKey(down: boolean, key: string, ctrl: boolean, text?: string) {
-  if (down && (key === 'Escape' || (key === 'Tab' && ctrl))) {
+  // For C3 the in-game hook owns entering and leaving edit mode, so the host must not self-exit
+  // (that would desync the dim/cursor from the hook, which is still swallowing input).
+  if (captureMode !== 'win32' && down && (key === 'Escape' || (key === 'Tab' && ctrl))) {
     setEdit(false, key === 'Escape' ? 'Escape' : 'Ctrl+Tab');
     return;
   }
@@ -257,7 +283,7 @@ function onPointer(type: 'down' | 'up' | 'move', x: number, y: number, button = 
   switch (type) {
     case 'down':
       if (!target) {
-        setEdit(false, 'click outside widgets');
+        if (captureMode !== 'win32') setEdit(false, 'click outside widgets');
         return;
       }
       if (target.part === 'bar') {
@@ -347,12 +373,71 @@ function onLayerInputs() {
   }
 }
 
+/// Win32 virtual-key codes (from the C3 hook) → DOM key names for keys without printable text.
+const WIN_VK_NAMES: Record<number, string> = {
+  0x1b: 'Escape', 0x08: 'Backspace', 0x09: 'Tab', 0x0d: 'Enter',
+  0x11: 'Control', 0xa2: 'Control', 0xa3: 'Control', 0x10: 'Shift', 0xa0: 'Shift', 0xa1: 'Shift',
+  0x24: 'Home', 0x23: 'End', 0x25: 'Left', 0x26: 'Up', 0x27: 'Right', 0x28: 'Down', 0x2e: 'Delete',
+};
+
+/// Printable char for a Win32 VK code. A spike-level ASCII mapping (letters/digits/space) — enough
+/// for P3's typing test; a release would resolve text through the hook's keyboard layout.
+function winVkChar(vk: number, shift: boolean): string | undefined {
+  if (vk >= 0x41 && vk <= 0x5a) {
+    const c = String.fromCharCode(vk);
+    return shift ? c : c.toLowerCase();
+  }
+  if (vk >= 0x30 && vk <= 0x39) return String.fromCharCode(vk);
+  if (vk === 0x20) return ' ';
+  return undefined;
+}
+
+function clamp(v: number, lo: number, hi: number): number {
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
+/// C3: input from the in-game Win32 hook. Mouse motion is relative, so accumulate an absolute
+/// cursor (clamped to the swapchain) and relay it to the layer; buttons/wheel/keys route like C2.
+function onWin32Inputs() {
+  const sw = bridge.swapchainSize() ?? { width: 2560, height: 1440 };
+  for (const ev of bridge.takeInputs()) {
+    if (!editOn) continue;
+    switch (ev.kind) {
+      case 'move':
+        winCursor.x = clamp(winCursor.x + ev.x, 0, sw.width - 1);
+        winCursor.y = clamp(winCursor.y + ev.y, 0, sw.height - 1);
+        bridge.setCursor(winCursor.x, winCursor.y);
+        onPointer('move', winCursor.x, winCursor.y);
+        break;
+      case 'button':
+        onPointer(ev.down ? 'down' : 'up', winCursor.x, winCursor.y, ev.button);
+        break;
+      case 'wheel':
+        onWheel(winCursor.x, winCursor.y, ev.dx, ev.dy);
+        break;
+      case 'key': {
+        const vk = ev.code;
+        if (vk === 0x11 || vk === 0xa2 || vk === 0xa3) winCtrl = ev.down;
+        if (vk === 0x10 || vk === 0xa0 || vk === 0xa1) winShift = ev.down;
+        const ch = winVkChar(vk, winShift);
+        const name = WIN_VK_NAMES[vk] ?? ch;
+        if (name) onKey(ev.down, name, winCtrl, ev.text ?? ch);
+        break;
+      }
+    }
+  }
+}
+
 // ---- Startup ---------------------------------------------------------------------------------
 
 app.whenReady().then(() => {
   const { consumer, capture, widgets: names } = parseArgs(process.argv.slice(2));
   captureMode = capture;
   bridge.startServer(SOCKET);
+  if (capture === 'win32') {
+    bridge.startInputServer(HOST_PORT);
+    console.log(`[osr-host] C3 input listener on 127.0.0.1:${HOST_PORT}`);
+  }
   console.log(`[osr-host] socket ${SOCKET}; capture ${capture}; widgets: ${names.join(', ')}`);
   for (const w of layout(names)) {
     widgets.push(w);
@@ -371,8 +456,9 @@ app.whenReady().then(() => {
       if (editOn) setEdit(false, 'layer reconnected');
       for (const w of widgets) w.win?.webContents.invalidate();
     }
-    for (const on of bridge.takeEditRequests()) setEdit(on, 'hotkey (layer)');
-    onLayerInputs();
+    for (const on of bridge.takeEditRequests()) setEdit(on, `hotkey (${captureMode})`);
+    if (captureMode === 'win32') onWin32Inputs();
+    else onLayerInputs();
   }, 8);
 
   setInterval(() => {
