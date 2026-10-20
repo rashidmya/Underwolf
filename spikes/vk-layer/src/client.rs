@@ -1,7 +1,7 @@
 //! Background connection to the Electron host. Runs on its own threads and never blocks the
 //! present path: the present hook only takes queued frames (`take_frames`) and queues acks.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,7 +9,9 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{LazyLock, Mutex, Once};
 use std::time::Duration;
 
-use uw_spike_ipc::{Msg, PROTOCOL, recv, send};
+use uw_spike_input::capture_wine_x11;
+use uw_spike_input::hotkey_xi2::{self, HotkeyState, RawInput, key_text};
+use uw_spike_ipc::{InputEvent, Msg, PROTOCOL, recv, send};
 
 use crate::present::spike_dir;
 
@@ -103,6 +105,109 @@ struct Shared {
 /// Edit mode as last set by the host.
 static EDIT: AtomicBool = AtomicBool::new(false);
 
+/// Raw-input state from the layer's own XInput2 connection.
+#[derive(Default)]
+struct Raw {
+    hotkey: HotkeyState,
+    keys: HashSet<u32>,
+    buttons: HashSet<u32>,
+    /// Edit-mode cursor, swapchain px.
+    cursor: (f32, f32),
+}
+
+static RAW: LazyLock<Mutex<Raw>> = LazyLock::new(Default::default);
+
+const KEY_LSHIFT: u32 = 50;
+const KEY_RSHIFT: u32 = 62;
+
+pub fn cursor() -> (f32, f32) {
+    RAW.lock().unwrap().cursor
+}
+
+fn send_input(ev: InputEvent) {
+    if let Some(tx) = &SHARED.lock().unwrap().outgoing {
+        let _ = tx.send(Msg::Input(ev));
+    }
+}
+
+fn swapchain_extent() -> (u32, u32) {
+    SHARED.lock().unwrap().swapchain.unwrap_or((1920, 1080))
+}
+
+/// Candidate H1 + C2: Ctrl+Tab toggles edit mode; in edit mode every raw key, button and
+/// motion goes to the host (the game doesn't see them: `capture_wine_x11` filters them out).
+fn on_raw(ev: RawInput) {
+    let mut raw = RAW.lock().unwrap();
+    match ev {
+        RawInput::Key { code, down } => {
+            if down {
+                raw.keys.insert(code);
+            } else {
+                raw.keys.remove(&code);
+            }
+            if raw.hotkey.key(code, down) {
+                let on = !edit_mode();
+                eprintln!("[underwolf-spike] Ctrl+Tab: requesting edit mode {}", if on { "on" } else { "off" });
+                drop(raw);
+                request_edit(on);
+                return;
+            }
+            if edit_mode() {
+                let shift = raw.keys.contains(&KEY_LSHIFT) || raw.keys.contains(&KEY_RSHIFT);
+                let text = if down { key_text(code, shift).map(String::from) } else { None };
+                drop(raw);
+                send_input(InputEvent::Key { code, down, text });
+            }
+        }
+        RawInput::Button { button, down } => {
+            if down {
+                raw.buttons.insert(button);
+            } else {
+                raw.buttons.remove(&button);
+            }
+            if !edit_mode() {
+                return;
+            }
+            drop(raw);
+            match button {
+                1..=3 => send_input(InputEvent::MouseButton { button: (button - 1) as u8, down }),
+                4 if down => send_input(InputEvent::Wheel { dx: 0.0, dy: -100.0 }),
+                5 if down => send_input(InputEvent::Wheel { dx: 0.0, dy: 100.0 }),
+                _ => {}
+            }
+        }
+        RawInput::Motion { dx, dy } => {
+            if !edit_mode() {
+                return;
+            }
+            let extent = swapchain_extent();
+            raw.cursor = crate::overlay::move_cursor(raw.cursor, (dx as f32, dy as f32), extent);
+            let (x, y) = raw.cursor;
+            drop(raw);
+            send_input(InputEvent::MouseMove { x, y });
+        }
+    }
+}
+
+/// The host switched edit mode: start or stop keeping input away from the game.
+fn on_edit_mode(on: bool) {
+    let was = EDIT.swap(on, Ordering::Relaxed);
+    if on == was {
+        return;
+    }
+    let mut raw = RAW.lock().unwrap();
+    if on {
+        let (w, h) = swapchain_extent();
+        raw.cursor = (w as f32 / 2.0, h as f32 / 2.0);
+        capture_wine_x11::start(raw.keys.iter().copied(), raw.buttons.iter().copied());
+        let (x, y) = raw.cursor;
+        drop(raw);
+        send_input(InputEvent::MouseMove { x, y });
+    } else {
+        capture_wine_x11::stop();
+    }
+}
+
 pub fn edit_mode() -> bool {
     EDIT.load(Ordering::Relaxed)
 }
@@ -124,12 +229,12 @@ pub fn start() {
     static START: Once = Once::new();
     START.call_once(|| {
         let _ = std::thread::Builder::new().name("uw-spike-client".into()).spawn(connection_loop);
-        // Candidate H1 (Spike 1): Ctrl+Tab from XInput2 raw events, read-only.
-        let _ = uw_spike_input::hotkey_xi2::spawn(|| {
-            let on = !edit_mode();
-            eprintln!("[underwolf-spike] Ctrl+Tab: requesting edit mode {}", if on { "on" } else { "off" });
-            request_edit(on);
-        });
+        // Spike 1: H1 hotkey + C2 capture.
+        match capture_wine_x11::install() {
+            Ok(n) => eprintln!("[underwolf-spike] input filter installed in winex11.so ({n} imports)"),
+            Err(e) => eprintln!("[underwolf-spike] input filter not installed: {e}"),
+        }
+        let _ = hotkey_xi2::spawn_raw(on_raw);
     });
 }
 
@@ -235,7 +340,7 @@ fn connection_loop() {
                 }
                 // GPU shared textures aren't used on this path (plan Amendment A).
                 Msg::Frame { id, .. } => ack([id]),
-                Msg::EditMode { on } => EDIT.store(on, Ordering::Relaxed),
+                Msg::EditMode { on } => on_edit_mode(on),
                 Msg::Layout { widget, x, y, visible } => {
                     SHARED.lock().unwrap().layouts.insert(widget, (x, y, visible));
                 }
@@ -247,7 +352,9 @@ fn connection_loop() {
         shared.outgoing = None;
         shared.connection += 1;
         shared.layouts.clear();
-        EDIT.store(false, Ordering::Relaxed);
+        drop(shared);
+        on_edit_mode(false);
+        let mut shared = SHARED.lock().unwrap();
         shared.frames.take();
         shared.slots.clear();
         drop(shared);

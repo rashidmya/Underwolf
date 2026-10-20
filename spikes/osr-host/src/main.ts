@@ -5,13 +5,15 @@
 // shared-texture mode delivers empty frames on the NVIDIA driver; the owner chose this CPU copy
 // instead (plan Amendment A, docs/spikes/02-shared-texture.md).
 //
-// Edit mode (Spike 1, candidates H1 + C1): the layer reports Ctrl+Tab; the host then raises a
-// transparent always-on-top "surface" window over the game's monitor that captures all input.
+// Edit mode (Spike 1): the layer reports Ctrl+Tab (candidate H1). Input then comes either from
+// the layer itself (candidate C2, default: the layer filters it out of the game in Wine's X11
+// driver, so the game keeps focus, and draws its own cursor), or from a transparent always-on-top
+// "surface" window over the game (candidate C1, --capture surface; fails P6: the game loses focus).
 // Drag a widget by the bar above it; clicks and typing inside a widget go to that widget; Ctrl+Tab,
 // Escape or a click outside every widget leaves edit mode. Runs on X11 (XWayland) so the surface
 // can be positioned (see package.json).
 //
-//   npm start -- [--consumer] [--widget solid|animated|static|input]...
+//   npm start -- [--consumer] [--capture wine|surface] [--widget solid|animated|static|input]...
 
 import { app, BrowserWindow, ipcMain, screen } from 'electron';
 import * as os from 'node:os';
@@ -23,6 +25,17 @@ interface Bridge {
   startServer(socketPath: string): void;
   peerGeneration(): number;
   takeEditRequests(): boolean[];
+  takeInputs(): {
+    kind: 'move' | 'button' | 'wheel' | 'key';
+    x: number;
+    y: number;
+    button: number;
+    down: boolean;
+    dx: number;
+    dy: number;
+    code: number;
+    text?: string | null;
+  }[];
   swapchainSize(): { width: number; height: number } | null;
   setEditMode(on: boolean): boolean;
   setLayout(widget: number, x: number, y: number, visible: boolean): boolean;
@@ -62,14 +75,16 @@ interface Widget {
   win?: BrowserWindow;
 }
 
-function parseArgs(argv: string[]): { consumer: boolean; widgets: string[] } {
+function parseArgs(argv: string[]): { consumer: boolean; capture: 'wine' | 'surface'; widgets: string[] } {
   const widgets: string[] = [];
   let consumer = false;
+  let capture: 'wine' | 'surface' = 'wine';
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--consumer') consumer = true;
     else if (argv[i] === '--widget' && argv[i + 1]) widgets.push(argv[++i]);
+    else if (argv[i] === '--capture' && argv[i + 1]) capture = argv[++i] === 'surface' ? 'surface' : 'wine';
   }
-  return { consumer, widgets: widgets.length ? widgets : ['animated'] };
+  return { consumer, capture, widgets: widgets.length ? widgets : ['animated'] };
 }
 
 /// Hard-coded starting layout: widgets stacked down the left side, starting at (100, 100).
@@ -127,6 +142,7 @@ function startWidget(w: Widget, consumer: boolean) {
 // ---- Edit mode -------------------------------------------------------------------------------
 
 let editOn = false;
+let captureMode: 'wine' | 'surface' = 'wine';
 let surface: BrowserWindow | undefined;
 let dragging: { w: Widget; dx: number; dy: number } | undefined;
 let focused: Widget | undefined;
@@ -148,10 +164,17 @@ function createSurface() {
 }
 
 function setEdit(on: boolean, why: string) {
-  if (on === editOn || !surface) return;
+  if (on === editOn) return;
   editOn = on;
   bridge.setEditMode(on);
   console.log(`[osr-host] edit mode ${on ? 'ON' : 'OFF'} (${why}) at ${new Date().toISOString()}`);
+  if (captureMode === 'wine' || !surface) {
+    if (!on) {
+      dragging = undefined;
+      if (pointerOver) leaveWidget(pointerOver);
+    }
+    return;
+  }
   if (on) {
     // The game has the pointer, so the cursor is on the game's monitor.
     const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
@@ -212,27 +235,26 @@ interface SurfaceEvent {
   ctrl?: boolean;
 }
 
-function onSurfaceInput(ev: SurfaceEvent) {
-  if (!editOn) return;
-  if (ev.type === 'keydown' || ev.type === 'keyup') {
-    const key = ev.key ?? '';
-    if (ev.type === 'keydown' && (key === 'Escape' || (key === 'Tab' && ev.ctrl))) {
-      setEdit(false, key === 'Escape' ? 'Escape' : 'Ctrl+Tab on surface');
-      return;
-    }
-    if (!focused?.win) return;
-    const wc = focused.win.webContents;
-    if (ev.type === 'keydown') {
-      wc.sendInputEvent({ type: 'keyDown', keyCode: key });
-      if (key.length === 1) wc.sendInputEvent({ type: 'char', keyCode: key });
-    } else {
-      wc.sendInputEvent({ type: 'keyUp', keyCode: key });
-    }
+function onKey(down: boolean, key: string, ctrl: boolean, text?: string) {
+  if (down && (key === 'Escape' || (key === 'Tab' && ctrl))) {
+    setEdit(false, key === 'Escape' ? 'Escape' : 'Ctrl+Tab');
     return;
   }
-  const [x, y] = toSwapchain(ev.x ?? 0, ev.y ?? 0, ev.vw, ev.vh);
+  if (!focused?.win) return;
+  const wc = focused.win.webContents;
+  if (down) {
+    wc.sendInputEvent({ type: 'keyDown', keyCode: key });
+    const ch = text ?? (key.length === 1 ? key : undefined);
+    if (ch) wc.sendInputEvent({ type: 'char', keyCode: ch });
+  } else {
+    wc.sendInputEvent({ type: 'keyUp', keyCode: key });
+  }
+}
+
+/// x, y in swapchain pixels.
+function onPointer(type: 'down' | 'up' | 'move', x: number, y: number, button = 0) {
   const target = hit(x, y);
-  switch (ev.type) {
+  switch (type) {
     case 'down':
       if (!target) {
         setEdit(false, 'click outside widgets');
@@ -243,12 +265,12 @@ function onSurfaceInput(ev: SurfaceEvent) {
       } else {
         focused = target.w;
         target.w.win?.webContents.focus();
-        mouse(target.w, 'mouseDown', x, y, ev.button);
+        mouse(target.w, 'mouseDown', x, y, button);
       }
       return;
     case 'up':
       if (dragging) dragging = undefined;
-      else if (target?.part === 'body') mouse(target.w, 'mouseUp', x, y, ev.button);
+      else if (target?.part === 'body') mouse(target.w, 'mouseUp', x, y, button);
       return;
     case 'move':
       if (dragging) {
@@ -264,26 +286,74 @@ function onSurfaceInput(ev: SurfaceEvent) {
         mouse(target.w, 'mouseMove', x, y);
       }
       return;
-    case 'wheel':
-      if (target?.part === 'body') {
-        target.w.win?.webContents.sendInputEvent({
-          type: 'mouseWheel',
-          x: Math.round(x - target.w.x),
-          y: Math.round(y - target.w.y),
-          deltaX: -(ev.dx ?? 0),
-          deltaY: -(ev.dy ?? 0),
-        });
+  }
+}
+
+function onWheel(x: number, y: number, dx: number, dy: number) {
+  const target = hit(x, y);
+  if (target?.part !== 'body') return;
+  target.w.win?.webContents.sendInputEvent({
+    type: 'mouseWheel',
+    x: Math.round(x - target.w.x),
+    y: Math.round(y - target.w.y),
+    deltaX: -dx,
+    deltaY: -dy,
+  });
+}
+
+/// C1: events from the capture window, in window coordinates.
+function onSurfaceInput(ev: SurfaceEvent) {
+  if (!editOn) return;
+  if (ev.type === 'keydown' || ev.type === 'keyup') {
+    onKey(ev.type === 'keydown', ev.key ?? '', ev.ctrl ?? false);
+    return;
+  }
+  const [x, y] = toSwapchain(ev.x ?? 0, ev.y ?? 0, ev.vw, ev.vh);
+  if (ev.type === 'wheel') onWheel(x, y, ev.dx ?? 0, ev.dy ?? 0);
+  else onPointer(ev.type, x, y, ev.button);
+}
+
+/// X keycode (XKB, evdev + 8) → DOM key name for keys without text.
+const KEY_NAMES: Record<number, string> = {
+  9: 'Escape', 22: 'Backspace', 23: 'Tab', 36: 'Enter', 37: 'Control', 105: 'Control', 50: 'Shift', 62: 'Shift',
+  110: 'Home', 111: 'Up', 113: 'Left', 114: 'Right', 115: 'End', 116: 'Down', 119: 'Delete',
+};
+
+let cursor = { x: 0, y: 0 };
+let ctrlDown = false;
+
+/// C2: input captured by the layer; coordinates already in swapchain pixels.
+function onLayerInputs() {
+  for (const ev of bridge.takeInputs()) {
+    if (!editOn) continue;
+    switch (ev.kind) {
+      case 'move':
+        cursor = { x: ev.x, y: ev.y };
+        onPointer('move', ev.x, ev.y);
+        break;
+      case 'button':
+        onPointer(ev.down ? 'down' : 'up', cursor.x, cursor.y, ev.button);
+        break;
+      case 'wheel':
+        onWheel(cursor.x, cursor.y, ev.dx, ev.dy);
+        break;
+      case 'key': {
+        if (ev.code === 37 || ev.code === 105) ctrlDown = ev.down;
+        const name = KEY_NAMES[ev.code] ?? ev.text ?? '';
+        if (name) onKey(ev.down, name, ctrlDown, ev.text ?? undefined);
+        break;
       }
-      return;
+    }
   }
 }
 
 // ---- Startup ---------------------------------------------------------------------------------
 
 app.whenReady().then(() => {
-  const { consumer, widgets: names } = parseArgs(process.argv.slice(2));
+  const { consumer, capture, widgets: names } = parseArgs(process.argv.slice(2));
+  captureMode = capture;
   bridge.startServer(SOCKET);
-  console.log(`[osr-host] socket ${SOCKET}; widgets: ${names.join(', ')}`);
+  console.log(`[osr-host] socket ${SOCKET}; capture ${capture}; widgets: ${names.join(', ')}`);
   for (const w of layout(names)) {
     widgets.push(w);
     startWidget(w, consumer);
@@ -302,7 +372,8 @@ app.whenReady().then(() => {
       for (const w of widgets) w.win?.webContents.invalidate();
     }
     for (const on of bridge.takeEditRequests()) setEdit(on, 'hotkey (layer)');
-  }, 16);
+    onLayerInputs();
+  }, 8);
 
   setInterval(() => {
     const avg = bitmapFrames ? (bitmapMs / bitmapFrames).toFixed(3) : '-';

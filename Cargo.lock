@@ -518,6 +518,7 @@ dependencies = [
 name = "uw-spike-input"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "x11rb",
 ]
 

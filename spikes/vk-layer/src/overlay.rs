@@ -78,6 +78,23 @@ pub fn edit_quads(extent: (u32, u32), widgets: &[(i32, i32, u32, u32)]) -> Vec<Q
     q
 }
 
+/// Edit-mode cursor size (swapchain px), drawn by the layer since the game keeps the pointer.
+pub const CURSOR: u32 = 14;
+
+pub fn move_cursor(pos: (f32, f32), delta: (f32, f32), extent: (u32, u32)) -> (f32, f32) {
+    let max = ((extent.0.max(1) - 1) as f32, (extent.1.max(1) - 1) as f32);
+    ((pos.0 + delta.0).clamp(0.0, max.0), (pos.1 + delta.1).clamp(0.0, max.1))
+}
+
+/// A dark-bordered white square with its top-left corner at the pointer.
+pub fn cursor_quads(pos: (f32, f32)) -> Vec<Quad> {
+    let (x, y) = (pos.0.round() as i32, pos.1.round() as i32);
+    vec![
+        Quad { x, y, w: CURSOR, h: CURSOR, source: QuadSource::Solid([0.0, 0.0, 0.0, 0.9]) },
+        Quad { x: x + 2, y: y + 2, w: CURSOR - 4, h: CURSOR - 4, source: QuadSource::Solid([1.0, 1.0, 1.0, 1.0]) },
+    ]
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Lookup<T> {
     Hit(T),
@@ -668,6 +685,21 @@ impl Drop for Overlay {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cursor_moves_by_raw_delta_and_stays_on_screen() {
+        assert_eq!(move_cursor((100.0, 100.0), (5.5, -2.0), (2560, 1440)), (105.5, 98.0));
+        assert_eq!(move_cursor((10.0, 10.0), (-50.0, -50.0), (2560, 1440)), (0.0, 0.0));
+        assert_eq!(move_cursor((2550.0, 1430.0), (50.0, 50.0), (2560, 1440)), (2559.0, 1439.0));
+    }
+
+    #[test]
+    fn cursor_is_a_bordered_square_at_the_pointer() {
+        let q = cursor_quads((300.4, 200.6));
+        assert_eq!(q.len(), 2);
+        assert_eq!((q[0].x, q[0].y, q[0].w, q[0].h), (300, 201, CURSOR, CURSOR));
+        assert_eq!((q[1].x, q[1].y, q[1].w, q[1].h), (302, 203, CURSOR - 4, CURSOR - 4));
+    }
 
     #[test]
     fn edit_mode_dims_frame_then_frames_each_widget() {

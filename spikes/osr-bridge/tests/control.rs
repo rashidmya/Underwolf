@@ -59,3 +59,17 @@ fn control_messages_without_peer_report_false() {
     assert!(!server.set_edit_mode(true));
     assert!(!server.set_layout(0, 0, 0, true));
 }
+
+#[test]
+fn input_from_layer_is_queued_in_order() {
+    use uw_spike_ipc::InputEvent;
+    let (server, client) = connect("e.sock");
+    send(&client, &Msg::Input(InputEvent::MouseMove { x: 10.0, y: 20.0 }), &[]).unwrap();
+    send(&client, &Msg::Input(InputEvent::MouseButton { button: 0, down: true }), &[]).unwrap();
+    wait_until(|| server.pending_inputs() == 2);
+    assert_eq!(
+        server.take_inputs(),
+        vec![InputEvent::MouseMove { x: 10.0, y: 20.0 }, InputEvent::MouseButton { button: 0, down: true }]
+    );
+    assert!(server.take_inputs().is_empty());
+}

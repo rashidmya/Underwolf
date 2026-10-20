@@ -17,7 +17,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use uw_spike_ipc::{Msg, Plane, fourcc_for, parse_modifier, recv, send};
+use uw_spike_ipc::{InputEvent, Msg, Plane, fourcc_for, parse_modifier, recv, send};
 
 pub struct PlaneFd {
     /// Owned by Electron; only borrowed for the duration of `send_frame`.
@@ -120,6 +120,8 @@ struct Inner {
     peer: Mutex<Option<Peer>>,
     /// Edit-mode states the layer's hotkey asked for, oldest first.
     edit_requests: Mutex<Vec<bool>>,
+    /// Overlay input captured by the layer (candidate C2), oldest first.
+    inputs: Mutex<Vec<InputEvent>>,
     swapchain: Mutex<Option<(u32, u32)>>,
     widgets: Mutex<HashMap<u32, WidgetSlots>>,
     next_id: AtomicU64,
@@ -159,6 +161,14 @@ impl Server {
 
     pub fn pending_edit_requests(&self) -> usize {
         self.inner.edit_requests.lock().unwrap().len()
+    }
+
+    pub fn pending_inputs(&self) -> usize {
+        self.inner.inputs.lock().unwrap().len()
+    }
+
+    pub fn take_inputs(&self) -> Vec<InputEvent> {
+        std::mem::take(&mut *self.inner.inputs.lock().unwrap())
     }
 
     pub fn take_edit_requests(&self) -> Vec<bool> {
@@ -347,6 +357,7 @@ fn read_loop(stream: UnixStream, generation: u64, pending: Pending, inner: Arc<I
                 }
             }
             Msg::EditMode { on } => inner.edit_requests.lock().unwrap().push(on),
+            Msg::Input(ev) => inner.inputs.lock().unwrap().push(ev),
             Msg::Swapchain { width, height } => *inner.swapchain.lock().unwrap() = Some((width, height)),
             _ => {}
         }

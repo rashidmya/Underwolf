@@ -10,3 +10,4 @@ name = "uw_spike_input"
 
 [dependencies]
 x11rb = { version = "0.13", features = ["xinput"] }
+libc = "0.2"

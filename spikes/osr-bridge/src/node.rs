@@ -52,6 +52,48 @@ pub struct JsSize {
     pub height: u32,
 }
 
+/// Overlay input captured by the layer. `kind`: "move" (x, y in swapchain px), "button"
+/// (button 0/1/2, down), "wheel" (dx, dy), "key" (code = X keycode, down, text).
+#[napi(object)]
+pub struct JsInput {
+    pub kind: String,
+    pub x: f64,
+    pub y: f64,
+    pub button: u32,
+    pub down: bool,
+    pub dx: f64,
+    pub dy: f64,
+    pub code: u32,
+    pub text: Option<String>,
+}
+
+#[napi]
+pub fn take_inputs() -> Vec<JsInput> {
+    use uw_spike_ipc::InputEvent;
+    let blank = |kind: &str| JsInput {
+        kind: kind.into(),
+        x: 0.0,
+        y: 0.0,
+        button: 0,
+        down: false,
+        dx: 0.0,
+        dy: 0.0,
+        code: 0,
+        text: None,
+    };
+    SERVER
+        .get()
+        .map_or_else(Vec::new, |s| s.take_inputs())
+        .into_iter()
+        .map(|ev| match ev {
+            InputEvent::MouseMove { x, y } => JsInput { x: x as f64, y: y as f64, ..blank("move") },
+            InputEvent::MouseButton { button, down } => JsInput { button: button as u32, down, ..blank("button") },
+            InputEvent::Wheel { dx, dy } => JsInput { dx: dx as f64, dy: dy as f64, ..blank("wheel") },
+            InputEvent::Key { code, down, text } => JsInput { code, down, text, ..blank("key") },
+        })
+        .collect()
+}
+
 /// Edit-mode states the layer's hotkey asked for since the last call, oldest first.
 #[napi]
 pub fn take_edit_requests() -> Vec<bool> {

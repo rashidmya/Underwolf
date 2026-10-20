@@ -12,7 +12,7 @@ use crate::compositor::{Compositor, Upload, widget_view_format};
 use crate::config::{IS_TARGET, Mode, current_mode};
 use crate::dispatch::{self, DeviceData, InstanceData, cast, key};
 use crate::loader_abi::{find_device_link, find_device_loader_data, find_instance_link};
-use crate::overlay::{Overlay, Quad, QuadSource, edit_quads};
+use crate::overlay::{Overlay, Quad, QuadSource, cursor_quads, edit_quads};
 use crate::present;
 
 /// Swapchain (raw handle) → its overlay renderer.
@@ -509,6 +509,7 @@ fn widget_quads(d: &DeviceData, swapchain_format: vk::Format, extent: (u32, u32)
                 let dim = deco.remove(0);
                 quads.insert(0, dim);
                 quads.extend(deco);
+                quads.extend(cursor_quads(client::cursor()));
             }
             quads
         }
