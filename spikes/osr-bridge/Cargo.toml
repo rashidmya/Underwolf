@@ -1,0 +1,22 @@
+[package]
+name = "uw-spike-osr-bridge"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "uw_spike_osr_bridge"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# The Node addon. Off for `cargo test`, which exercises the Rust core directly.
+node = ["dep:napi", "dep:napi-derive"]
+
+[dependencies]
+napi = { version = "3", optional = true }
+napi-derive = { version = "3", optional = true }
+uw-spike-ipc = { path = "../ipc" }
+
+[build-dependencies]
+napi-build = "2"

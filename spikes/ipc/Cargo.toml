@@ -1,0 +1,14 @@
+[package]
+name = "uw-spike-ipc"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "uw_spike_ipc"
+
+[dependencies]
+postcard = { version = "1", features = ["use-std"] }
+rustix = { version = "1", features = ["net", "time"] }  # "time": rustix 1.1.5 fails to build with "net" alone
+serde = { version = "1", features = ["derive"] }

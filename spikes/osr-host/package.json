@@ -1,0 +1,17 @@
+{
+  "name": "uw-spike-osr-host",
+  "private": true,
+  "version": "0.0.0",
+  "license": "MIT",
+  "main": "dist/main.js",
+  "scripts": {
+    "build:native": "cargo build --release -p uw-spike-osr-bridge --features node --manifest-path ../../Cargo.toml && cp ../../target/release/libuw_spike_osr_bridge.so native/osr_bridge.node",
+    "build": "npm run build:native && tsc",
+    "start": "npm run build --silent && electron --ozone-platform=x11 --disable-gpu-sandbox --use-angle=vulkan --enable-features=Vulkan ."
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "electron": "44.9.1",
+    "typescript": "^5.9.0"
+  }
+}

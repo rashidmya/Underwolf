@@ -73,3 +73,17 @@ Use this procedure for every overlay performance number.
    The tool drops the first 5 s of each run, averages the runs, and prints `PASS` when average
    FPS loss is ≤ 3.0% **and** the p99 frame-time increase is ≤ 3.0%. Exit code: 0 PASS, 1 FAIL,
    2 usage error.
+
+## Electron host and import check (`osr-host/`, `osr-bridge/`, `dmabuf/`, `dmabuf-consumer/`)
+
+```sh
+(cd spikes/osr-host && npm install)
+cargo run -p uw-spike-consumer &                                   # stands in for the layer
+(cd spikes/osr-host && npm start -- --consumer --widget solid)     # expects the consumer to print ff0080ff
+```
+
+- `npm start` passes `--ozone-platform=x11 --disable-gpu-sandbox --use-angle=vulkan --enable-features=Vulkan`.
+  On the NVIDIA proprietary driver these are needed for Electron to deliver shared textures at
+  all (see `docs/spikes/02-shared-texture.md`).
+- `cargo test -p uw-spike-dmabuf --test gpu_roundtrip` proves dmabuf import on the local GPU
+  without Electron.

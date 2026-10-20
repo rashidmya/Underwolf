@@ -1,0 +1,15 @@
+[package]
+name = "uw-spike-consumer"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "uw-spike-consumer"
+path = "src/main.rs"
+
+[dependencies]
+ash = "0.38"
+uw-spike-dmabuf = { path = "../dmabuf" }
+uw-spike-ipc = { path = "../ipc" }
