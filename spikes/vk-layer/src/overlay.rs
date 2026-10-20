@@ -55,6 +55,29 @@ struct Frame {
     epoch: u64,
 }
 
+/// Edit mode: height of the drag bar above each widget, and outline width (swapchain px).
+pub const TITLE_BAR: i32 = 24;
+pub const OUTLINE: u32 = 2;
+const DIM: [f32; 4] = [0.0, 0.0, 0.0, 0.5];
+/// Premultiplied blue, alpha 0.85.
+const FRAME_COLOR: [f32; 4] = [0.2 * 0.85, 0.45 * 0.85, 0.85, 0.85];
+
+/// Edit-mode decoration: first a dim over the whole frame, then for each widget
+/// `(x, y, w, h)` a drag bar above it and a four-sided outline around it.
+pub fn edit_quads(extent: (u32, u32), widgets: &[(i32, i32, u32, u32)]) -> Vec<Quad> {
+    let solid = |x, y, w, h, c| Quad { x, y, w, h, source: QuadSource::Solid(c) };
+    let mut q = vec![solid(0, 0, extent.0, extent.1, DIM)];
+    let o = OUTLINE as i32;
+    for &(x, y, w, h) in widgets {
+        q.push(solid(x, y - TITLE_BAR, w, TITLE_BAR as u32, FRAME_COLOR));
+        q.push(solid(x - o, y - o, w + 2 * OUTLINE, OUTLINE, FRAME_COLOR));
+        q.push(solid(x - o, y + h as i32, w + 2 * OUTLINE, OUTLINE, FRAME_COLOR));
+        q.push(solid(x - o, y, OUTLINE, h, FRAME_COLOR));
+        q.push(solid(x + w as i32, y, OUTLINE, h, FRAME_COLOR));
+    }
+    q
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Lookup<T> {
     Hit(T),
@@ -343,6 +366,10 @@ impl Overlay {
 
     pub fn format(&self) -> vk::Format {
         self.format
+    }
+
+    pub fn extent(&self) -> (u32, u32) {
+        (self.extent.width, self.extent.height)
     }
 
     /// Acks frames whose GPU copies have finished (non-blocking fence poll).
@@ -641,6 +668,22 @@ impl Drop for Overlay {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edit_mode_dims_frame_then_frames_each_widget() {
+        let q = edit_quads((2560, 1440), &[(100, 100, 400, 300)]);
+        assert_eq!(q.len(), 1 + 5);
+        assert_eq!((q[0].x, q[0].y, q[0].w, q[0].h), (0, 0, 2560, 1440));
+        assert!(matches!(q[0].source, QuadSource::Solid([_, _, _, a]) if a == 0.5));
+        // Title bar to drag by, directly above the widget, full width.
+        assert_eq!((q[1].x, q[1].y, q[1].w, q[1].h), (100, 100 - TITLE_BAR, 400, TITLE_BAR as u32));
+        // Outline: top, bottom, left, right, OUTLINE px wide, around the widget.
+        let o = OUTLINE as i32;
+        assert_eq!((q[2].x, q[2].y, q[2].w, q[2].h), (100 - o, 100 - o, 400 + 2 * OUTLINE, OUTLINE));
+        assert_eq!((q[3].x, q[3].y), (100 - o, 400));
+        assert_eq!((q[4].x, q[4].y, q[4].w, q[4].h), (100 - o, 100, OUTLINE, 300));
+        assert_eq!((q[5].x, q[5].y), (500, 100));
+    }
 
     #[test]
     fn set_cache_keys_on_image_serial_not_handle() {

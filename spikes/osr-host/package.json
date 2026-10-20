@@ -7,7 +7,7 @@
   "scripts": {
     "build:native": "cargo build --release -p uw-spike-osr-bridge --features node --manifest-path ../../Cargo.toml && cp ../../target/release/libuw_spike_osr_bridge.so native/osr_bridge.node",
     "build": "npm run build:native && tsc",
-    "start": "npm run build --silent && electron ."
+    "start": "npm run build --silent && electron --ozone-platform=x11 ."
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

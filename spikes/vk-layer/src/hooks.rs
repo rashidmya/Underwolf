@@ -12,7 +12,7 @@ use crate::compositor::{Compositor, Upload, widget_view_format};
 use crate::config::{IS_TARGET, Mode, current_mode};
 use crate::dispatch::{self, DeviceData, InstanceData, cast, key};
 use crate::loader_abi::{find_device_link, find_device_loader_data, find_instance_link};
-use crate::overlay::{Overlay, Quad, QuadSource};
+use crate::overlay::{Overlay, Quad, QuadSource, edit_quads};
 use crate::present;
 
 /// Swapchain (raw handle) → its overlay renderer.
@@ -465,10 +465,16 @@ unsafe fn collect_widget_work(d: &DeviceData) -> WidgetWork {
             work.acks.push(f.id);
         }
     }
+    // Host-side layout changes (drags in edit mode) apply even without new frames.
+    for (id, (x, y, visible)) in client::take_layouts() {
+        if let Some(w) = comp.widgets.get_mut(&id) {
+            (w.x, w.y, w.visible) = (x, y, visible);
+        }
+    }
     work
 }
 
-fn widget_quads(d: &DeviceData, swapchain_format: vk::Format) -> Vec<Quad> {
+fn widget_quads(d: &DeviceData, swapchain_format: vk::Format, extent: (u32, u32)) -> Vec<Quad> {
     match current_mode() {
         Mode::Quad => vec![Quad { x: 100, y: 100, w: 400, h: 300, source: QuadSource::Solid([0.5, 0.0, 0.25, 0.5]) }],
         Mode::Composite => {
@@ -478,7 +484,7 @@ fn widget_quads(d: &DeviceData, swapchain_format: vk::Format) -> Vec<Quad> {
             let mut quads: Vec<_> = comp
                 .widgets
                 .iter()
-                .filter(|(_, w)| w.initialized)
+                .filter(|(_, w)| w.initialized && w.visible)
                 .map(|(&id, w)| Quad {
                     x: w.x,
                     y: w.y,
@@ -496,6 +502,14 @@ fn widget_quads(d: &DeviceData, swapchain_format: vk::Format) -> Vec<Quad> {
                 QuadSource::Image { widget, .. } => widget,
                 QuadSource::Solid(_) => 0,
             });
+            if client::edit_mode() {
+                // Dim under the widgets, drag bars and outlines on top.
+                let rects: Vec<_> = quads.iter().map(|q| (q.x, q.y, q.w, q.h)).collect();
+                let mut deco = edit_quads(extent, &rects);
+                let dim = deco.remove(0);
+                quads.insert(0, dim);
+                quads.extend(deco);
+            }
             quads
         }
         Mode::Passthrough => Vec::new(),
@@ -529,7 +543,7 @@ unsafe fn draw_overlays(d: &DeviceData, queue: vk::Queue, info: &vk::PresentInfo
         let mut last: Option<vk::Semaphore> = None;
         for (sc, &index) in swapchains.iter().zip(indices) {
             let Some(o) = overlays.get_mut(&sc.as_raw()) else { continue };
-            let quads = widget_quads(d, o.format());
+            let quads = widget_quads(d, o.format(), o.extent());
             // Uploads (and their acks) go with the first overlay drawn this present.
             let WidgetWork { uploads, acks } = work.take().unwrap_or(WidgetWork { uploads: Vec::new(), acks: Vec::new() });
             let chained = last.map(|s| [s]);

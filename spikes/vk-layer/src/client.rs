@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{LazyLock, Mutex, Once};
 use std::time::Duration;
@@ -95,6 +96,26 @@ struct Shared {
     swapchain: Option<(u32, u32)>,
     /// Changes on every connect and disconnect, so the compositor can drop stale widgets.
     connection: u64,
+    /// Latest host-set position and visibility per widget, not yet applied.
+    layouts: HashMap<u32, (i32, i32, bool)>,
+}
+
+/// Edit mode as last set by the host.
+static EDIT: AtomicBool = AtomicBool::new(false);
+
+pub fn edit_mode() -> bool {
+    EDIT.load(Ordering::Relaxed)
+}
+
+/// The hotkey asks the host to enter or leave edit mode; the host decides and echoes it back.
+pub fn request_edit(on: bool) {
+    if let Some(tx) = &SHARED.lock().unwrap().outgoing {
+        let _ = tx.send(Msg::EditMode { on });
+    }
+}
+
+pub fn take_layouts() -> HashMap<u32, (i32, i32, bool)> {
+    std::mem::take(&mut SHARED.lock().unwrap().layouts)
 }
 
 static SHARED: LazyLock<Mutex<Shared>> = LazyLock::new(Default::default);
@@ -103,6 +124,12 @@ pub fn start() {
     static START: Once = Once::new();
     START.call_once(|| {
         let _ = std::thread::Builder::new().name("uw-spike-client".into()).spawn(connection_loop);
+        // Candidate H1 (Spike 1): Ctrl+Tab from XInput2 raw events, read-only.
+        let _ = uw_spike_input::hotkey_xi2::spawn(|| {
+            let on = !edit_mode();
+            eprintln!("[underwolf-spike] Ctrl+Tab: requesting edit mode {}", if on { "on" } else { "off" });
+            request_edit(on);
+        });
     });
 }
 
@@ -208,6 +235,10 @@ fn connection_loop() {
                 }
                 // GPU shared textures aren't used on this path (plan Amendment A).
                 Msg::Frame { id, .. } => ack([id]),
+                Msg::EditMode { on } => EDIT.store(on, Ordering::Relaxed),
+                Msg::Layout { widget, x, y, visible } => {
+                    SHARED.lock().unwrap().layouts.insert(widget, (x, y, visible));
+                }
                 _ => {}
             }
         }
@@ -215,6 +246,8 @@ fn connection_loop() {
         let mut shared = SHARED.lock().unwrap();
         shared.outgoing = None;
         shared.connection += 1;
+        shared.layouts.clear();
+        EDIT.store(false, Ordering::Relaxed);
         shared.frames.take();
         shared.slots.clear();
         drop(shared);

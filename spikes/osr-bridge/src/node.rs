@@ -46,6 +46,33 @@ pub fn peer_generation() -> u32 {
     SERVER.get().map_or(0, |s| s.peer_generation() as u32)
 }
 
+#[napi(object)]
+pub struct JsSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Edit-mode states the layer's hotkey asked for since the last call, oldest first.
+#[napi]
+pub fn take_edit_requests() -> Vec<bool> {
+    SERVER.get().map_or_else(Vec::new, |s| s.take_edit_requests())
+}
+
+#[napi]
+pub fn swapchain_size() -> Option<JsSize> {
+    SERVER.get()?.swapchain_size().map(|(width, height)| JsSize { width, height })
+}
+
+#[napi]
+pub fn set_edit_mode(on: bool) -> bool {
+    SERVER.get().is_some_and(|s| s.set_edit_mode(on))
+}
+
+#[napi]
+pub fn set_layout(widget: u32, x: i32, y: i32, visible: bool) -> bool {
+    SERVER.get().is_some_and(|s| s.set_layout(widget, x, y, visible))
+}
+
 pub struct SendFrameTask(FrameInfo);
 
 impl Task for SendFrameTask {

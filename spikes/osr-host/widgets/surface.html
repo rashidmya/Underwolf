@@ -1,0 +1,17 @@
+<!doctype html>
+<html><head><style>html, body { margin: 0; width: 100%; height: 100%; background: transparent; cursor: default; }</style></head>
+<body>
+<script>
+  // Edit-mode capture surface (Spike 1, candidate C1): forwards every input event to the host.
+  const { ipcRenderer } = require('electron');
+  const send = (e, extra) => ipcRenderer.send('surface-input', {
+    vw: innerWidth, vh: innerHeight, ...extra,
+  });
+  addEventListener('pointerdown', (e) => send(e, { type: 'down', x: e.clientX, y: e.clientY, button: e.button }));
+  addEventListener('pointerup', (e) => send(e, { type: 'up', x: e.clientX, y: e.clientY, button: e.button }));
+  addEventListener('pointermove', (e) => send(e, { type: 'move', x: e.clientX, y: e.clientY }));
+  addEventListener('wheel', (e) => send(e, { type: 'wheel', x: e.clientX, y: e.clientY, dx: e.deltaX, dy: e.deltaY }));
+  addEventListener('keydown', (e) => { e.preventDefault(); send(e, { type: 'keydown', key: e.key, ctrl: e.ctrlKey }); });
+  addEventListener('keyup', (e) => { e.preventDefault(); send(e, { type: 'keyup', key: e.key, ctrl: e.ctrlKey }); });
+  addEventListener('contextmenu', (e) => e.preventDefault());
+</script></body></html>

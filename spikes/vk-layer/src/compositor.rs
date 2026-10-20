@@ -82,6 +82,7 @@ pub struct WidgetImage {
     pub initialized: bool,
     pub x: i32,
     pub y: i32,
+    pub visible: bool,
 }
 
 /// One buffer → image copy to record before drawing.
@@ -309,6 +310,7 @@ impl Compositor {
                 initialized: false,
                 x: 0,
                 y: 0,
+                visible: true,
             };
             let result = (|| {
                 let reqs = d.get_image_memory_requirements(image);

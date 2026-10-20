@@ -25,7 +25,18 @@ pub struct Plane {
     pub stride: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum InputEvent {
+    /// Swapchain pixels.
+    MouseMove { x: f32, y: f32 },
+    /// 0 = left, 1 = middle, 2 = right.
+    MouseButton { button: u8, down: bool },
+    Wheel { dx: f32, dy: f32 },
+    /// X11 keycode; `text` for printable input.
+    Key { code: u32, down: bool, text: Option<String> },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Msg {
     /// layer → host, sent once after connecting.
     Hello { protocol: u32, pid: u32 },
@@ -52,6 +63,19 @@ pub enum Msg {
     Slot { widget: u32, slot: u32, width: u32, height: u32, stride: u32, drm_fourcc: u32 },
     /// host → layer: slot `slot` of `widget` holds a new frame. Ack after the GPU copy completed.
     FrameShm { id: u64, widget: u32, slot: u32, x: i32, y: i32 },
+    /// Input for the overlay, from whichever side captured it (Spike 1).
+    Input(InputEvent),
+    /// layer → host: the edit-mode hotkey asks for this state. host → layer: the current state.
+    EditMode { on: bool },
+}
+
+/// Window coordinates → swapchain pixels (the game may render at a different size than its
+/// window, e.g. with render scaling).
+pub fn window_to_swapchain(p: (f32, f32), window: (u32, u32), swapchain: (u32, u32)) -> (f32, f32) {
+    if window.0 == 0 || window.1 == 0 {
+        return (0.0, 0.0);
+    }
+    (p.0 * swapchain.0 as f32 / window.0 as f32, p.1 * swapchain.1 as f32 / window.1 as f32)
 }
 
 pub fn send(s: &UnixStream, m: &Msg, fds: &[BorrowedFd<'_>]) -> io::Result<()> {

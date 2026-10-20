@@ -118,6 +118,9 @@ struct Peer {
 #[derive(Default)]
 struct Inner {
     peer: Mutex<Option<Peer>>,
+    /// Edit-mode states the layer's hotkey asked for, oldest first.
+    edit_requests: Mutex<Vec<bool>>,
+    swapchain: Mutex<Option<(u32, u32)>>,
     widgets: Mutex<HashMap<u32, WidgetSlots>>,
     next_id: AtomicU64,
     next_generation: AtomicU64,
@@ -152,6 +155,37 @@ impl Server {
     /// (the host then repaints every widget, since the new layer has none of its frames).
     pub fn peer_generation(&self) -> u64 {
         self.inner.connections.load(Ordering::Relaxed)
+    }
+
+    pub fn pending_edit_requests(&self) -> usize {
+        self.inner.edit_requests.lock().unwrap().len()
+    }
+
+    pub fn take_edit_requests(&self) -> Vec<bool> {
+        std::mem::take(&mut *self.inner.edit_requests.lock().unwrap())
+    }
+
+    /// The game's swapchain size, as last reported by the layer.
+    pub fn swapchain_size(&self) -> Option<(u32, u32)> {
+        *self.inner.swapchain.lock().unwrap()
+    }
+
+    /// Tells the layer the current edit-mode state. False when no layer is connected.
+    pub fn set_edit_mode(&self, on: bool) -> bool {
+        self.control(&Msg::EditMode { on })
+    }
+
+    /// Moves or hides a widget on the layer side (static widgets send no new frames).
+    pub fn set_layout(&self, widget: u32, x: i32, y: i32, visible: bool) -> bool {
+        self.control(&Msg::Layout { widget, x, y, visible })
+    }
+
+    fn control(&self, msg: &Msg) -> bool {
+        let writer = match &*self.inner.peer.lock().unwrap() {
+            Some(p) => p.writer.clone(),
+            None => return false,
+        };
+        send(&writer.lock().unwrap(), msg, &[]).is_ok()
     }
 
     pub fn has_peer(&self) -> bool {
@@ -306,10 +340,15 @@ fn accept_loop(listener: UnixListener, inner: Arc<Inner>) {
 
 fn read_loop(stream: UnixStream, generation: u64, pending: Pending, inner: Arc<Inner>) {
     while let Ok((msg, _fds)) = recv(&stream) {
-        if let Msg::Ack { id } = msg
-            && let Some(tx) = pending.lock().unwrap().remove(&id)
-        {
-            let _ = tx.send(());
+        match msg {
+            Msg::Ack { id } => {
+                if let Some(tx) = pending.lock().unwrap().remove(&id) {
+                    let _ = tx.send(());
+                }
+            }
+            Msg::EditMode { on } => inner.edit_requests.lock().unwrap().push(on),
+            Msg::Swapchain { width, height } => *inner.swapchain.lock().unwrap() = Some((width, height)),
+            _ => {}
         }
     }
     let mut peer = inner.peer.lock().unwrap();
