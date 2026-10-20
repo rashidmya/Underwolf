@@ -235,8 +235,12 @@ must reconnect in milestone 1.
 1. ~~DLL load method under Proton~~ — decided: runtime injection, exactly as Overwolf does, with
    no game-side setup (see "How the DLL is loaded").
    Parallel to the reader's access-method question (Spike 3).
-2. **Transport** (for milestone 1) — keep localhost TCP for the hook→host path, or unify on the Unix socket if AF_UNIX
-   turns out reachable from inside Wine.
-3. **Accept C3's input-path surface** — it hooks `GetRawInputData`/`RegisterRawInputDevices` and uses
-   `SendInput` for held-button release. All input-path-only (no game memory, no game logic), but more
-   Wine-internal surface and more Proton-version risk than a pure WndProc approach.
+2. ~~Transport~~ — owner: "do whatever Overwolf does". How Overwolf's in-game module talks to its
+   client isn't publicly documented, and the spec rules out reverse engineering the client, so it
+   can't be copied. Decided (assistant's call under that instruction): **keep localhost TCP**. It
+   works the same on Windows and under Proton. A Windows named pipe or shared memory would stay
+   inside Wine, where the Linux host can't reach it.
+3. ~~Accept C3's input-path surface~~ — owner: "do whatever Overwolf does". Overwolf's injected
+   module captures game input in its exclusive mode (spec §6.3 uses the same model), so **accepted**:
+   `WndProc` subclass, `GetRawInputData`/`GetRawInputBuffer`/`RegisterRawInputDevices` IAT hooks and
+   tagged `SendInput` releases. Input path only: no game memory, no game logic.
