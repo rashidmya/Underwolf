@@ -90,7 +90,7 @@ the game runs through XWayland in both).
 
 | Cell | P1 | P2 | P3 | P4 | P5 | P6 | Notes |
 |---|---|---|---|---|---|---|---|
-| KDE Wayland | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | |
+| KDE Wayland | PASS | PASS | PASS | PASS | PASS | PASS | Run 2, 2026-10-21, Proton 11.0; hook injected by the host, no game-side setup |
 | GNOME Wayland | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | |
 
 **Build and load (for the hardware run).**
@@ -158,6 +158,14 @@ releases dropped too (stuck keys), Steam's overlay closing resets it, absent fro
   batches record by record (`raw_buffer_records`, 8-byte `NEXTRAWINPUTBLOCK` alignment; tests in
   `input/tests/rawinput.rs`). The DLL logs the patched-module counts to the Proton log.
 - What worked: automatic injection by the host, Ctrl+Tab reaching the host, widgets visible.
+
+**In-game run 2 (2026-10-21, KDE Wayland, Proton 11.0) — all PASS.** Layer reinstalled, hook with
+`GetRawInputBuffer`. Started Deadlock with the test-mode launch options only; the host injected the
+hook automatically when the layer connected. P1 instant dim + cursor; P2 W, mouse-look and shooting
+blocked in edit mode; P3 10/10 clicks on the button and typing lands in the input; P4 drag works;
+P5 ~20 cycles, movement/mouse-look immediately back, not crouched, no repeats — including W pressed
+in edit mode then exit, the case that left the game without input in run 1 (so that was the stale
+layer's C2 running alongside, not a hook bug); P6 never minimized, paused or lost the mouse.
 
 **Risks (for the hardware run).**
 - **Keyboard assumed legacy `WM_KEY*`.** The WndProc gate catches keyboard; a game using *raw*
