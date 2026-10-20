@@ -415,7 +415,7 @@ unsafe fn collect_widget_work(d: &DeviceData) -> WidgetWork {
     // The host went away or reconnected: its widgets are gone.
     let connection = client::connection();
     if comp.connection != connection {
-        unsafe { comp.clear() };
+        comp.clear();
         comp.connection = connection;
     }
     let ack_now = |f: &crate::client::PendingFrame| {
@@ -515,6 +515,7 @@ unsafe fn draw_overlays(d: &DeviceData, queue: vk::Queue, info: &vk::PresentInfo
         return None;
     }
     unsafe {
+        let epoch = d.compositor.lock().unwrap().as_mut().map_or(0, |c| c.begin_present());
         let mut work = Some(collect_widget_work(d));
         let app_waits = if info.wait_semaphore_count == 0 || info.p_wait_semaphores.is_null() {
             &[][..]
@@ -532,7 +533,7 @@ unsafe fn draw_overlays(d: &DeviceData, queue: vk::Queue, info: &vk::PresentInfo
             let WidgetWork { uploads, acks } = work.take().unwrap_or(WidgetWork { uploads: Vec::new(), acks: Vec::new() });
             let chained = last.map(|s| [s]);
             let wait = chained.as_ref().map_or(app_waits, |s| &s[..]);
-            match o.draw(queue, family, index, wait, &quads, &uploads, acks.clone()) {
+            match o.draw(queue, family, index, wait, &quads, &uploads, acks.clone(), epoch) {
                 Ok(s) => last = Some(s),
                 Err(e) => {
                     log_once!("overlay draw failed: {e:?}");
@@ -542,6 +543,9 @@ unsafe fn draw_overlays(d: &DeviceData, queue: vk::Queue, info: &vk::PresentInfo
         }
         if let Some(w) = work {
             client::ack(w.acks);
+        }
+        if let Some(comp) = d.compositor.lock().unwrap().as_mut() {
+            comp.sweep(|e| overlays.values().all(|o| o.done_through(e)));
         }
         last
     }

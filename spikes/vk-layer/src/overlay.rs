@@ -7,7 +7,7 @@ use std::ffi::c_void;
 use ash::vk;
 
 use crate::client::{self, AckQueue};
-use crate::compositor::Upload;
+use crate::compositor::{Graveyard, Upload};
 use crate::loader_abi::PfnSetDeviceLoaderData;
 
 const VERT_SPV: &[u8] = include_bytes!("../shaders/quad.vert.spv");
@@ -51,6 +51,14 @@ struct Frame {
     cmd: vk::CommandBuffer,
     fence: vk::Fence,
     semaphore: vk::Semaphore,
+    /// Epoch of this frame's last submission (0 = never submitted).
+    epoch: u64,
+}
+
+/// `frames` are (epoch of last submission, fence signaled). True when every submission tagged
+/// `epoch` or earlier has completed.
+pub fn frames_done(frames: &[(u64, bool)], epoch: u64) -> bool {
+    frames.iter().all(|&(e, signaled)| e > epoch || signaled)
 }
 
 pub struct Overlay {
@@ -67,6 +75,8 @@ pub struct Overlay {
     descriptor_pool: vk::DescriptorPool,
     /// Widget id → its descriptor set and the view it currently points at.
     sets: HashMap<u32, (vk::DescriptorSet, vk::ImageView)>,
+    /// Descriptor sets replaced while older submissions may still use them.
+    old_sets: Graveyard<vk::DescriptorSet>,
     frames: Vec<Frame>,
     pool: Option<(u32, vk::CommandPool)>,
     acks: AckQueue,
@@ -96,6 +106,7 @@ impl Overlay {
             tex_pipeline: vk::Pipeline::null(),
             descriptor_pool: vk::DescriptorPool::null(),
             sets: HashMap::new(),
+            old_sets: Graveyard::default(),
             frames: Vec::new(),
             pool: None,
             acks: AckQueue::default(),
@@ -112,7 +123,10 @@ impl Overlay {
                     descriptor_count: MAX_WIDGETS,
                 }];
                 o.descriptor_pool = o.device.create_descriptor_pool(
-                    &vk::DescriptorPoolCreateInfo::default().max_sets(MAX_WIDGETS).pool_sizes(&sizes),
+                    &vk::DescriptorPoolCreateInfo::default()
+                        .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
+                        .max_sets(MAX_WIDGETS)
+                        .pool_sizes(&sizes),
                     None,
                 )?;
             }
@@ -259,7 +273,7 @@ impl Overlay {
                 .device
                 .create_fence(&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None)?;
             let semaphore = self.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)?;
-            Ok(Frame { view, framebuffer, cmd: vk::CommandBuffer::null(), fence, semaphore })
+            Ok(Frame { view, framebuffer, cmd: vk::CommandBuffer::null(), fence, semaphore, epoch: 0 })
         }
     }
 
@@ -311,25 +325,41 @@ impl Overlay {
         }
     }
 
-    /// The descriptor set sampling `view` for `widget`, created or re-pointed as needed.
-    /// Views only change after the compositor waited for the device to go idle.
-    unsafe fn widget_set(&mut self, widget: u32, view: vk::ImageView, sampler: vk::Sampler) -> Option<vk::DescriptorSet> {
+    /// True when every submission of this overlay tagged `epoch` or earlier has completed.
+    pub fn done_through(&self, epoch: u64) -> bool {
+        let frames: Vec<(u64, bool)> = self
+            .frames
+            .iter()
+            .map(|f| (f.epoch, unsafe { self.device.get_fence_status(f.fence) } == Ok(true)))
+            .collect();
+        frames_done(&frames, epoch)
+    }
+
+    /// The descriptor set sampling `view` for `widget`. A set is never rewritten (older
+    /// submissions may still use it): a new view gets a new set and the old one is retired.
+    unsafe fn widget_set(
+        &mut self,
+        widget: u32,
+        view: vk::ImageView,
+        sampler: vk::Sampler,
+        epoch: u64,
+    ) -> Option<vk::DescriptorSet> {
         let set_layout = self.set_layout?;
         unsafe {
-            let set = match self.sets.get(&widget) {
+            match self.sets.get(&widget) {
                 Some(&(set, current)) if current == view => return Some(set),
-                Some(&(set, _)) => set,
-                None => {
-                    let layouts = [set_layout];
-                    self.device
-                        .allocate_descriptor_sets(
-                            &vk::DescriptorSetAllocateInfo::default()
-                                .descriptor_pool(self.descriptor_pool)
-                                .set_layouts(&layouts),
-                        )
-                        .ok()?[0]
-                }
-            };
+                Some(&(old, _)) => self.old_sets.retire(epoch, old),
+                None => {}
+            }
+            let layouts = [set_layout];
+            let set = self
+                .device
+                .allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::default()
+                        .descriptor_pool(self.descriptor_pool)
+                        .set_layouts(&layouts),
+                )
+                .ok()?[0];
             let image_info = [vk::DescriptorImageInfo {
                 sampler,
                 image_view: view,
@@ -363,10 +393,17 @@ impl Overlay {
         quads: &[Quad],
         uploads: &[Upload],
         acks: Vec<u64>,
+        epoch: u64,
     ) -> Result<vk::Semaphore, vk::Result> {
         unsafe {
             self.ensure_pool(family)?;
             self.release_completed();
+            let mut old_sets = std::mem::take(&mut self.old_sets);
+            let freeable = old_sets.sweep(|e| self.done_through(e));
+            self.old_sets = old_sets;
+            if !freeable.is_empty() {
+                let _ = self.device.free_descriptor_sets(self.descriptor_pool, &freeable);
+            }
             let index = image_index as usize;
             let fence = self.frames.get(index).ok_or(vk::Result::ERROR_UNKNOWN)?.fence;
             self.device.wait_for_fences(&[fence], true, u64::MAX)?;
@@ -378,7 +415,7 @@ impl Overlay {
             for q in quads {
                 let set = match q.source {
                     QuadSource::Solid(_) => None,
-                    QuadSource::Image { widget, view, sampler } => match self.widget_set(widget, view, sampler) {
+                    QuadSource::Image { widget, view, sampler } => match self.widget_set(widget, view, sampler, epoch) {
                         Some(set) => Some(set),
                         None => continue,
                     },
@@ -460,6 +497,7 @@ impl Overlay {
             d.reset_fences(&[frame.fence])?;
             d.queue_submit(queue, &[submit], frame.fence)?;
             let semaphore = frame.semaphore;
+            self.frames[index].epoch = epoch;
             self.acks.attach(index, acks);
             Ok(semaphore)
         }
@@ -543,7 +581,11 @@ impl Drop for Overlay {
     fn drop(&mut self) {
         unsafe {
             let d = &self.device;
-            let _ = d.device_wait_idle();
+            // Wait for our own submissions only; never the whole device (see Graveyard).
+            let fences: Vec<_> = self.frames.iter().map(|f| f.fence).filter(|f| *f != vk::Fence::null()).collect();
+            if !fences.is_empty() {
+                let _ = d.wait_for_fences(&fences, true, 1_000_000_000);
+            }
             for f in self.frames.drain(..) {
                 d.destroy_semaphore(f.semaphore, None);
                 d.destroy_fence(f.fence, None);
@@ -565,6 +607,15 @@ impl Drop for Overlay {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn epoch_is_done_when_older_submissions_completed() {
+        // (epoch of the frame's last submission, its fence signaled?)
+        assert!(frames_done(&[(3, true), (4, true)], 4));
+        assert!(!frames_done(&[(3, false), (4, true)], 4), "epoch 3 still in flight");
+        assert!(frames_done(&[(5, false), (4, true)], 4), "newer submissions don't matter");
+        assert!(frames_done(&[(0, true)], 9), "never-submitted frames are signaled");
+    }
 
     #[test]
     fn quad_maps_pixels_to_ndc() {
