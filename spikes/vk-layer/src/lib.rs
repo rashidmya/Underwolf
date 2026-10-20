@@ -5,6 +5,7 @@ mod config;
 mod dispatch;
 mod hooks;
 mod loader_abi;
+mod overlay;
 mod present;
 
 use std::ffi::{CStr, c_char};

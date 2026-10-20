@@ -7,9 +7,9 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use crate::config::{IS_TARGET, MODE};
+use crate::config::{IS_TARGET, csv_name, current_mode, parse_mode, set_mode};
 
 static LAST_PRESENT_NS: AtomicU64 = AtomicU64::new(0);
 static TX: OnceLock<Sender<(u64, u64)>> = OnceLock::new();
@@ -38,8 +38,20 @@ pub fn spike_dir() -> PathBuf {
     home.join(".cache/underwolf-spike")
 }
 
-fn csv_path() -> PathBuf {
-    spike_dir().join(format!("frames-{}-{}.csv", std::process::id(), MODE.as_str()))
+/// The control file's mode and mtime, if it was written after `since`. Files older than
+/// the process are ignored, so a leftover file can't change the mode of a new run.
+fn read_control(since: SystemTime) -> Option<(SystemTime, crate::config::Mode)> {
+    let path = spike_dir().join("control");
+    let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
+    if modified <= since {
+        return None;
+    }
+    Some((modified, parse_mode(&std::fs::read_to_string(path).ok()?)?))
+}
+
+fn open_segment(mode: crate::config::Mode, segment: u32) -> Option<std::fs::File> {
+    let path = spike_dir().join(csv_name(std::process::id(), mode, segment));
+    std::fs::OpenOptions::new().create(true).append(true).open(path).ok()
 }
 
 fn spawn_writer() -> Sender<(u64, u64)> {
@@ -51,11 +63,11 @@ fn spawn_writer() -> Sender<(u64, u64)> {
 }
 
 fn writer(rx: Receiver<(u64, u64)>) {
-    let path = csv_path();
+    let mut control_seen = SystemTime::now();
     let _ = std::fs::create_dir_all(spike_dir());
-    let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) else {
-        return;
-    };
+    let mut mode = current_mode();
+    let mut segment = 0;
+    let mut file = open_segment(mode, segment);
     let mut buf = String::new();
     loop {
         std::thread::sleep(Duration::from_secs(1));
@@ -68,9 +80,19 @@ fn writer(rx: Receiver<(u64, u64)>) {
                 Err(TryRecvError::Disconnected) => return,
             }
         }
-        if !buf.is_empty() {
-            let _ = file.write_all(buf.as_bytes());
-            buf.clear();
+        if let Some(f) = file.as_mut()
+            && !buf.is_empty()
+        {
+            let _ = f.write_all(buf.as_bytes());
+        }
+        buf.clear();
+        // Every control-file write starts a new segment, even if the mode is unchanged.
+        if let Some((modified, m)) = read_control(control_seen) {
+            control_seen = modified;
+            set_mode(m);
+            mode = m;
+            segment += 1;
+            file = open_segment(mode, segment);
         }
     }
 }

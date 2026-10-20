@@ -6,6 +6,8 @@ use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
 use ash::vk::{self, Handle};
 
+use crate::loader_abi::PfnSetDeviceLoaderData;
+
 pub fn key<H: Handle>(h: H) -> usize {
     // SAFETY: dispatchable handles point at an object whose first word is the dispatch table.
     unsafe { *(h.as_raw() as usize as *const usize) }
@@ -28,12 +30,17 @@ pub struct InstanceData {
 
 pub struct DeviceData {
     pub device: vk::Device,
+    /// Device functions resolved through the next layer (never back into this layer).
+    pub ash: ash::Device,
+    pub set_loader_data: Option<PfnSetDeviceLoaderData>,
+    pub queue_family_props: Vec<vk::QueueFamilyProperties>,
     pub gdpa: vk::PFN_vkGetDeviceProcAddr,
     pub destroy_device: vk::PFN_vkDestroyDevice,
     pub get_device_queue: vk::PFN_vkGetDeviceQueue,
     pub get_device_queue2: Option<vk::PFN_vkGetDeviceQueue2>,
     pub create_swapchain: Option<vk::PFN_vkCreateSwapchainKHR>,
     pub destroy_swapchain: Option<vk::PFN_vkDestroySwapchainKHR>,
+    pub get_swapchain_images: Option<vk::PFN_vkGetSwapchainImagesKHR>,
     pub queue_present: Option<vk::PFN_vkQueuePresentKHR>,
     /// Queue handle (raw) → queue family index.
     pub queue_families: Mutex<HashMap<u64, u32>>,
@@ -74,4 +81,16 @@ pub fn remove_device(k: usize) -> Option<Arc<DeviceData>> {
 /// Queues share their device's dispatch key, so this also resolves a `VkQueue`.
 pub fn device(k: usize) -> Option<Arc<DeviceData>> {
     DEVICES.read().unwrap().get(&k).cloned()
+}
+
+impl DeviceData {
+    pub fn queue_family(&self, queue: vk::Queue) -> Option<u32> {
+        self.queue_families.lock().unwrap().get(&queue.as_raw()).copied()
+    }
+
+    pub fn family_supports_graphics(&self, family: u32) -> bool {
+        self.queue_family_props
+            .get(family as usize)
+            .is_some_and(|p| p.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+    }
 }

@@ -47,7 +47,9 @@ How to run each spike is added to this README by the task that builds it.
   `UW_SPIKE_FORCE_TARGET=1` is set.
 - `UW_SPIKE_MODE=passthrough|quad|composite` (default `passthrough`).
 - `UW_SPIKE_LAYER_DISABLE=1` stops the loader from loading it at all.
-- Frame times: `~/.cache/underwolf-spike/frames-<pid>-<mode>.csv`, flushed every second.
+- Frame times: `~/.cache/underwolf-spike/frames-<pid>-<mode>-<segment>.csv`, flushed every second.
+- Runtime mode switch: write a mode to `~/.cache/underwolf-spike/control`. Every write starts a
+  new CSV segment. Files older than the process are ignored.
 - Check it loaded: `VK_LOADER_DEBUG=layer UW_SPIKE_FORCE_TARGET=1 vkcube`. In Deadlock, set
   Steam launch options to `PROTON_LOG=1 VK_LOADER_DEBUG=layer %command%` and read
   `~/steam-1422450.log`.
@@ -59,8 +61,10 @@ Use this procedure for every overlay performance number.
 1. Deadlock Hideout, same spawn position and view every run, same graphics settings.
 2. VSync off, FPS cap off.
 3. 3 runs × 60 s per mode, alternating modes: A B A B A B.
-4. The layer writes `~/.cache/underwolf-spike/frames-<pid>-<mode>.csv` (`present_ns,interval_ns`).
-5. Compare:
+4. With the game running (layer installed), run `./spikes/bench/ab.sh passthrough quad` (or
+   `passthrough composite`). It switches modes A B A B A B through the control file, 65 s
+   each, and runs the comparison below on the new segments. Stand still the whole time.
+5. Manual comparison of any CSVs:
 
    ```sh
    cargo run -p uw-spike-common --bin uw-spike-bench -- compare <A runs...> -- <B runs...>

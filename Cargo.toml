@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["spikes/*"]
-exclude = ["spikes/osr-host"]
+exclude = ["spikes/osr-host", "spikes/bench"]
 
 [workspace.package]
 edition = "2024"

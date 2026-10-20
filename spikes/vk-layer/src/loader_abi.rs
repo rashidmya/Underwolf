@@ -32,7 +32,12 @@ pub struct LayerFunction(pub i32);
 
 impl LayerFunction {
     pub const LINK_INFO: Self = Self(0);
+    pub const LOADER_DATA_CALLBACK: Self = Self(1);
 }
+
+/// Sets the loader dispatch pointer on dispatchable objects the layer creates itself
+/// (command buffers), so calls on them dispatch correctly.
+pub type PfnSetDeviceLoaderData = unsafe extern "system" fn(vk::Device, *mut c_void) -> vk::Result;
 
 pub const LOADER_INSTANCE_CREATE_INFO: vk::StructureType = vk::StructureType::from_raw(47);
 pub const LOADER_DEVICE_CREATE_INFO: vk::StructureType = vk::StructureType::from_raw(48);
@@ -69,7 +74,7 @@ pub struct LayerDeviceLink {
 #[repr(C)]
 pub union LayerDeviceCreateInfoU {
     pub p_layer_info: *mut LayerDeviceLink,
-    _largest: usize,
+    pub pfn_set_device_loader_data: Option<PfnSetDeviceLoaderData>,
 }
 
 #[repr(C)]
@@ -80,13 +85,17 @@ pub struct LayerDeviceCreateInfo {
     pub u: LayerDeviceCreateInfoU,
 }
 
-unsafe fn find_link<T>(mut p: *const vk::BaseInStructure<'_>, s_type: vk::StructureType) -> Option<*mut T> {
+unsafe fn find_link<T>(
+    mut p: *const vk::BaseInStructure<'_>,
+    s_type: vk::StructureType,
+    wanted: LayerFunction,
+) -> Option<*mut T> {
     unsafe {
         while !p.is_null() {
             if (*p).s_type == s_type {
                 // Both loader create-info structs put `function` right after sType/pNext.
                 let function = *(p as *const u8).add(std::mem::size_of::<vk::BaseInStructure>()).cast::<LayerFunction>();
-                if function == LayerFunction::LINK_INFO {
+                if function == wanted {
                     return Some(p as *mut T);
                 }
             }
@@ -98,10 +107,19 @@ unsafe fn find_link<T>(mut p: *const vk::BaseInStructure<'_>, s_type: vk::Struct
 
 /// Finds the loader's link-info struct in a `VkInstanceCreateInfo` chain.
 pub unsafe fn find_instance_link(ci: *const vk::InstanceCreateInfo<'_>) -> Option<*mut LayerInstanceCreateInfo> {
-    unsafe { find_link((*ci).p_next.cast(), LOADER_INSTANCE_CREATE_INFO) }
+    unsafe { find_link((*ci).p_next.cast(), LOADER_INSTANCE_CREATE_INFO, LayerFunction::LINK_INFO) }
 }
 
 /// Finds the loader's link-info struct in a `VkDeviceCreateInfo` chain.
 pub unsafe fn find_device_link(ci: *const vk::DeviceCreateInfo<'_>) -> Option<*mut LayerDeviceCreateInfo> {
-    unsafe { find_link((*ci).p_next.cast(), LOADER_DEVICE_CREATE_INFO) }
+    unsafe { find_link((*ci).p_next.cast(), LOADER_DEVICE_CREATE_INFO, LayerFunction::LINK_INFO) }
+}
+
+/// Finds the loader's `vkSetDeviceLoaderData` callback in a `VkDeviceCreateInfo` chain.
+pub unsafe fn find_device_loader_data(ci: *const vk::DeviceCreateInfo<'_>) -> Option<PfnSetDeviceLoaderData> {
+    unsafe {
+        let p: *mut LayerDeviceCreateInfo =
+            find_link((*ci).p_next.cast(), LOADER_DEVICE_CREATE_INFO, LayerFunction::LOADER_DATA_CALLBACK)?;
+        (*p).u.pfn_set_device_loader_data
+    }
 }
