@@ -1,10 +1,14 @@
-//! Standalone dmabuf import check: connects to the Electron host like the layer would,
-//! imports the first frame, GPU-copies it into its own image, reads back the center pixel
-//! (a CPU readback is fine here: this is a test tool, not the frame path), prints it as
-//! `RRGGBBAA`, acks and exits.
+//! Standalone import check: connects to the Electron host like the layer would, takes the first
+//! frame, prints its center pixel as `RRGGBBAA`, acks and exits.
+//! - `Slot` + `FrameShm` (CPU-rendered widgets, Amendment A): reads the pixel from the slot.
+//! - `Frame` (dmabuf): imports it, GPU-copies it into its own image and reads that back (a CPU
+//!   readback is fine here: this is a test tool, not the frame path).
 //!
 //!   uw-spike-consumer [socket]   (default ~/.cache/underwolf-spike/overlay.sock)
 
+use std::collections::HashMap;
+use std::fs::File;
+use std::os::unix::fs::FileExt;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -12,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use ash::vk;
 use uw_spike_dmabuf::{DEVICE_EXTENSIONS, Dmabuf, Imported, acquire_barrier, find_memory_type, import, release_barrier};
-use uw_spike_ipc::{Msg, PROTOCOL, recv, send};
+use uw_spike_ipc::{DRM_FORMAT_ARGB8888, Msg, PROTOCOL, recv, send};
 
 type Res<T> = Result<T, String>;
 
@@ -254,8 +258,23 @@ fn run() -> Res<String> {
     let g = unsafe { gpu()? };
     let stream = connect_retry(&path, Duration::from_secs(10))?;
     send(&stream, &Msg::Hello { protocol: PROTOCOL, pid: std::process::id() }, &[]).map_err(|e| e.to_string())?;
+    // (file, width, height, stride, fourcc) per (widget, slot).
+    let mut slots: HashMap<(u32, u32), (File, u32, u32, u32, u32)> = HashMap::new();
     let (id, width, height, drm_fourcc, modifier, planes, fds) = loop {
         match recv(&stream).map_err(|e| format!("recv: {e}"))? {
+            (Msg::Slot { widget, slot, width, height, stride, drm_fourcc }, mut fds) if !fds.is_empty() => {
+                slots.insert((widget, slot), (File::from(fds.remove(0)), width, height, stride, drm_fourcc));
+            }
+            (Msg::FrameShm { id, widget, slot, .. }, _) => {
+                let (file, w, h, stride, fourcc) = slots.get(&(widget, slot)).ok_or("FrameShm for unknown slot")?;
+                let mut p = [0u8; 4];
+                let at = (h / 2) as u64 * *stride as u64 + (w / 2) as u64 * 4;
+                file.read_exact_at(&mut p, at).map_err(|e| format!("read slot: {e}"))?;
+                let rgba = if *fourcc == DRM_FORMAT_ARGB8888 { [p[2], p[1], p[0], p[3]] } else { p };
+                eprintln!("shm frame {id}: widget {widget} slot {slot} {w}x{h} stride {stride}");
+                send(&stream, &Msg::Ack { id }, &[]).map_err(|e| e.to_string())?;
+                return Ok(rgba.iter().map(|b| format!("{b:02x}")).collect());
+            }
             (Msg::Frame { id, width, height, drm_fourcc, modifier, planes, .. }, fds) => {
                 break (id, width, height, drm_fourcc, modifier, planes, fds);
             }

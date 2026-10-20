@@ -82,8 +82,9 @@ cargo run -p uw-spike-consumer &                                   # stands in f
 (cd spikes/osr-host && npm start -- --consumer --widget solid)     # expects the consumer to print ff0080ff
 ```
 
-- `npm start` passes `--ozone-platform=x11 --disable-gpu-sandbox --use-angle=vulkan --enable-features=Vulkan`.
-  On the NVIDIA proprietary driver these are needed for Electron to deliver shared textures at
-  all (see `docs/spikes/02-shared-texture.md`).
+- Widgets render offscreen to CPU bitmaps, which go to the layer through shared-memory slots
+  (plan Amendment A). Electron's GPU shared textures are empty on the NVIDIA driver
+  (`docs/spikes/02-shared-texture.md`). The dmabuf path (`sendFrame`, `uw-spike-dmabuf`) is
+  kept for AMD and Windows.
 - `cargo test -p uw-spike-dmabuf --test gpu_roundtrip` proves dmabuf import on the local GPU
   without Electron.

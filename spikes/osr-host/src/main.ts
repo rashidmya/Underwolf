@@ -1,12 +1,9 @@
 // Electron offscreen-rendering host for the overlay spike.
 //
-// Renders each widget in a hidden offscreen BrowserWindow with shared textures and hands every
-// frame (a dmabuf) to the Vulkan layer through the native bridge. Every frame is released after
-// the bridge answers (acked / dropped / timeout), so Chromium's small frame pool never drains.
-//
-// Must be launched with: --ozone-platform=x11 --disable-gpu-sandbox --use-angle=vulkan
-// --enable-features=Vulkan (see package.json). On the NVIDIA proprietary driver, Chromium's GL
-// path can't render into GBM buffers and delivers no frames; ANGLE-on-Vulkan can.
+// Renders each widget in a hidden offscreen BrowserWindow (CPU bitmap mode) and hands every frame
+// to the Vulkan layer through the native bridge, via shared-memory slots. Electron's GPU
+// shared-texture mode delivers empty frames on the NVIDIA driver; the owner chose this CPU copy
+// instead (plan Amendment A, docs/spikes/02-shared-texture.md).
 //
 //   npm start -- [--consumer] [--widget solid|animated|static]...
 
@@ -18,15 +15,15 @@ type SendResult = 'acked' | 'dropped' | 'timeout';
 
 interface Bridge {
   startServer(socketPath: string): void;
-  sendFrame(f: {
+  sendBitmap(b: {
     widget: number;
     x: number;
     y: number;
     width: number;
     height: number;
+    stride: number;
     pixelFormat: string;
-    modifier: string;
-    planes: { fd: number; stride: number; offset: number; size: number }[];
+    data: Buffer;
   }): Promise<SendResult>;
 }
 
@@ -72,13 +69,8 @@ function layout(names: string[]): Widget[] {
 }
 
 const counts: Record<SendResult, number> = { acked: 0, dropped: 0, timeout: 0 };
-const warned = new Set<string>();
-function warnOnce(msg: string) {
-  if (!warned.has(msg)) {
-    warned.add(msg);
-    console.warn(`[osr-host] ${msg}`);
-  }
-}
+let bitmapMs = 0;
+let bitmapFrames = 0;
 
 function startWidget(w: Widget, consumer: boolean) {
   const win = new BrowserWindow({
@@ -87,41 +79,29 @@ function startWidget(w: Widget, consumer: boolean) {
     height: w.height,
     transparent: true,
     backgroundColor: '#00000000',
-    webPreferences: { offscreen: { useSharedTexture: true } },
+    webPreferences: { offscreen: true },
   });
   win.webContents.setFrameRate(60);
-  win.webContents.on('paint', async (e) => {
-    const tex = e.texture;
-    if (!tex) {
-      warnOnce('paint event without a shared texture');
-      return;
-    }
-    try {
-      const info = tex.textureInfo;
-      const pixmap = info.handle?.nativePixmap;
-      if (!pixmap) {
-        warnOnce('shared texture has no nativePixmap handle (Spike 2 blocker)');
-        return;
-      }
-      if (info.pixelFormat !== 'bgra' && info.pixelFormat !== 'rgba') {
-        warnOnce(`unsupported pixel format '${info.pixelFormat}' (Spike 2 blocker)`);
-        return;
-      }
-      const result = await bridge.sendFrame({
-        widget: w.id,
-        x: w.x,
-        y: w.y,
-        width: info.codedSize.width,
-        height: info.codedSize.height,
-        pixelFormat: info.pixelFormat,
-        modifier: pixmap.modifier,
-        planes: pixmap.planes.map((p) => ({ fd: p.fd, stride: p.stride, offset: p.offset, size: p.size })),
-      });
-      counts[result]++;
-      if (consumer && result === 'acked') app.quit();
-    } finally {
-      tex.release();
-    }
+  win.webContents.on('paint', async (_e, _dirty, image) => {
+    const t0 = performance.now();
+    const { width, height } = image.getSize();
+    // Linux NativeImage bitmaps are BGRA, premultiplied alpha.
+    const data = image.toBitmap();
+    bitmapMs += performance.now() - t0;
+    bitmapFrames++;
+    if (width === 0 || height === 0) return;
+    const result = await bridge.sendBitmap({
+      widget: w.id,
+      x: w.x,
+      y: w.y,
+      width,
+      height,
+      stride: width * 4,
+      pixelFormat: 'bgra',
+      data,
+    });
+    counts[result]++;
+    if (consumer && result === 'acked') app.quit();
   });
   win.loadFile(path.join(__dirname, '..', 'widgets', `${w.name}.html`));
 }
@@ -131,7 +111,10 @@ app.whenReady().then(() => {
   bridge.startServer(SOCKET);
   console.log(`[osr-host] socket ${SOCKET}; widgets: ${widgets.join(', ')}`);
   for (const w of layout(widgets)) startWidget(w, consumer);
-  setInterval(() => console.log(`[osr-host] frames ${JSON.stringify(counts)}`), 5000);
+  setInterval(() => {
+    const avg = bitmapFrames ? (bitmapMs / bitmapFrames).toFixed(3) : '-';
+    console.log(`[osr-host] frames ${JSON.stringify(counts)}; toBitmap avg ${avg} ms over ${bitmapFrames}`);
+  }, 5000);
   if (consumer) {
     setTimeout(() => {
       console.error('[osr-host] no acked frame within 15 s');

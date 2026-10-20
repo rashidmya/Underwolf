@@ -17,6 +17,7 @@ node = ["dep:napi", "dep:napi-derive"]
 napi = { version = "3", optional = true }
 napi-derive = { version = "3", optional = true }
 uw-spike-ipc = { path = "../ipc" }
+rustix = { version = "1", features = ["fs"] }
 
 [build-dependencies]
 napi-build = "2"

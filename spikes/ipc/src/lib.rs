@@ -47,6 +47,11 @@ pub enum Msg {
     Ack { id: u64 },
     /// host → layer.
     Layout { widget: u32, x: i32, y: i32, visible: bool },
+    /// host → layer, with one memfd attached: a shared-memory slot holding CPU-rendered widget
+    /// pixels. Sent once per slot per connection, and again if the widget's size changes.
+    Slot { widget: u32, slot: u32, width: u32, height: u32, stride: u32, drm_fourcc: u32 },
+    /// host → layer: slot `slot` of `widget` holds a new frame. Ack after the GPU copy completed.
+    FrameShm { id: u64, widget: u32, slot: u32, x: i32, y: i32 },
 }
 
 pub fn send(s: &UnixStream, m: &Msg, fds: &[BorrowedFd<'_>]) -> io::Result<()> {

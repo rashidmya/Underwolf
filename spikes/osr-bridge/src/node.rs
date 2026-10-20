@@ -4,11 +4,11 @@ use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use napi::bindgen_prelude::AsyncTask;
+use napi::bindgen_prelude::{AsyncTask, Buffer};
 use napi::{Env, Error, Result, Task};
 use napi_derive::napi;
 
-use crate::{FrameInfo, PlaneFd, SendResult, Server};
+use crate::{Bitmap, FrameInfo, PlaneFd, SendResult, Server};
 
 const ACK_TIMEOUT: Duration = Duration::from_millis(100);
 
@@ -72,4 +72,49 @@ pub fn send_frame(f: JsFrame) -> AsyncTask<SendFrameTask> {
             .map(|p| PlaneFd { fd: p.fd, stride: p.stride, offset: p.offset, size: p.size })
             .collect(),
     }))
+}
+
+#[napi(object)]
+pub struct JsBitmap {
+    pub widget: u32,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub pixel_format: String,
+    pub data: Buffer,
+}
+
+/// Holds the JS bitmap buffer alive until the worker thread has copied it into a slot.
+pub struct SendBitmapTask(JsBitmap);
+
+impl Task for SendBitmapTask {
+    type Output = SendResult;
+    type JsValue = String;
+
+    fn compute(&mut self) -> Result<SendResult> {
+        let b = &self.0;
+        let bitmap = Bitmap {
+            widget: b.widget,
+            x: b.x,
+            y: b.y,
+            width: b.width,
+            height: b.height,
+            stride: b.stride,
+            pixel_format: &b.pixel_format,
+            data: &b.data,
+        };
+        Ok(SERVER.get().map_or(SendResult::Dropped, |s| s.send_bitmap(&bitmap, ACK_TIMEOUT)))
+    }
+
+    fn resolve(&mut self, _env: Env, output: SendResult) -> Result<String> {
+        Ok(output.as_str().to_owned())
+    }
+}
+
+/// CPU-rendered widget frame → shared-memory slot → layer. Same results as `sendFrame`.
+#[napi(ts_return_type = "Promise<'acked' | 'dropped' | 'timeout'>")]
+pub fn send_bitmap(b: JsBitmap) -> AsyncTask<SendBitmapTask> {
+    AsyncTask::new(SendBitmapTask(b))
 }

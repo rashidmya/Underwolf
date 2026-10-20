@@ -21,6 +21,8 @@ fn all_variants() -> Vec<Msg> {
         },
         Msg::Ack { id: 7 },
         Msg::Layout { widget: 3, x: 5, y: 6, visible: false },
+        Msg::Slot { widget: 2, slot: 1, width: 400, height: 300, stride: 1600, drm_fourcc: 0x3432_5241 },
+        Msg::FrameShm { id: 99, widget: 2, slot: 1, x: 100, y: 450 },
     ]
 }
 

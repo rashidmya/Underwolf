@@ -5,9 +5,11 @@
 #[cfg(feature = "node")]
 mod node;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fs::File;
 use std::io;
-use std::os::fd::{BorrowedFd, RawFd};
+use std::os::fd::{AsFd, BorrowedFd, RawFd};
+use std::os::unix::fs::FileExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,6 +38,55 @@ pub struct FrameInfo {
     pub planes: Vec<PlaneFd>,
 }
 
+/// A CPU-rendered widget frame (Electron's offscreen `NativeImage` bitmap).
+pub struct Bitmap<'a> {
+    pub widget: u32,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub pixel_format: &'a str,
+    pub data: &'a [u8],
+}
+
+/// Shared-memory slots per widget. A slot is busy from send until ack or timeout.
+pub const SLOTS_PER_WIDGET: usize = 3;
+const PAGE: u64 = 4096;
+
+struct SlotMem {
+    file: File,
+    busy: bool,
+}
+
+struct WidgetSlots {
+    width: u32,
+    height: u32,
+    stride: u32,
+    drm_fourcc: u32,
+    slots: Vec<SlotMem>,
+}
+
+impl WidgetSlots {
+    fn new(width: u32, height: u32, stride: u32, drm_fourcc: u32) -> io::Result<WidgetSlots> {
+        // Page-aligned so the layer can import the mapping with VK_EXT_external_memory_host.
+        let len = (stride as u64 * height as u64).div_ceil(PAGE) * PAGE;
+        let slots = (0..SLOTS_PER_WIDGET)
+            .map(|_| {
+                let fd = rustix::fs::memfd_create("uw-widget-slot", rustix::fs::MemfdFlags::CLOEXEC)?;
+                let file = File::from(fd);
+                file.set_len(len)?;
+                Ok(SlotMem { file, busy: false })
+            })
+            .collect::<io::Result<_>>()?;
+        Ok(WidgetSlots { width, height, stride, drm_fourcc, slots })
+    }
+
+    fn matches(&self, b: &Bitmap<'_>, drm_fourcc: u32) -> bool {
+        (self.width, self.height, self.stride, self.drm_fourcc) == (b.width, b.height, b.stride, drm_fourcc)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendResult {
     Acked,
@@ -60,11 +111,14 @@ struct Peer {
     /// Serializes writes so concurrent frames never interleave on the socket.
     writer: Arc<Mutex<UnixStream>>,
     pending: Pending,
+    /// (widget, slot) pairs whose memfd this peer already received.
+    registered: Arc<Mutex<HashSet<(u32, u32)>>>,
 }
 
 #[derive(Default)]
 struct Inner {
     peer: Mutex<Option<Peer>>,
+    widgets: Mutex<HashMap<u32, WidgetSlots>>,
     next_id: AtomicU64,
     next_generation: AtomicU64,
 }
@@ -127,14 +181,96 @@ impl Server {
             pending.lock().unwrap().remove(&id);
             return SendResult::Dropped;
         }
-        match rx.recv_timeout(timeout) {
-            Ok(()) => SendResult::Acked,
-            Err(RecvTimeoutError::Timeout) => {
-                pending.lock().unwrap().remove(&id);
-                SendResult::Timeout
-            }
-            Err(RecvTimeoutError::Disconnected) => SendResult::Dropped,
+        wait_ack(&rx, &pending, id, timeout)
+    }
+}
+
+impl Server {
+    /// Copies `b` into a free shared-memory slot of its widget (the only CPU copy), tells the
+    /// layer, and waits for the ack. Returns `Dropped` at once when no layer is connected, the
+    /// format is unsupported, or all of the widget's slots are busy.
+    pub fn send_bitmap(&self, b: &Bitmap<'_>, timeout: Duration) -> SendResult {
+        let Some(drm_fourcc) = fourcc_for(b.pixel_format) else {
+            return SendResult::Dropped;
+        };
+        let size = b.stride as usize * b.height as usize;
+        if b.data.len() < size || (b.stride as u64) < b.width as u64 * 4 {
+            return SendResult::Dropped;
         }
+        let (writer, pending, registered) = match &*self.inner.peer.lock().unwrap() {
+            Some(p) => (p.writer.clone(), p.pending.clone(), p.registered.clone()),
+            None => return SendResult::Dropped,
+        };
+
+        let (slot, file) = {
+            let mut widgets = self.inner.widgets.lock().unwrap();
+            let resized = widgets.get(&b.widget).is_none_or(|w| !w.matches(b, drm_fourcc));
+            if resized {
+                if widgets.get(&b.widget).is_some_and(|w| w.slots.iter().any(|s| s.busy)) {
+                    return SendResult::Dropped;
+                }
+                let Ok(fresh) = WidgetSlots::new(b.width, b.height, b.stride, drm_fourcc) else {
+                    return SendResult::Dropped;
+                };
+                widgets.insert(b.widget, fresh);
+                registered.lock().unwrap().retain(|&(w, _)| w != b.widget);
+            }
+            let w = widgets.get_mut(&b.widget).expect("inserted above");
+            let Some(slot) = w.slots.iter().position(|s| !s.busy) else {
+                return SendResult::Dropped;
+            };
+            let Ok(file) = w.slots[slot].file.try_clone() else {
+                return SendResult::Dropped;
+            };
+            w.slots[slot].busy = true;
+            (slot as u32, file)
+        };
+
+        let result = (|| {
+            file.write_all_at(&b.data[..size], 0).map_err(|_| SendResult::Dropped)?;
+            let first_use = registered.lock().unwrap().insert((b.widget, slot));
+            let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+            let (tx, rx) = mpsc::channel();
+            pending.lock().unwrap().insert(id, tx);
+            let sent = {
+                let w = writer.lock().unwrap();
+                let slot_msg = Msg::Slot {
+                    widget: b.widget,
+                    slot,
+                    width: b.width,
+                    height: b.height,
+                    stride: b.stride,
+                    drm_fourcc,
+                };
+                (!first_use || send(&w, &slot_msg, &[file.as_fd()]).is_ok())
+                    && send(&w, &Msg::FrameShm { id, widget: b.widget, slot, x: b.x, y: b.y }, &[]).is_ok()
+            };
+            if !sent {
+                pending.lock().unwrap().remove(&id);
+                registered.lock().unwrap().remove(&(b.widget, slot));
+                return Err(SendResult::Dropped);
+            }
+            Ok(wait_ack(&rx, &pending, id, timeout))
+        })()
+        .unwrap_or_else(|e| e);
+
+        if let Some(w) = self.inner.widgets.lock().unwrap().get_mut(&b.widget)
+            && let Some(s) = w.slots.get_mut(slot as usize)
+        {
+            s.busy = false;
+        }
+        result
+    }
+}
+
+fn wait_ack(rx: &mpsc::Receiver<()>, pending: &Pending, id: u64, timeout: Duration) -> SendResult {
+    match rx.recv_timeout(timeout) {
+        Ok(()) => SendResult::Acked,
+        Err(RecvTimeoutError::Timeout) => {
+            pending.lock().unwrap().remove(&id);
+            SendResult::Timeout
+        }
+        Err(RecvTimeoutError::Disconnected) => SendResult::Dropped,
     }
 }
 
@@ -148,6 +284,7 @@ fn accept_loop(listener: UnixListener, inner: Arc<Inner>) {
             generation,
             writer: Arc::new(Mutex::new(stream)),
             pending: pending.clone(),
+            registered: Arc::default(),
         });
         if let Some(old) = previous {
             let _ = old.writer.lock().unwrap().shutdown(std::net::Shutdown::Both);
