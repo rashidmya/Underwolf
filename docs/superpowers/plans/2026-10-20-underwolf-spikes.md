@@ -357,3 +357,56 @@ Also `summary(5.0)` must drop frames whose cumulative time is ≤ 5 s (test: 100
 - [ ] **Step 1: Write the summary.** It has one line per spike and platform: verdict, chosen mechanism, and a link to the findings doc. Below that, a "Decisions needed from owner" list collected from every findings doc (at minimum: the reader access method; any compositor-dependent input behavior; whether AMD verification has been done; Proton-version fragility of the input mechanism). Below that, the proposed order of the milestone 1 plans.
 - [ ] **Step 2: Commit.** `git commit -m "docs: spike summary"`
 - [ ] **Step 3: Hand the summary to the owner for review** before any milestone plan is written.
+
+---
+
+## Amendment A (2026-10-20): CPU copy for widget frames (owner decision)
+
+**Why:** On NVIDIA 615, Electron 44/45 shared-texture frames are empty (evidence in
+`docs/spikes/02-shared-texture.md`). The owner chose to **allow a CPU copy for widget frames**.
+This replaces the GPU shared-texture leg in Tasks 4–5. The dmabuf code and its tests stay (they
+are needed for AMD/Windows later), but the host no longer uses them.
+
+**Design:**
+- **Host:** Electron CPU offscreen rendering (`webPreferences.offscreen: true`) with **default
+  Chromium switches**, so the GPU sandbox is back on. The `paint` event's `NativeImage` gives a
+  BGRA, premultiplied bitmap.
+- **Shared memory:** each widget has 3 shared-memory slots (memfd, size `stride × height` rounded
+  up to 4096). The host copies the bitmap into a free slot: this is the only CPU copy. A slot is
+  busy from send until ack or timeout. If no slot is free, the frame is dropped without sending.
+- **Layer:** imports each slot's mapping as a `VkBuffer` via `VK_EXT_external_memory_host`
+  (supported on this GPU, alignment 0x1000), so the GPU reads straight from the shared pages.
+  Each present, for every widget with a new frame, it records `vkCmdCopyBufferToImage` slot →
+  layer-owned widget image, then draws a textured quad. It acks a frame once that submission's
+  fence has signalled (polled without blocking at each present).
+
+**ipc additions (Task 4):**
+```rust
+Msg::Slot { widget: u32, slot: u32, width: u32, height: u32, stride: u32, drm_fourcc: u32 } // host → layer, 1 memfd attached; sent once per slot per peer (and again if the size changes)
+Msg::FrameShm { id: u64, widget: u32, slot: u32, x: i32, y: i32 }                       // host → layer, no fds
+```
+
+**Bridge (Task 4):** `Server::send_bitmap(&self, b: &Bitmap, timeout) -> SendResult` with
+`Bitmap { widget, x, y, width, height, stride, pixel_format, data: &[u8] }`. JS:
+`sendBitmap({ widget, x, y, width, height, stride, pixelFormat, data: Buffer }): Promise<'acked'|'dropped'|'timeout'>`.
+The copy into the slot happens synchronously in the call; only the ack wait is async.
+
+**Revised Task 4, Steps 6a–6c:**
+- 6a. Failing bridge tests: `send_bitmap_registers_slot_once_per_peer` (two sends → exactly one
+  `Slot` for that slot index, then `FrameShm`s); `send_bitmap_memfd_contains_pixels` (the peer
+  mmaps the received memfd and reads back the exact bytes sent); `send_bitmap_drops_when_all_slots_busy`
+  (3 unacked sends with long timeouts in flight → the 4th returns `Dropped` immediately);
+  `send_bitmap_drops_without_peer`. Then implement, then green.
+- 6b. Host switches to CPU offscreen rendering with default Chromium switches. The consumer handles
+  `Slot` + `FrameShm`, mmaps the slot, prints the center pixel as `RRGGBBAA` and acks.
+- 6c. End-to-end check (same command as Step 6) → consumer prints `ff0080ff`.
+
+**Revised Task 5:** as written, except the import is the memfd/host-pointer path above, and
+`QuadSource::Image(vk::ImageView)` samples the layer-owned widget image. The benchmark runs the
+3-widget load in two scenarios:
+- CPU-bound: the default Hideout run.
+- GPU-bound: raise graphics settings and render resolution until FPS drops and varies between
+  runs.
+
+Both must `PASS`. Also record the host's CPU time per widget frame (copy + readback) from a
+`performance.now()` timer around the slot copy.
