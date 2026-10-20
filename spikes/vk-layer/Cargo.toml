@@ -13,3 +13,5 @@ crate-type = ["cdylib"]
 ash = "0.38"
 libc = "0.2"
 uw-spike-common = { path = "../common" }
+uw-spike-dmabuf = { path = "../dmabuf" }
+uw-spike-ipc = { path = "../ipc" }

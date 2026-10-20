@@ -6,6 +6,9 @@
 #
 #   usage: ab.sh <modeA> <modeB> [runs=3] [secs=60]
 #   e.g.:  ab.sh passthrough quad
+#
+# B_HOST_CMD: if set, this command (e.g. the Electron widget host) is started for each B run and
+# stopped after it, so A measures "no overlay at all" and B the full overlay cost.
 set -euo pipefail
 
 a=${1:?modeA}; b=${2:?modeB}; runs=${3:-3}; secs=${4:-60}
@@ -25,11 +28,26 @@ echo "target pid: $pid"
 before=$(mktemp)
 ls "$dir"/frames-"$pid"-*.csv | sort > "$before"
 
+host_pid=""
+stop_host() {
+    if [ -n "$host_pid" ]; then
+        kill -- "-$host_pid" 2>/dev/null || true
+        wait "$host_pid" 2>/dev/null || true
+        host_pid=""
+    fi
+}
+trap stop_host EXIT
+
 for i in $(seq 1 "$runs"); do
     for m in "$a" "$b"; do
+        if [ "$m" = "$b" ] && [ -n "${B_HOST_CMD:-}" ]; then
+            setsid bash -c "$B_HOST_CMD" > /dev/null 2>&1 &
+            host_pid=$!
+        fi
         echo "$m" > "$dir/control"
-        echo "run $i/$runs: $m (${secs}s + 5s warm-up)"
+        echo "run $i/$runs: $m (${secs}s + 5s warm-up)${host_pid:+ with host}"
         sleep $((secs + 5))
+        stop_host
     done
 done
 sleep 2  # let the last second flush

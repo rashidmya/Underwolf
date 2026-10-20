@@ -1,6 +1,8 @@
 //! `VK_LAYER_UNDERWOLF_spike`: Vulkan implicit layer for the Underwolf spikes.
 //! Read/draw-only: it never touches game memory or game logic.
 
+mod client;
+mod compositor;
 mod config;
 mod dispatch;
 mod hooks;

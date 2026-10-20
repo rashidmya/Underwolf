@@ -1,18 +1,26 @@
 //! Draws overlay quads onto a swapchain image right before present.
 //! One `Overlay` per swapchain; per-image framebuffer, command buffer, fence and semaphore.
 
+use std::collections::HashMap;
 use std::ffi::c_void;
 
 use ash::vk;
 
+use crate::client::{self, AckQueue};
+use crate::compositor::Upload;
 use crate::loader_abi::PfnSetDeviceLoaderData;
 
 const VERT_SPV: &[u8] = include_bytes!("../shaders/quad.vert.spv");
 const FRAG_SPV: &[u8] = include_bytes!("../shaders/quad.frag.spv");
+const TEX_FRAG_SPV: &[u8] = include_bytes!("../shaders/tex.frag.spv");
+const MAX_WIDGETS: u32 = 32;
 
+#[derive(Clone, Copy)]
 pub enum QuadSource {
     /// Premultiplied RGBA.
     Solid([f32; 4]),
+    /// A widget image (premultiplied), sampled through `view`.
+    Image { widget: u32, view: vk::ImageView, sampler: vk::Sampler },
 }
 
 pub struct Quad {
@@ -48,12 +56,20 @@ struct Frame {
 pub struct Overlay {
     device: ash::Device,
     set_loader_data: PfnSetDeviceLoaderData,
+    format: vk::Format,
     extent: vk::Extent2D,
     render_pass: vk::RenderPass,
+    set_layout: Option<vk::DescriptorSetLayout>,
     layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
+    /// Samples widget images; only when the device has a compositor.
+    tex_pipeline: vk::Pipeline,
+    descriptor_pool: vk::DescriptorPool,
+    /// Widget id → its descriptor set and the view it currently points at.
+    sets: HashMap<u32, (vk::DescriptorSet, vk::ImageView)>,
     frames: Vec<Frame>,
     pool: Option<(u32, vk::CommandPool)>,
+    acks: AckQueue,
 }
 
 impl Overlay {
@@ -66,22 +82,40 @@ impl Overlay {
         format: vk::Format,
         extent: vk::Extent2D,
         images: &[vk::Image],
+        set_layout: Option<vk::DescriptorSetLayout>,
     ) -> Result<Self, vk::Result> {
         let mut o = Overlay {
             device,
             set_loader_data,
+            format,
             extent,
             render_pass: vk::RenderPass::null(),
+            set_layout,
             layout: vk::PipelineLayout::null(),
             pipeline: vk::Pipeline::null(),
+            tex_pipeline: vk::Pipeline::null(),
+            descriptor_pool: vk::DescriptorPool::null(),
+            sets: HashMap::new(),
             frames: Vec::new(),
             pool: None,
+            acks: AckQueue::default(),
         };
         // On error, `Drop` releases whatever was created so far.
         unsafe {
             o.render_pass = o.create_render_pass(format)?;
             o.layout = o.create_layout()?;
-            o.pipeline = o.create_pipeline()?;
+            o.pipeline = o.create_pipeline(FRAG_SPV)?;
+            if set_layout.is_some() {
+                o.tex_pipeline = o.create_pipeline(TEX_FRAG_SPV)?;
+                let sizes = [vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                    descriptor_count: MAX_WIDGETS,
+                }];
+                o.descriptor_pool = o.device.create_descriptor_pool(
+                    &vk::DescriptorPoolCreateInfo::default().max_sets(MAX_WIDGETS).pool_sizes(&sizes),
+                    None,
+                )?;
+            }
             for &image in images {
                 let frame = o.create_frame(image, format)?;
                 o.frames.push(frame);
@@ -126,7 +160,8 @@ impl Overlay {
             offset: 0,
             size: size_of::<Push>() as u32,
         }];
-        let info = vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&ranges);
+        let set_layouts: Vec<_> = self.set_layout.into_iter().collect();
+        let info = vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&ranges).set_layouts(&set_layouts);
         unsafe { self.device.create_pipeline_layout(&info, None) }
     }
 
@@ -136,10 +171,10 @@ impl Overlay {
         unsafe { self.device.create_shader_module(&info, None) }
     }
 
-    unsafe fn create_pipeline(&self) -> Result<vk::Pipeline, vk::Result> {
+    unsafe fn create_pipeline(&self, frag_spv: &[u8]) -> Result<vk::Pipeline, vk::Result> {
         unsafe {
             let vert = self.shader(VERT_SPV)?;
-            let frag = match self.shader(FRAG_SPV) {
+            let frag = match self.shader(frag_spv) {
                 Ok(f) => f,
                 Err(e) => {
                     self.device.destroy_shader_module(vert, None);
@@ -260,11 +295,65 @@ impl Overlay {
         Ok(())
     }
 
-    /// Records and submits the overlay draw for `image_index`. The submission waits on
-    /// `wait` and signals the returned semaphore, which the real present must wait on.
+    pub fn format(&self) -> vk::Format {
+        self.format
+    }
+
+    /// Acks frames whose GPU copies have finished (non-blocking fence poll).
+    unsafe fn release_completed(&mut self) {
+        for (i, f) in self.frames.iter().enumerate() {
+            if unsafe { self.device.get_fence_status(f.fence) } == Ok(true) {
+                let done = self.acks.complete(i);
+                if !done.is_empty() {
+                    client::ack(done);
+                }
+            }
+        }
+    }
+
+    /// The descriptor set sampling `view` for `widget`, created or re-pointed as needed.
+    /// Views only change after the compositor waited for the device to go idle.
+    unsafe fn widget_set(&mut self, widget: u32, view: vk::ImageView, sampler: vk::Sampler) -> Option<vk::DescriptorSet> {
+        let set_layout = self.set_layout?;
+        unsafe {
+            let set = match self.sets.get(&widget) {
+                Some(&(set, current)) if current == view => return Some(set),
+                Some(&(set, _)) => set,
+                None => {
+                    let layouts = [set_layout];
+                    self.device
+                        .allocate_descriptor_sets(
+                            &vk::DescriptorSetAllocateInfo::default()
+                                .descriptor_pool(self.descriptor_pool)
+                                .set_layouts(&layouts),
+                        )
+                        .ok()?[0]
+                }
+            };
+            let image_info = [vk::DescriptorImageInfo {
+                sampler,
+                image_view: view,
+                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            }];
+            let write = vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&image_info);
+            self.device.update_descriptor_sets(&[write], &[]);
+            self.sets.insert(widget, (set, view));
+            Some(set)
+        }
+    }
+
+    /// Records and submits the overlay draw for `image_index`: first the widget `uploads`
+    /// (shared memory → widget images), then `quads`. The submission waits on `wait` and
+    /// signals the returned semaphore, which the real present must wait on. `acks` are sent to
+    /// the host once this submission has completed.
     ///
     /// # Safety
     /// `queue` must support graphics and belong to queue family `family` on this device.
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn draw(
         &mut self,
         queue: vk::Queue,
@@ -272,17 +361,40 @@ impl Overlay {
         image_index: u32,
         wait: &[vk::Semaphore],
         quads: &[Quad],
+        uploads: &[Upload],
+        acks: Vec<u64>,
     ) -> Result<vk::Semaphore, vk::Result> {
         unsafe {
             self.ensure_pool(family)?;
-            let frame = self.frames.get(image_index as usize).ok_or(vk::Result::ERROR_UNKNOWN)?;
+            self.release_completed();
+            let index = image_index as usize;
+            let fence = self.frames.get(index).ok_or(vk::Result::ERROR_UNKNOWN)?.fence;
+            self.device.wait_for_fences(&[fence], true, u64::MAX)?;
+            let done = self.acks.complete(index);
+            if !done.is_empty() {
+                client::ack(done);
+            }
+            let mut resolved = Vec::with_capacity(quads.len());
+            for q in quads {
+                let set = match q.source {
+                    QuadSource::Solid(_) => None,
+                    QuadSource::Image { widget, view, sampler } => match self.widget_set(widget, view, sampler) {
+                        Some(set) => Some(set),
+                        None => continue,
+                    },
+                };
+                resolved.push((q, set));
+            }
+            let frame = &self.frames[index];
             let d = &self.device;
-            d.wait_for_fences(&[frame.fence], true, u64::MAX)?;
             d.reset_command_buffer(frame.cmd, vk::CommandBufferResetFlags::empty())?;
             d.begin_command_buffer(
                 frame.cmd,
                 &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )?;
+            for u in uploads {
+                record_upload(d, frame.cmd, u);
+            }
             let area = vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: self.extent };
             d.cmd_begin_render_pass(
                 frame.cmd,
@@ -302,10 +414,27 @@ impl Overlay {
             };
             d.cmd_set_viewport(frame.cmd, 0, &[viewport]);
             d.cmd_set_scissor(frame.cmd, 0, &[area]);
-            d.cmd_bind_pipeline(frame.cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
             let extent = (self.extent.width, self.extent.height);
-            for q in quads {
-                let QuadSource::Solid(color) = q.source;
+            for (q, set) in resolved {
+                let color = match (q.source, set) {
+                    (QuadSource::Solid(color), _) => {
+                        d.cmd_bind_pipeline(frame.cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+                        color
+                    }
+                    (QuadSource::Image { .. }, Some(set)) => {
+                        d.cmd_bind_pipeline(frame.cmd, vk::PipelineBindPoint::GRAPHICS, self.tex_pipeline);
+                        d.cmd_bind_descriptor_sets(
+                            frame.cmd,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            self.layout,
+                            0,
+                            &[set],
+                            &[],
+                        );
+                        [0.0; 4]
+                    }
+                    (QuadSource::Image { .. }, None) => continue,
+                };
                 let push = Push { rect: quad_ndc(q.x, q.y, q.w, q.h, extent), color };
                 let bytes = std::slice::from_raw_parts((&push as *const Push).cast::<u8>(), size_of::<Push>());
                 d.cmd_push_constants(
@@ -330,8 +459,83 @@ impl Overlay {
                 .signal_semaphores(&signal);
             d.reset_fences(&[frame.fence])?;
             d.queue_submit(queue, &[submit], frame.fence)?;
-            Ok(frame.semaphore)
+            let semaphore = frame.semaphore;
+            self.acks.attach(index, acks);
+            Ok(semaphore)
         }
+    }
+}
+
+const COLOR_RANGE: vk::ImageSubresourceRange = vk::ImageSubresourceRange {
+    aspect_mask: vk::ImageAspectFlags::COLOR,
+    base_mip_level: 0,
+    level_count: 1,
+    base_array_layer: 0,
+    layer_count: 1,
+};
+
+/// Shared-memory buffer → widget image, leaving the image ready for sampling.
+unsafe fn record_upload(d: &ash::Device, cmd: vk::CommandBuffer, u: &Upload) {
+    let image_barrier = |old, new, src_access, dst_access| {
+        vk::ImageMemoryBarrier::default()
+            .src_access_mask(src_access)
+            .dst_access_mask(dst_access)
+            .old_layout(old)
+            .new_layout(new)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(u.image)
+            .subresource_range(COLOR_RANGE)
+    };
+    let old = if u.first { vk::ImageLayout::UNDEFINED } else { vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL };
+    unsafe {
+        d.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[image_barrier(
+                old,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::AccessFlags::SHADER_READ,
+                vk::AccessFlags::TRANSFER_WRITE,
+            )],
+        );
+        d.cmd_copy_buffer_to_image(
+            cmd,
+            u.buffer,
+            u.image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &[vk::BufferImageCopy {
+                buffer_offset: 0,
+                buffer_row_length: u.stride / 4,
+                buffer_image_height: 0,
+                image_subresource: vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+                image_offset: vk::Offset3D::default(),
+                image_extent: vk::Extent3D { width: u.width, height: u.height, depth: 1 },
+            }],
+        );
+        d.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[image_barrier(
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::AccessFlags::TRANSFER_WRITE,
+                vk::AccessFlags::SHADER_READ,
+            )],
+        );
     }
 }
 
@@ -349,6 +553,8 @@ impl Drop for Overlay {
             if let Some((_, pool)) = self.pool.take() {
                 d.destroy_command_pool(pool, None);
             }
+            d.destroy_descriptor_pool(self.descriptor_pool, None);
+            d.destroy_pipeline(self.tex_pipeline, None);
             d.destroy_pipeline(self.pipeline, None);
             d.destroy_pipeline_layout(self.layout, None);
             d.destroy_render_pass(self.render_pass, None);

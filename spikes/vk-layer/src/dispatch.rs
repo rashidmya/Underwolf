@@ -44,6 +44,8 @@ pub struct DeviceData {
     pub queue_present: Option<vk::PFN_vkQueuePresentKHR>,
     /// Queue handle (raw) → queue family index.
     pub queue_families: Mutex<HashMap<u64, u32>>,
+    /// Widget compositing state; only in the target process when host-memory import works.
+    pub compositor: Mutex<Option<crate::compositor::Compositor>>,
 }
 
 static INSTANCES: LazyLock<RwLock<HashMap<usize, Arc<InstanceData>>>> = LazyLock::new(Default::default);

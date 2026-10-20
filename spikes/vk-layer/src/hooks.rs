@@ -7,6 +7,8 @@ use std::sync::{LazyLock, Mutex};
 
 use ash::vk::{self, Handle};
 
+use crate::client;
+use crate::compositor::{Compositor, Upload, widget_view_format};
 use crate::config::{IS_TARGET, Mode, current_mode};
 use crate::dispatch::{self, DeviceData, InstanceData, cast, key};
 use crate::loader_abi::{find_device_link, find_device_loader_data, find_instance_link};
@@ -92,7 +94,20 @@ pub unsafe extern "system" fn create_instance(
         else {
             return vk::Result::ERROR_INITIALIZATION_FAILED;
         };
-        let r = next_create(ci, alloc, out);
+        // External memory on a Vulkan 1.0 instance needs these instance extensions (core in 1.1).
+        let mut patched = *ci;
+        let ext_ptrs: Vec<*const c_char>;
+        let api = (*ci).p_application_info.as_ref().map_or(vk::API_VERSION_1_0, |a| a.api_version);
+        if *IS_TARGET && api < vk::API_VERSION_1_1 {
+            let existing: Vec<*const c_char> =
+                std::slice::from_raw_parts((*ci).pp_enabled_extension_names, (*ci).enabled_extension_count as usize).to_vec();
+            let has = |n: &CStr| existing.iter().any(|&p| CStr::from_ptr(p) == n);
+            let extra = [ash::khr::external_memory_capabilities::NAME, ash::khr::get_physical_device_properties2::NAME];
+            ext_ptrs = existing.iter().copied().chain(extra.iter().filter(|e| !has(e)).map(|e| e.as_ptr())).collect();
+            patched.enabled_extension_count = ext_ptrs.len() as u32;
+            patched.pp_enabled_extension_names = ext_ptrs.as_ptr();
+        }
+        let r = next_create(&patched, alloc, out);
         if r != vk::Result::SUCCESS {
             return r;
         }
@@ -139,7 +154,17 @@ pub unsafe extern "system" fn create_device(
         else {
             return vk::Result::ERROR_INITIALIZATION_FAILED;
         };
-        let r = next_create(physical_device, ci, alloc, out);
+        // In the target, also enable host-memory import for widget frames when supported.
+        let host_import_exts = if *IS_TARGET { host_import_extensions(&inst, physical_device, ci) } else { None };
+        let mut patched = *ci;
+        let ext_ptrs: Vec<*const c_char>;
+        if let Some(extra) = &host_import_exts {
+            let existing = std::slice::from_raw_parts((*ci).pp_enabled_extension_names, (*ci).enabled_extension_count as usize);
+            ext_ptrs = existing.iter().copied().chain(extra.iter().map(|e| e.as_ptr())).collect();
+            patched.enabled_extension_count = ext_ptrs.len() as u32;
+            patched.pp_enabled_extension_names = ext_ptrs.as_ptr();
+        }
+        let r = next_create(physical_device, &patched, alloc, out);
         if r != vk::Result::SUCCESS {
             return r;
         }
@@ -169,8 +194,20 @@ pub unsafe extern "system" fn create_device(
         ) else {
             return vk::Result::ERROR_INITIALIZATION_FAILED;
         };
+        let compositor = if host_import_exts.is_some() {
+            make_compositor(&inst, physical_device, &ash, next_gdpa, device)
+        } else {
+            if *IS_TARGET {
+                log_once!("VK_EXT_external_memory_host unavailable; widgets will not be composited");
+            }
+            None
+        };
+        if *IS_TARGET {
+            client::start();
+        }
         dispatch::insert_device(DeviceData {
             device,
+            compositor: Mutex::new(compositor),
             ash,
             set_loader_data: find_device_loader_data(ci),
             queue_family_props,
@@ -193,7 +230,75 @@ pub unsafe extern "system" fn destroy_device(device: vk::Device, alloc: *const v
         return;
     }
     if let Some(data) = dispatch::remove_device(key(device)) {
+        drop(data.compositor.lock().unwrap().take());
         unsafe { (data.destroy_device)(device, alloc) }
+    }
+}
+
+/// Extensions to append for host-memory import, or `None` if the device can't do it.
+unsafe fn host_import_extensions(
+    inst: &InstanceData,
+    pd: vk::PhysicalDevice,
+    ci: *const vk::DeviceCreateInfo<'_>,
+) -> Option<Vec<&'static CStr>> {
+    unsafe {
+        let enumerate = cast::<vk::PFN_vkEnumerateDeviceExtensionProperties>((inst.gipa)(
+            inst.instance,
+            c"vkEnumerateDeviceExtensionProperties".as_ptr(),
+        ))?;
+        let mut n = 0;
+        enumerate(pd, std::ptr::null(), &mut n, std::ptr::null_mut()).result().ok()?;
+        let mut props = vec![vk::ExtensionProperties::default(); n as usize];
+        enumerate(pd, std::ptr::null(), &mut n, props.as_mut_ptr()).result().ok()?;
+        let supported = |name: &CStr| props.iter().any(|p| p.extension_name_as_c_str() == Ok(name));
+        let enabled: Vec<&CStr> = std::slice::from_raw_parts((*ci).pp_enabled_extension_names, (*ci).enabled_extension_count as usize)
+            .iter()
+            .map(|&p| CStr::from_ptr(p))
+            .collect();
+        let wanted = [ash::khr::external_memory::NAME, ash::ext::external_memory_host::NAME];
+        if !wanted.iter().all(|w| supported(w)) {
+            return None;
+        }
+        Some(wanted.into_iter().filter(|w| !enabled.contains(w)).collect())
+    }
+}
+
+unsafe fn make_compositor(
+    inst: &InstanceData,
+    pd: vk::PhysicalDevice,
+    ash: &ash::Device,
+    gdpa: vk::PFN_vkGetDeviceProcAddr,
+    device: vk::Device,
+) -> Option<Compositor> {
+    unsafe {
+        let mem_props_fn = cast::<vk::PFN_vkGetPhysicalDeviceMemoryProperties>((inst.gipa)(
+            inst.instance,
+            c"vkGetPhysicalDeviceMemoryProperties".as_ptr(),
+        ))?;
+        let mut mem_props = vk::PhysicalDeviceMemoryProperties::default();
+        mem_props_fn(pd, &mut mem_props);
+        let mut align = 4096;
+        if let Some(props2) = cast::<vk::PFN_vkGetPhysicalDeviceProperties2>((inst.gipa)(
+            inst.instance,
+            c"vkGetPhysicalDeviceProperties2".as_ptr(),
+        )) {
+            let mut host = vk::PhysicalDeviceExternalMemoryHostPropertiesEXT::default();
+            let mut p = vk::PhysicalDeviceProperties2::default().push_next(&mut host);
+            props2(pd, &mut p);
+            if host.min_imported_host_pointer_alignment > 0 {
+                align = host.min_imported_host_pointer_alignment;
+            }
+        }
+        let host_fns = ash::ext::external_memory_host::DeviceFn::load(|name| {
+            gdpa(device, name.as_ptr()).map_or(std::ptr::null(), |f| f as *const c_void)
+        });
+        match Compositor::new(ash.clone(), host_fns, mem_props, align) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                log_once!("compositor setup failed: {e:?}");
+                None
+            }
+        }
     }
 }
 
@@ -247,6 +352,8 @@ pub unsafe extern "system" fn create_swapchain(
         if r != vk::Result::SUCCESS {
             return r;
         }
+        client::swapchain(info.image_extent.width, info.image_extent.height);
+        log_once!("target swapchain format {:?}, {}x{}", info.image_format, info.image_extent.width, info.image_extent.height);
         match make_overlay(&d, *out, &info) {
             Ok(o) => {
                 OVERLAYS.lock().unwrap().insert((*out).as_raw(), o);
@@ -270,7 +377,8 @@ unsafe fn make_overlay(
         let mut images = vec![vk::Image::null(); n as usize];
         get_images(d.device, swapchain, &mut n, images.as_mut_ptr()).result()?;
         images.truncate(n as usize);
-        Overlay::new(d.ash.clone(), set_loader_data, info.image_format, info.image_extent, &images)
+        let set_layout = d.compositor.lock().unwrap().as_ref().map(|c| c.set_layout);
+        Overlay::new(d.ash.clone(), set_loader_data, info.image_format, info.image_extent, &images, set_layout)
     }
 }
 
@@ -286,10 +394,98 @@ pub unsafe extern "system" fn destroy_swapchain(
     }
 }
 
-fn quads() -> Vec<Quad> {
+/// Widget frames that arrived since the last present: uploads to record, quads to draw and
+/// frame ids to ack after the GPU copy. Outside composite mode frames are acked right away.
+struct WidgetWork {
+    uploads: Vec<Upload>,
+    acks: Vec<u64>,
+}
+
+unsafe fn collect_widget_work(d: &DeviceData) -> WidgetWork {
+    let frames = client::take_frames();
+    let mut work = WidgetWork { uploads: Vec::new(), acks: Vec::new() };
+    if current_mode() != Mode::Composite {
+        client::ack(frames.iter().map(|f| f.id));
+        return work;
+    }
+    let mut guard = d.compositor.lock().unwrap();
+    let Some(comp) = guard.as_mut() else {
+        client::ack(frames.iter().map(|f| f.id));
+        return work;
+    };
+    for f in frames {
+        let Some(slot) = client::slot(f.widget, f.slot) else {
+            client::ack([f.id]);
+            continue;
+        };
+        // Widget images are B8G8R8A8; Electron's Linux bitmaps are BGRA.
+        if slot.drm_fourcc != uw_spike_ipc::DRM_FORMAT_ARGB8888 {
+            log_once!("unsupported widget pixel format {:#x}; not drawing", slot.drm_fourcc);
+            client::ack([f.id]);
+            continue;
+        }
+        let buffer = match unsafe { comp.import((f.widget, f.slot), &slot) } {
+            Ok(b) => b,
+            Err(e) => {
+                log_once!("shared-memory import failed: {e:?}");
+                client::ack([f.id]);
+                continue;
+            }
+        };
+        let w = match unsafe { comp.widget(f.widget, slot.width, slot.height) } {
+            Ok(w) => w,
+            Err(e) => {
+                log_once!("widget image creation failed: {e:?}");
+                client::ack([f.id]);
+                continue;
+            }
+        };
+        work.uploads.push(Upload {
+            buffer,
+            image: w.image,
+            width: slot.width,
+            height: slot.height,
+            stride: slot.stride,
+            first: !w.initialized,
+        });
+        w.initialized = true;
+        w.x = f.x;
+        w.y = f.y;
+        work.acks.push(f.id);
+    }
+    work
+}
+
+fn widget_quads(d: &DeviceData, swapchain_format: vk::Format) -> Vec<Quad> {
     match current_mode() {
         Mode::Quad => vec![Quad { x: 100, y: 100, w: 400, h: 300, source: QuadSource::Solid([0.5, 0.0, 0.25, 0.5]) }],
-        _ => Vec::new(),
+        Mode::Composite => {
+            let guard = d.compositor.lock().unwrap();
+            let Some(comp) = guard.as_ref() else { return Vec::new() };
+            let srgb = widget_view_format(swapchain_format) == vk::Format::B8G8R8A8_SRGB;
+            let mut quads: Vec<_> = comp
+                .widgets
+                .iter()
+                .filter(|(_, w)| w.initialized)
+                .map(|(&id, w)| Quad {
+                    x: w.x,
+                    y: w.y,
+                    w: w.width,
+                    h: w.height,
+                    source: QuadSource::Image {
+                        widget: id,
+                        view: if srgb { w.view_srgb } else { w.view_unorm },
+                        sampler: comp.sampler,
+                    },
+                })
+                .collect();
+            quads.sort_by_key(|q| match q.source {
+                QuadSource::Image { widget, .. } => widget,
+                QuadSource::Solid(_) => 0,
+            });
+            quads
+        }
+        Mode::Passthrough => Vec::new(),
     }
 }
 
@@ -298,14 +494,16 @@ fn quads() -> Vec<Quad> {
 unsafe fn draw_overlays(d: &DeviceData, queue: vk::Queue, info: &vk::PresentInfoKHR<'_>) -> Option<vk::Semaphore> {
     let Some(family) = d.queue_family(queue) else {
         log_once!("present queue was not obtained through vkGetDeviceQueue*; not drawing");
+        client::ack(client::take_frames().iter().map(|f| f.id));
         return None;
     };
     if !d.family_supports_graphics(family) {
         log_once!("present queue family {family} has no graphics support; not drawing");
+        client::ack(client::take_frames().iter().map(|f| f.id));
         return None;
     }
-    let quads = quads();
     unsafe {
+        let mut work = Some(collect_widget_work(d));
         let app_waits = if info.wait_semaphore_count == 0 || info.p_wait_semaphores.is_null() {
             &[][..]
         } else {
@@ -317,12 +515,21 @@ unsafe fn draw_overlays(d: &DeviceData, queue: vk::Queue, info: &vk::PresentInfo
         let mut last: Option<vk::Semaphore> = None;
         for (sc, &index) in swapchains.iter().zip(indices) {
             let Some(o) = overlays.get_mut(&sc.as_raw()) else { continue };
+            let quads = widget_quads(d, o.format());
+            // Uploads (and their acks) go with the first overlay drawn this present.
+            let WidgetWork { uploads, acks } = work.take().unwrap_or(WidgetWork { uploads: Vec::new(), acks: Vec::new() });
             let chained = last.map(|s| [s]);
             let wait = chained.as_ref().map_or(app_waits, |s| &s[..]);
-            match o.draw(queue, family, index, wait, &quads) {
+            match o.draw(queue, family, index, wait, &quads, &uploads, acks.clone()) {
                 Ok(s) => last = Some(s),
-                Err(e) => log_once!("overlay draw failed: {e:?}"),
+                Err(e) => {
+                    log_once!("overlay draw failed: {e:?}");
+                    client::ack(acks);
+                }
             }
+        }
+        if let Some(w) = work {
+            client::ack(w.acks);
         }
         last
     }
@@ -336,6 +543,10 @@ pub unsafe extern "system" fn queue_present(queue: vk::Queue, info: *const vk::P
     let Some(next) = d.queue_present else {
         return vk::Result::ERROR_DEVICE_LOST;
     };
+    if *IS_TARGET && current_mode() == Mode::Passthrough {
+        // Keep the host's slots flowing without drawing anything.
+        client::ack(client::take_frames().iter().map(|f| f.id));
+    }
     unsafe {
         if drawing_enabled()
             && let Some(sem) = draw_overlays(&d, queue, &*info)

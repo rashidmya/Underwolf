@@ -520,6 +520,8 @@ dependencies = [
  "ash",
  "libc",
  "uw-spike-common",
+ "uw-spike-dmabuf",
+ "uw-spike-ipc",
 ]
 
 [[package]]
