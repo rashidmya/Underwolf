@@ -410,3 +410,12 @@ The copy into the slot happens synchronously in the call; only the ack wait is a
 
 Both must `PASS`. Also record the host's CPU time per widget frame (copy + readback) from a
 `performance.now()` timer around the slot copy.
+
+---
+
+## Amendment B (2026-10-20): Spike 1 session matrix is Wayland-only (owner decision)
+
+Current GNOME (50+) and KDE Plasma (6.8+, the test machine's version) no longer ship X11
+sessions. Task 7's matrix is now **KDE Wayland** and **GNOME Wayland**; the game runs through
+XWayland in both. The owner installs GNOME on the test machine. The spec's §7a and §8 have been
+updated to match.

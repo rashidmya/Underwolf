@@ -146,13 +146,13 @@ Required for v1:
 ## 7a. Supported environments for v1
 
 - GPUs: NVIDIA (proprietary driver) and AMD (Mesa). Intel best-effort.
-- Linux: KDE Plasma and GNOME, on both X11 and Wayland sessions.
+- Linux: KDE Plasma and GNOME, Wayland sessions (games run through XWayland or native Wayland). *Updated 2026-10-20 (owner): current GNOME (50+) and KDE Plasma (6.8+) no longer offer X11 sessions.*
 - Windows: 10 and 11.
 - Not in v1: Steam Deck / Gamescope session, wlroots-based compositors (best-effort), dual-GPU laptops (best-effort).
 
 ## 8. Technical spikes (do these first; the plan depends on them)
 
-1. **Linux input under Proton.** Prove the overlay can capture mouse/keyboard in edit mode and pass it back to Deadlock afterwards, on X11/XWayland and Wayland sessions.
+1. **Linux input under Proton.** Prove the overlay can capture mouse/keyboard in edit mode and pass it back to Deadlock afterwards, on KDE and GNOME Wayland sessions (the game itself runs through XWayland).
 2. **Shared-texture compositing.** Prove an Electron offscreen-rendered texture can be composited by (a) the Vulkan layer under Proton and on Windows, and (b) the DX11 hook, within the performance target.
 3. **Deadlock live data via read-only memory reading.** Prove the §6.4 features can be read from the game process on Linux (Proton) and Windows, and how robust the approach is across game updates. Output: a feature-by-source table, noting what comes from memory vs. other sources.
 
