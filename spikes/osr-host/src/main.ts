@@ -15,6 +15,7 @@ type SendResult = 'acked' | 'dropped' | 'timeout';
 
 interface Bridge {
   startServer(socketPath: string): void;
+  peerGeneration(): number;
   sendBitmap(b: {
     widget: number;
     x: number;
@@ -71,6 +72,7 @@ function layout(names: string[]): Widget[] {
 const counts: Record<SendResult, number> = { acked: 0, dropped: 0, timeout: 0 };
 let bitmapMs = 0;
 let bitmapFrames = 0;
+const windows: BrowserWindow[] = [];
 
 function startWidget(w: Widget, consumer: boolean) {
   const win = new BrowserWindow({
@@ -81,6 +83,7 @@ function startWidget(w: Widget, consumer: boolean) {
     backgroundColor: '#00000000',
     webPreferences: { offscreen: true },
   });
+  windows.push(win);
   win.webContents.setFrameRate(60);
   win.webContents.on('paint', async (_e, _dirty, image) => {
     const t0 = performance.now();
@@ -111,6 +114,16 @@ app.whenReady().then(() => {
   bridge.startServer(SOCKET);
   console.log(`[osr-host] socket ${SOCKET}; widgets: ${widgets.join(', ')}`);
   for (const w of layout(widgets)) startWidget(w, consumer);
+  // A newly connected layer has none of our frames, and static widgets never repaint by
+  // themselves: repaint everything whenever a new layer connects.
+  let generation = 0;
+  setInterval(() => {
+    const g = bridge.peerGeneration();
+    if (g !== generation) {
+      generation = g;
+      for (const win of windows) win.webContents.invalidate();
+    }
+  }, 250);
   setInterval(() => {
     const avg = bitmapFrames ? (bitmapMs / bitmapFrames).toFixed(3) : '-';
     console.log(`[osr-host] frames ${JSON.stringify(counts)}; toBitmap avg ${avg} ms over ${bitmapFrames}`);

@@ -40,6 +40,12 @@ pub fn start_server(socket_path: String) -> Result<()> {
     SERVER.set(server).map_err(|_| Error::from_reason("server already started"))
 }
 
+/// Changes whenever a new layer connects; the host repaints all widgets when it does.
+#[napi]
+pub fn peer_generation() -> u32 {
+    SERVER.get().map_or(0, |s| s.peer_generation() as u32)
+}
+
 pub struct SendFrameTask(FrameInfo);
 
 impl Task for SendFrameTask {

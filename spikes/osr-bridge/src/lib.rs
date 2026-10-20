@@ -121,6 +121,7 @@ struct Inner {
     widgets: Mutex<HashMap<u32, WidgetSlots>>,
     next_id: AtomicU64,
     next_generation: AtomicU64,
+    connections: AtomicU64,
 }
 
 pub struct Server {
@@ -145,6 +146,12 @@ impl Server {
             .name("uw-bridge-accept".into())
             .spawn(move || accept_loop(listener, accept_inner))?;
         Ok(Server { inner })
+    }
+
+    /// Number of layer connections accepted so far; changes whenever a new layer connects
+    /// (the host then repaints every widget, since the new layer has none of its frames).
+    pub fn peer_generation(&self) -> u64 {
+        self.inner.connections.load(Ordering::Relaxed)
     }
 
     pub fn has_peer(&self) -> bool {
@@ -289,6 +296,7 @@ fn accept_loop(listener: UnixListener, inner: Arc<Inner>) {
         if let Some(old) = previous {
             let _ = old.writer.lock().unwrap().shutdown(std::net::Shutdown::Both);
         }
+        inner.connections.fetch_add(1, Ordering::Relaxed);
         let reader_inner = inner.clone();
         let _ = std::thread::Builder::new()
             .name("uw-bridge-peer".into())

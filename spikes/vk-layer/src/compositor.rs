@@ -65,6 +65,8 @@ pub struct Compositor {
     pub sampler: vk::Sampler,
     imports: HashMap<(u32, u32), Import>,
     pub widgets: HashMap<u32, WidgetImage>,
+    /// `client::connection()` value the widgets belong to.
+    pub connection: u64,
 }
 
 impl Compositor {
@@ -109,6 +111,7 @@ impl Compositor {
                 sampler,
                 imports: HashMap::new(),
                 widgets: HashMap::new(),
+                connection: 0,
             })
         }
     }
@@ -180,6 +183,23 @@ impl Compositor {
                     d.destroy_buffer(buffer, None);
                     Err(e)
                 }
+            }
+        }
+    }
+
+    /// Drops all widgets and imports (the host disconnected or reconnected).
+    pub unsafe fn clear(&mut self) {
+        if self.widgets.is_empty() && self.imports.is_empty() {
+            return;
+        }
+        unsafe {
+            let _ = self.device.device_wait_idle();
+            for (_, w) in std::mem::take(&mut self.widgets) {
+                self.destroy_widget(w);
+            }
+            for (_, i) in self.imports.drain() {
+                self.device.destroy_buffer(i.buffer, None);
+                self.device.free_memory(i.memory, None);
             }
         }
     }
@@ -284,14 +304,7 @@ impl Compositor {
 impl Drop for Compositor {
     fn drop(&mut self) {
         unsafe {
-            let _ = self.device.device_wait_idle();
-            for (_, w) in std::mem::take(&mut self.widgets) {
-                self.destroy_widget(w);
-            }
-            for (_, i) in self.imports.drain() {
-                self.device.destroy_buffer(i.buffer, None);
-                self.device.free_memory(i.memory, None);
-            }
+            self.clear();
             self.device.destroy_sampler(self.sampler, None);
             self.device.destroy_descriptor_set_layout(self.set_layout, None);
         }

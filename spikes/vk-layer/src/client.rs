@@ -19,18 +19,34 @@ pub struct PendingFrame {
     pub slot: u32,
     pub x: i32,
     pub y: i32,
+    /// Already acked (outside composite mode frames are acked at once but kept, because a
+    /// static widget may never send another frame).
+    pub acked: bool,
 }
 
-/// Newest not-yet-drawn frame per widget.
+/// Newest not-yet-uploaded frame per widget.
 #[derive(Default)]
 pub struct Frames {
     pending: HashMap<u32, PendingFrame>,
 }
 
 impl Frames {
-    /// Queues `f`; returns the id of the frame it replaced, which will never be drawn.
-    pub fn on_frame(&mut self, f: PendingFrame) -> Option<u64> {
-        self.pending.insert(f.widget, f).map(|old| old.id)
+    /// Queues `f`; returns the id of the frame it replaced if that one still needs an ack.
+    pub fn on_frame(&mut self, mut f: PendingFrame) -> Option<u64> {
+        f.acked = false;
+        self.pending.insert(f.widget, f).filter(|old| !old.acked).map(|old| old.id)
+    }
+
+    /// Marks every pending frame acked and returns the ids that weren't yet.
+    pub fn ack_pending(&mut self) -> Vec<u64> {
+        self.pending
+            .values_mut()
+            .filter(|f| !f.acked)
+            .map(|f| {
+                f.acked = true;
+                f.id
+            })
+            .collect()
     }
 
     pub fn take(&mut self) -> Vec<PendingFrame> {
@@ -77,6 +93,8 @@ struct Shared {
     next_generation: u64,
     outgoing: Option<Sender<Msg>>,
     swapchain: Option<(u32, u32)>,
+    /// Changes on every connect and disconnect, so the compositor can drop stale widgets.
+    connection: u64,
 }
 
 static SHARED: LazyLock<Mutex<Shared>> = LazyLock::new(Default::default);
@@ -90,6 +108,21 @@ pub fn start() {
 
 pub fn take_frames() -> Vec<PendingFrame> {
     SHARED.lock().unwrap().frames.take()
+}
+
+/// Acks every pending frame but keeps it for a later upload.
+pub fn ack_pending() {
+    let mut shared = SHARED.lock().unwrap();
+    let ids = shared.frames.ack_pending();
+    if let Some(tx) = &shared.outgoing {
+        for id in ids {
+            let _ = tx.send(Msg::Ack { id });
+        }
+    }
+}
+
+pub fn connection() -> u64 {
+    SHARED.lock().unwrap().connection
 }
 
 pub fn slot(widget: u32, slot: u32) -> Option<SlotMap> {
@@ -140,6 +173,7 @@ fn connection_loop() {
                 let _ = tx.send(Msg::Swapchain { width, height });
             }
             shared.outgoing = Some(tx);
+            shared.connection += 1;
         }
         let sender = std::thread::Builder::new().name("uw-spike-send".into()).spawn(move || {
             for msg in rx {
@@ -164,7 +198,7 @@ fn connection_loop() {
                 Msg::FrameShm { id, widget, slot, x, y } => {
                     let mut shared = SHARED.lock().unwrap();
                     let stale = if shared.slots.contains_key(&(widget, slot)) {
-                        shared.frames.on_frame(PendingFrame { id, widget, slot, x, y })
+                        shared.frames.on_frame(PendingFrame { id, widget, slot, x, y, acked: false })
                     } else {
                         Some(id)
                     };
@@ -180,6 +214,7 @@ fn connection_loop() {
 
         let mut shared = SHARED.lock().unwrap();
         shared.outgoing = None;
+        shared.connection += 1;
         shared.frames.take();
         shared.slots.clear();
         drop(shared);
@@ -196,14 +231,34 @@ mod tests {
     #[test]
     fn newer_frame_supersedes_pending_one() {
         let mut s = Frames::default();
-        assert_eq!(s.on_frame(PendingFrame { id: 1, widget: 0, slot: 0, x: 10, y: 20 }), None);
-        assert_eq!(s.on_frame(PendingFrame { id: 2, widget: 1, slot: 0, x: 0, y: 0 }), None);
+        assert_eq!(s.on_frame(PendingFrame { id: 1, widget: 0, slot: 0, x: 10, y: 20, acked: false }), None);
+        assert_eq!(s.on_frame(PendingFrame { id: 2, widget: 1, slot: 0, x: 0, y: 0, acked: false }), None);
         // Widget 0's frame 1 was never drawn; it is returned so it can be acked right away.
-        assert_eq!(s.on_frame(PendingFrame { id: 3, widget: 0, slot: 1, x: 11, y: 21 }), Some(1));
+        assert_eq!(s.on_frame(PendingFrame { id: 3, widget: 0, slot: 1, x: 11, y: 21, acked: false }), Some(1));
         let mut taken = s.take();
         taken.sort_by_key(|f| f.id);
         assert_eq!(taken.iter().map(|f| f.id).collect::<Vec<_>>(), vec![2, 3]);
         assert!(s.take().is_empty());
+    }
+
+    #[test]
+    fn acked_frame_is_kept_until_taken() {
+        let mut s = Frames::default();
+        s.on_frame(PendingFrame { id: 1, widget: 0, slot: 0, x: 0, y: 0, acked: false });
+        assert_eq!(s.ack_pending(), vec![1]);
+        assert!(s.ack_pending().is_empty(), "no double ack");
+        let taken = s.take();
+        assert_eq!(taken.len(), 1);
+        assert!(taken[0].acked);
+    }
+
+    #[test]
+    fn superseding_an_acked_frame_does_not_ack_again() {
+        let mut s = Frames::default();
+        s.on_frame(PendingFrame { id: 1, widget: 0, slot: 0, x: 0, y: 0, acked: false });
+        s.ack_pending();
+        assert_eq!(s.on_frame(PendingFrame { id: 2, widget: 0, slot: 1, x: 0, y: 0, acked: false }), None);
+        assert_eq!(s.take().iter().map(|f| (f.id, f.acked)).collect::<Vec<_>>(), vec![(2, false)]);
     }
 
     #[test]

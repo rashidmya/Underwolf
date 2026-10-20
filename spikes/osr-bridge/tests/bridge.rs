@@ -111,3 +111,17 @@ fn bind_replaces_stale_socket_file() {
     let _client = UnixStream::connect(&path).unwrap();
     wait_until(|| server.has_peer());
 }
+
+#[test]
+fn peer_generation_changes_on_each_connection() {
+    let path = socket_path("f.sock");
+    let server = Server::bind(&path).unwrap();
+    assert_eq!(server.peer_generation(), 0);
+    let a = UnixStream::connect(&path).unwrap();
+    wait_until(|| server.peer_generation() == 1);
+    drop(a);
+    wait_until(|| !server.has_peer());
+    assert_eq!(server.peer_generation(), 1, "disconnect alone doesn't change it");
+    let _b = UnixStream::connect(&path).unwrap();
+    wait_until(|| server.peer_generation() == 2);
+}

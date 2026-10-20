@@ -402,33 +402,43 @@ struct WidgetWork {
 }
 
 unsafe fn collect_widget_work(d: &DeviceData) -> WidgetWork {
-    let frames = client::take_frames();
     let mut work = WidgetWork { uploads: Vec::new(), acks: Vec::new() };
     if current_mode() != Mode::Composite {
-        client::ack(frames.iter().map(|f| f.id));
+        client::ack_pending();
         return work;
     }
     let mut guard = d.compositor.lock().unwrap();
     let Some(comp) = guard.as_mut() else {
-        client::ack(frames.iter().map(|f| f.id));
+        client::ack_pending();
         return work;
     };
-    for f in frames {
-        let Some(slot) = client::slot(f.widget, f.slot) else {
+    // The host went away or reconnected: its widgets are gone.
+    let connection = client::connection();
+    if comp.connection != connection {
+        unsafe { comp.clear() };
+        comp.connection = connection;
+    }
+    let ack_now = |f: &crate::client::PendingFrame| {
+        if !f.acked {
             client::ack([f.id]);
+        }
+    };
+    for f in client::take_frames() {
+        let Some(slot) = client::slot(f.widget, f.slot) else {
+            ack_now(&f);
             continue;
         };
         // Widget images are B8G8R8A8; Electron's Linux bitmaps are BGRA.
         if slot.drm_fourcc != uw_spike_ipc::DRM_FORMAT_ARGB8888 {
             log_once!("unsupported widget pixel format {:#x}; not drawing", slot.drm_fourcc);
-            client::ack([f.id]);
+            ack_now(&f);
             continue;
         }
         let buffer = match unsafe { comp.import((f.widget, f.slot), &slot) } {
             Ok(b) => b,
             Err(e) => {
                 log_once!("shared-memory import failed: {e:?}");
-                client::ack([f.id]);
+                ack_now(&f);
                 continue;
             }
         };
@@ -436,7 +446,7 @@ unsafe fn collect_widget_work(d: &DeviceData) -> WidgetWork {
             Ok(w) => w,
             Err(e) => {
                 log_once!("widget image creation failed: {e:?}");
-                client::ack([f.id]);
+                ack_now(&f);
                 continue;
             }
         };
@@ -451,7 +461,9 @@ unsafe fn collect_widget_work(d: &DeviceData) -> WidgetWork {
         w.initialized = true;
         w.x = f.x;
         w.y = f.y;
-        work.acks.push(f.id);
+        if !f.acked {
+            work.acks.push(f.id);
+        }
     }
     work
 }
@@ -494,12 +506,12 @@ fn widget_quads(d: &DeviceData, swapchain_format: vk::Format) -> Vec<Quad> {
 unsafe fn draw_overlays(d: &DeviceData, queue: vk::Queue, info: &vk::PresentInfoKHR<'_>) -> Option<vk::Semaphore> {
     let Some(family) = d.queue_family(queue) else {
         log_once!("present queue was not obtained through vkGetDeviceQueue*; not drawing");
-        client::ack(client::take_frames().iter().map(|f| f.id));
+        client::ack_pending();
         return None;
     };
     if !d.family_supports_graphics(family) {
         log_once!("present queue family {family} has no graphics support; not drawing");
-        client::ack(client::take_frames().iter().map(|f| f.id));
+        client::ack_pending();
         return None;
     }
     unsafe {
@@ -544,8 +556,8 @@ pub unsafe extern "system" fn queue_present(queue: vk::Queue, info: *const vk::P
         return vk::Result::ERROR_DEVICE_LOST;
     };
     if *IS_TARGET && current_mode() == Mode::Passthrough {
-        // Keep the host's slots flowing without drawing anything.
-        client::ack(client::take_frames().iter().map(|f| f.id));
+        // Keep the host's slots flowing; frames stay queued for when compositing turns on.
+        client::ack_pending();
     }
     unsafe {
         if drawing_enabled()
