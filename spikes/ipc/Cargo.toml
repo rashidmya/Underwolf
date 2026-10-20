@@ -10,5 +10,9 @@ name = "uw_spike_ipc"
 
 [dependencies]
 postcard = { version = "1", features = ["use-std"] }
-rustix = { version = "1", features = ["net", "time"] }  # "time": rustix 1.1.5 fails to build with "net" alone
 serde = { version = "1", features = ["derive"] }
+
+# The Unix-socket transport (SCM_RIGHTS fd passing) is Linux-only. The C3 Win32 hook builds this
+# crate for x86_64-pc-windows-gnu and uses only the portable `write_msg`/`read_msg` over TCP.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["net", "time"] }  # "time": rustix 1.1.5 fails to build with "net" alone

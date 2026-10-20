@@ -3,11 +3,17 @@
 //! Wire format: `u32` LE payload length, then a `postcard` payload. File descriptors travel as
 //! SCM_RIGHTS on the same `sendmsg`, so they arrive with the first byte of their message.
 
-use std::io::{self, IoSlice, IoSliceMut, Read};
+use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::io::{IoSlice, IoSliceMut};
+#[cfg(unix)]
 use std::mem::MaybeUninit;
+#[cfg(unix)]
 use std::os::fd::{BorrowedFd, OwnedFd};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 
+#[cfg(unix)]
 use rustix::net::{
     RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, SendAncillaryBuffer, SendAncillaryMessage, SendFlags,
     recvmsg, sendmsg,
@@ -78,6 +84,34 @@ pub fn window_to_swapchain(p: (f32, f32), window: (u32, u32), swapchain: (u32, u
     (p.0 * swapchain.0 as f32 / window.0 as f32, p.1 * swapchain.1 as f32 / window.1 as f32)
 }
 
+/// Frame a message as a `u32` LE payload length followed by its `postcard` payload into any
+/// writer. The C3 Win32 hook (a Windows PE under Wine) and the host share this over localhost
+/// TCP; only the transport differs from the Unix-socket `send`/`recv` path.
+pub fn write_msg<W: Write>(w: &mut W, m: &Msg) -> io::Result<()> {
+    let payload = postcard::to_stdvec(m).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let len = u32::try_from(payload.len())
+        .ok()
+        .filter(|&n| n <= MAX_PAYLOAD)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "message too large"))?;
+    w.write_all(&len.to_le_bytes())?;
+    w.write_all(&payload)?;
+    Ok(())
+}
+
+/// Read one framed message from any reader. Returns `UnexpectedEof` on a clean peer close.
+pub fn read_msg<R: Read>(r: &mut R) -> io::Result<Msg> {
+    let mut len_buf = [0u8; 4];
+    r.read_exact(&mut len_buf)?;
+    let len = u32::from_le_bytes(len_buf);
+    if len > MAX_PAYLOAD {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("payload too large: {len}")));
+    }
+    let mut payload = vec![0u8; len as usize];
+    r.read_exact(&mut payload)?;
+    postcard::from_bytes(&payload).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+#[cfg(unix)]
 pub fn send(s: &UnixStream, m: &Msg, fds: &[BorrowedFd<'_>]) -> io::Result<()> {
     if fds.len() > MAX_FDS {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "too many fds"));
@@ -101,6 +135,7 @@ pub fn send(s: &UnixStream, m: &Msg, fds: &[BorrowedFd<'_>]) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 pub fn recv(s: &UnixStream) -> io::Result<(Msg, Vec<OwnedFd>)> {
     let mut header = [0u8; 4];
     let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(MAX_FDS))];
