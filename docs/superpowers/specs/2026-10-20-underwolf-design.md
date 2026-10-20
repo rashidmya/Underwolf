@@ -36,7 +36,7 @@ v1 is "done" when all of these are true:
 
 ## 4. Anti-goals (failure even if it technically works)
 
-- **Getting players banned.** Underwolf must never write to game memory or alter game behavior. Anything inside the game process is read/draw-only.
+- **Getting players banned.** Underwolf must never write to game memory or alter game behavior. Anything inside the game process is read/draw-only (drawing, input routing in edit mode, and read-only data collection).
 - **Breaking apps in subtle ways.** Apps must run in the same browser engine family (Chromium) Overwolf uses, so they behave the same.
 - **Hurting game performance noticeably.**
 - **An ugly or confusing UI.**
@@ -99,8 +99,9 @@ v1 is "done" when all of these are true:
   - `game_info`: `phase`, `game_mode`, `match_history`, `steam_id`
   - `match_info`: `team_score`, `match_id`, `roster`, `items`, `incoming_damage`, `match_outcome`
   - events: `match_start`, `match_end`, `kill`, `death`, `assist`, `match_clock`, `game_paused`, `tower_destroyed`
-- **Data source (owner decision): read-only reading of the Deadlock process's memory is the primary source for live, real-time match data.** The 60–90 s delayed community feed does not meet the bar for live tracking. The owner accepts the VAC risk of read-only memory reading. Hard rule: **never write to game memory, never inject code for data collection, never alter game behavior.** Other sources supplement it where they are cleaner: local game outputs (console log, state files) and the community Deadlock API for profile, match history and post-match data.
-- On Linux the reader runs natively and reads the Proton/Wine game process (e.g. `process_vm_readv` / `/proc/<pid>/mem`); on Windows it uses read-only process access. Game updates will move memory layouts, so the provider must be built to be updated quickly (signature/pattern-based offsets, versioned per game build) and must fail safe: if layouts don't match, stop emitting rather than emit wrong data.
+- **Data source (owner decision): read-only reading of the Deadlock process's memory is the primary source for live, real-time match data.** The 60–90 s delayed community feed does not meet the bar for live tracking. The owner accepts the VAC risk of read-only memory reading. Other sources supplement it where they are cleaner: local game outputs (console log, state files) and the community Deadlock API for profile, match history and post-match data.
+- **The reader runs inside the game process (owner decision 2026-10-21, matching Overwolf).** Overwolf's Deadlock provider is a native plugin loaded into the game (`gep_deadlock.dll`, per the owner's research in `~/Dev/underlock`). Underwolf does the same: the data reader is part of the module Underwolf already injects into the game (the C3 input hook on Linux/Proton; the same module on Windows), reads the game's memory from inside, and sends info updates and events to the Underwolf client over the same channel the hook already uses. This replaces the earlier rule against injecting code for data collection. Hard rule, unchanged: **never write to game memory, never call or hook game functions for data, never alter game behavior** — the in-game reader only reads.
+- Game updates will move memory layouts, so the provider must be built to be updated quickly (signature/pattern-based offsets, versioned per game build) and must fail safe: if layouts don't match, stop emitting rather than emit wrong data. A bad read inside the game must never crash it: every read is validated (mapped, bounded) before it is dereferenced.
 - Every feature the provider supports is reported via `getInfo`/feature status so apps can tell what's available; unsupported features are reported as such, not faked.
 - Adding a new game = adding a provider plugin plus a game entry (ID, process detection, renderer). Provider-authoring is documented for the community.
 
@@ -154,7 +155,7 @@ Required for v1:
 
 1. **Linux input under Proton.** Prove the overlay can capture mouse/keyboard in edit mode and pass it back to Deadlock afterwards, on KDE and GNOME Wayland sessions (the game itself runs through XWayland).
 2. **Shared-texture compositing.** Prove an Electron offscreen-rendered texture can be composited by (a) the Vulkan layer under Proton and on Windows, and (b) the DX11 hook, within the performance target.
-3. **Deadlock live data via read-only memory reading.** Prove the §6.4 features can be read from the game process on Linux (Proton) and Windows, and how robust the approach is across game updates. Output: a feature-by-source table, noting what comes from memory vs. other sources.
+3. **Deadlock live data via read-only memory reading.** Prove the §6.4 features can be read from inside the game process (by the injected module) on Linux (Proton) and Windows, and how robust the approach is across game updates. Output: a feature-by-source table, noting what comes from memory vs. other sources.
 
 If a spike fails, stop and bring the finding back to the owner before re-planning. Do not quietly add a windowed fallback or a memory-writing workaround.
 
@@ -163,7 +164,7 @@ If a spike fails, stop and bring the finding back to the owner before re-plannin
 **Made by the owner:**
 - Build a new platform (not reverse-engineering Overwolf), API-compatible with Overwolf, for third-party developers from day one.
 - Linux and Windows. **Linux ships first** (milestone 1: Linux, Vulkan layer); **Windows follows** (milestone 2: Windows Vulkan + DX11 hook, Windows input hooking, signed installer).
-- Deadlock live data comes from read-only game memory reading; owner accepts the VAC risk.
+- Deadlock live data comes from read-only game memory reading, done inside the game by the injected module (as Overwolf does); owner accepts the VAC risk.
 - No Windows code-signing certificate yet; one must be obtained before the Windows release (see §7).
 - Stack: Electron + TypeScript + Rust.
 - Deadlock is the launch game.
