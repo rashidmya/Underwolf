@@ -8,7 +8,9 @@
 
 ## Verdict
 
-In progress.
+**GO — H1′ + C3.** The in-game Win32 input hook passes P1–P6 on both cells (KDE Wayland and GNOME
+Wayland, Proton 11.0, NVIDIA). It is loaded the Overwolf way: the overlay host injects it into the
+running game, with no game-side setup. C1 fails P6; C2 leaks the mouse.
 
 ## Evidence
 
@@ -91,7 +93,7 @@ the game runs through XWayland in both).
 | Cell | P1 | P2 | P3 | P4 | P5 | P6 | Notes |
 |---|---|---|---|---|---|---|---|
 | KDE Wayland | PASS | PASS | PASS | PASS | PASS | PASS | Run 2, 2026-10-21, Proton 11.0; hook injected by the host, no game-side setup |
-| GNOME Wayland | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | |
+| GNOME Wayland | PASS | PASS | PASS | PASS | PASS | PASS | Run 3, 2026-10-21, GNOME 51.1, Proton 11.0; 26 enter cycles; hook injected by the host |
 
 **Build and load (for the hardware run).**
 1. Install the mingw linker: `sudo pacman -S mingw-w64-gcc` (the `x86_64-pc-windows-gnu` Rust target
@@ -184,20 +186,47 @@ layer's C2 running alongside, not a hook bug); P6 never minimized, paused or los
 
 ## Mechanism chosen
 
-Pending the C3 hardware run. If C3 passes all cells it is the chosen capture mechanism (it also
-matches the Windows plan); its hotkey is self-contained, so no separate H candidate is needed.
+- **Hotkey and capture: C3.** The hook owns Ctrl+Tab itself (rising edge, `WndProc` keyboard), so no
+  separate H candidate is needed. Keyboard: `WndProc` subclass of the game window. Mouse: IAT hooks
+  of `GetRawInputData`/`GetRawInputBuffer` in every loaded module (Deadlock: `SDL3.dll`). Same
+  mechanism as the Windows plan.
+- **Loading: runtime injection** (`spikes/inject`): host → `uw-spike-inject` (Linux) → Proton's
+  `wine` joins the game's session → `uw-spike-inject-win.exe` → remote `LoadLibraryW`.
+- **Transport:** hook → host over localhost TCP; host → layer over the Unix socket (cursor, edit mode).
+
+**Packaging implications.** No group membership, no root, no launch option and no files in the
+game folder or prefix. Underwolf ships three extra artifacts for Linux: the hook DLL and the
+injector `.exe` (cross-built with mingw), and the Linux launcher. The Vulkan layer still installs
+as a user implicit layer. The spike's `UW_SPIKE_*` launch options only select test modes; the
+product needs a runtime switch instead.
+
+**Dependence on Wine/Proton internals (break risk across Proton versions).**
+- Joining the session from outside: depends on Wine's wineserver socket layout
+  (`/tmp/.wine-<uid>/server-<dev>-<ino>`), the pressure-vessel container sharing `/tmp` and the
+  PID namespace with the host, and copying the right `WINE*SYNC` settings. Medium risk; the
+  launcher refuses to run (rather than misbehave) if the session can't be found.
+- Injection itself: standard Win32 (`VirtualAllocEx`/`WriteProcessMemory`/`CreateRemoteThread`),
+  well supported by Wine. Low risk.
+- The hook: `WndProc` subclassing, `WM_KEY*` keyboard delivery, and SDL3 reading the mouse through
+  statically imported `GetRawInputBuffer`. Low risk from Proton; moderate risk from game updates
+  (an SDL change to dynamic resolution or raw keyboard would need an inline detour / raw keyboard
+  handling).
 
 ## Risks
 
-Per-candidate risks are listed above. For the chosen C3 path the top risks are the raw-input
-assumptions (keyboard via `WM_KEY*`; `GetRawInputData` statically imported) and the DLL load method
-under Proton — all resolved by the hardware run.
+Per-candidate risks are listed above. For C3: keyboard assumed legacy `WM_KEY*` (a game enabling
+SDL raw keyboard would bypass the gate); raw-input functions assumed statically imported; joining
+the game's Wine session from outside depends on container/wineserver details (see above); VAC
+(spec §3: injection is what Overwolf/Discord/OBS do, input path only). Known gap: if the host
+restarts while the game runs, the hook's sender has exited and re-injection is a no-op — the hook
+must reconnect in milestone 1.
 
 ## Not tested and why
 
-- **The whole C3 P1–P6 matrix** on both sessions: needs Deadlock under Proton on the test machine
-  and a GNOME session; the `cfg(windows)` hook can't run in CI (no Wine/Proton, and the DLL needs
-  mingw to link). Owner runs it.
+- **The `cfg(windows)` hook in CI**: needs a game window and real input; covered by the owner's
+  in-game runs. Injection itself is covered by `spikes/inject/tests/wine_e2e.rs` (ignored; needs Proton).
+- **Other Proton versions** (only 11.0) and **Proton's Wayland driver** (`winewayland`; the game ran
+  through XWayland in both cells).
 - **AMD/Mesa**: only the NVIDIA machine is available (shared with Spike 2).
 - C1 on GNOME (C1 already fails P6 on KDE); C2 on GNOME (C2 leaks the mouse on KDE).
 
@@ -206,7 +235,7 @@ under Proton — all resolved by the hardware run.
 1. ~~DLL load method under Proton~~ — decided: runtime injection, exactly as Overwolf does, with
    no game-side setup (see "How the DLL is loaded").
    Parallel to the reader's access-method question (Spike 3).
-2. **Transport** — keep localhost TCP for the hook→host path, or unify on the Unix socket if AF_UNIX
+2. **Transport** (for milestone 1) — keep localhost TCP for the hook→host path, or unify on the Unix socket if AF_UNIX
    turns out reachable from inside Wine.
 3. **Accept C3's input-path surface** — it hooks `GetRawInputData`/`RegisterRawInputDevices` and uses
    `SendInput` for held-button release. All input-path-only (no game memory, no game logic), but more
