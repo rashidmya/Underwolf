@@ -36,6 +36,22 @@ Plan: `docs/superpowers/plans/2026-10-20-underwolf-spikes.md`.
 
 How to run each spike is added to this README by the task that builds it.
 
+## Vulkan layer (`vk-layer/`)
+
+```sh
+./spikes/vk-layer/install.sh     # build + install as a user implicit layer
+./spikes/vk-layer/uninstall.sh   # remove it
+```
+
+- Loads into every Vulkan process, but does nothing unless the process is `deadlock.exe` or
+  `UW_SPIKE_FORCE_TARGET=1` is set.
+- `UW_SPIKE_MODE=passthrough|quad|composite` (default `passthrough`).
+- `UW_SPIKE_LAYER_DISABLE=1` stops the loader from loading it at all.
+- Frame times: `~/.cache/underwolf-spike/frames-<pid>-<mode>.csv`, flushed every second.
+- Check it loaded: `VK_LOADER_DEBUG=layer UW_SPIKE_FORCE_TARGET=1 vkcube`. In Deadlock, set
+  Steam launch options to `PROTON_LOG=1 VK_LOADER_DEBUG=layer %command%` and read
+  `~/steam-1422450.log`.
+
 ## Bench procedure
 
 Use this procedure for every overlay performance number.
