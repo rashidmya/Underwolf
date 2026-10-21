@@ -5,6 +5,7 @@ mod game_mode;
 mod match_id;
 mod match_outcome;
 mod phase;
+mod read;
 mod roster;
 mod team_score;
 
@@ -32,6 +33,9 @@ const RULES: &str = "C_CitadelGameRules";
 /// checks the parser). Other numbers (0 unassigned, 1 spectator, 4 neutral) are not emitted.
 pub const TEAM_AMBER: u8 = 2;
 pub const TEAM_SAPPHIRE: u8 = 3;
+
+/// Teams read from the game's team list at most.
+const MAX_TEAMS: usize = 32;
 
 /// Every schema field each task reads, as `(task, class, field)`. The layout check
 /// (`crate::layout`) switches a task off when one of its fields moved. Tests hold this list to

@@ -3,8 +3,8 @@
 //! 6810 the HUD sets its `team_kills` dialog variable from the team's score getter
 //! (`mov eax,[rcx+0x620]; ret` at client.dll+0xb256a0, its only call at +0x1c6f6ce).
 
-use super::roster::{MAX_TEAMS, VecHeader, ensure, pointer, read_bytes};
-use super::{TEAM_AMBER, TEAM_SAPPHIRE, at, rules_object};
+use super::read::{VecHeader, ensure, pointer, read_bytes};
+use super::{MAX_TEAMS, TEAM_AMBER, TEAM_SAPPHIRE, at, rules_object};
 use crate::keys::MATCH_INFO;
 use crate::mem::MemRead;
 use crate::roots::Roots;

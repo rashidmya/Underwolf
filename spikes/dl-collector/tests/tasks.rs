@@ -876,6 +876,7 @@ fn team_score_change_during_read_is_discarded() {
     let (mut mem, w, mut tasks) = fresh();
     w.set_players(&mut mem, &teams_of(&[1, 1, 0]));
     let sapphire = World::team(1) + world::OFF_SCORE;
+    let header = w.roots.teams;
     let mut reads = 0;
     let hooked = Hooked::new(mem, move |addr, len, mem| {
         if addr != sapphire || len != 4 {
@@ -885,18 +886,21 @@ fn team_score_change_during_read_is_discarded() {
         match reads {
             // Amber scores right after Sapphire's score was read.
             1 => w32(mem, World::team(0) + world::OFF_SCORE, 1),
-            // Once both scores were read again: a team is swapped in the list.
-            3 => w64(mem, world::TEAM_ARRAY + 16, World::team(1)),
+            // Once both scores were read again: the list header shrinks to two teams, while
+            // the pointer array under it stays as it was.
+            3 => w32(mem, header, 2),
+            // At the same point a pass later: a team is swapped in the list.
+            5 => w64(mem, world::TEAM_ARRAY + 8, World::team(0)),
             _ => {}
         }
     });
     let mut t = task(&mut tasks, "team_score");
-    for _ in 0..2 {
+    for _ in 0..3 {
         let mut p = Pass::default();
         assert_eq!(t.run(&hooked, &mut p), Err(TaskError::Torn));
         assert!(!staged(&p, "match_info", "team_score"));
     }
-    // Now the list holds Sapphire twice.
+    // Now the list holds Amber twice.
     assert!(matches!(run(&mut t, &hooked), Err(TaskError::Invalid(_))));
 }
 
