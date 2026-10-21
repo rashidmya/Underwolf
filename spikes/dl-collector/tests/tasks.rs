@@ -1,6 +1,6 @@
 mod common;
 
-use common::world::{self, Player, World, teams_of, w8, w32, wf};
+use common::world::{self, Player, World, teams_of, w8, w32, w64, wf};
 use common::{Hooked, Synth};
 use uw_spike_dlcollector::keys::deadlock_schema;
 use uw_spike_dlcollector::mem::{FakeMem, MemRead, ReadError};
@@ -98,8 +98,20 @@ fn null_game_rules_clears_match_keys() {
     let (mut mem, w, mut tasks) = fresh();
     w.set_players(&mut mem, &teams_of(&[1, 1]));
     set_modes(&mut mem, 3, 1);
-    for name in ["phase", "match_id", "clock", "roster", "game_mode"] {
+    w.set_winner(&mut mem, 2);
+    let names = [
+        "phase",
+        "match_id",
+        "clock",
+        "roster",
+        "game_mode",
+        "team_score",
+        "match_outcome",
+    ];
+    for name in names {
         let mut t = task(&mut tasks, name);
+        // The winner is shown after the match; the clock only during it.
+        w.set_state(&mut mem, if name == "match_outcome" { 8 } else { 7 });
         let p = run(&mut t, &mem).unwrap();
         // A valid pass first: the keys carry values.
         let key = match name {
@@ -107,6 +119,8 @@ fn null_game_rules_clears_match_keys() {
             "match_id" => ("match_info", "match_id"),
             "clock" => ("match_info", "match_clock"),
             "game_mode" => ("game_info", "game_mode"),
+            "team_score" => ("match_info", "team_score"),
+            "match_outcome" => ("match_info", "match_outcome"),
             _ => ("match_info", "roster_0"),
         };
         assert!(value(&p, key.0, key.1).is_some(), "{name}");
@@ -779,6 +793,205 @@ fn game_mode_change_during_read_is_discarded() {
     );
 }
 
+fn read_scores(t: &mut Box<dyn Task>, mem: &dyn MemRead) -> Option<String> {
+    value(&run(t, mem).unwrap(), "match_info", "team_score").map(String::from)
+}
+
+/// Overwolf documents `{"amber": "6" , "sapphire" : "0"}`: each team's score as a string under
+/// its team's name, team 2 being Amber and team 3 Sapphire.
+#[test]
+fn team_score_publishes_amber_and_sapphire_in_overwolfs_shape() {
+    let (mut mem, w, mut tasks) = fresh();
+    let mut t = task(&mut tasks, "team_score");
+    // `set_players` numbers the teams 2, 3, 4 (neutral, not emitted).
+    w.set_players(&mut mem, &teams_of(&[1, 1, 0]));
+    w.set_score(&mut mem, 0, 6);
+    w.set_score(&mut mem, 2, 99);
+    assert_eq!(
+        read_scores(&mut t, &mem).as_deref(),
+        Some(r#"{"amber":"6","sapphire":"0"}"#)
+    );
+    // The game's int as it is, extremes included.
+    w.set_score(&mut mem, 0, i32::MIN);
+    w.set_score(&mut mem, 1, i32::MAX);
+    assert_eq!(
+        read_scores(&mut t, &mem).as_deref(),
+        Some(r#"{"amber":"-2147483648","sapphire":"2147483647"}"#)
+    );
+    // Names follow the team number, not the list order.
+    w8(&mut mem, World::team(0) + world::OFF_TEAM_ID, 3);
+    w8(&mut mem, World::team(1) + world::OFF_TEAM_ID, 2);
+    assert_eq!(
+        read_scores(&mut t, &mem).as_deref(),
+        Some(r#"{"amber":"2147483647","sapphire":"-2147483648"}"#)
+    );
+    // Not tied to a phase: published whenever the game rules exist.
+    w.set_state(&mut mem, 3);
+    assert!(read_scores(&mut t, &mem).is_some());
+    w.rules_present(&mut mem, false);
+    assert_eq!(read_scores(&mut t, &mem), None);
+}
+
+/// Unassigned (0), spectator (1), neutral (4) and numbers the game does not name are not
+/// Overwolf teams; a team missing from the list is left out, and with neither there is no value.
+#[test]
+fn team_score_leaves_out_other_and_missing_teams() {
+    let (mut mem, w, mut tasks) = fresh();
+    let mut t = task(&mut tasks, "team_score");
+    w.set_players(&mut mem, &teams_of(&[0, 0]));
+    w.set_score(&mut mem, 0, 5);
+    w.set_score(&mut mem, 1, 7);
+    for other in [0u8, 1, 4, 5, 255] {
+        w8(&mut mem, World::team(1) + world::OFF_TEAM_ID, other);
+        assert_eq!(
+            read_scores(&mut t, &mem).as_deref(),
+            Some(r#"{"amber":"5"}"#),
+            "{other}"
+        );
+    }
+    w8(&mut mem, World::team(1) + world::OFF_TEAM_ID, 3);
+    // A null slot in the team list is skipped.
+    w64(&mut mem, world::TEAM_ARRAY, 0);
+    assert_eq!(
+        read_scores(&mut t, &mem).as_deref(),
+        Some(r#"{"sapphire":"7"}"#)
+    );
+    w8(&mut mem, World::team(1) + world::OFF_TEAM_ID, 1);
+    assert_eq!(read_scores(&mut t, &mem), None);
+    w.set_players(&mut mem, &[]);
+    assert_eq!(read_scores(&mut t, &mem), None);
+}
+
+#[test]
+fn team_score_with_two_teams_of_one_number_is_invalid() {
+    let (mut mem, w, mut tasks) = fresh();
+    let mut t = task(&mut tasks, "team_score");
+    w.set_players(&mut mem, &teams_of(&[1, 1]));
+    w8(&mut mem, World::team(1) + world::OFF_TEAM_ID, 2);
+    assert!(matches!(run(&mut t, &mem), Err(TaskError::Invalid(_))));
+}
+
+#[test]
+fn team_score_change_during_read_is_discarded() {
+    let (mut mem, w, mut tasks) = fresh();
+    w.set_players(&mut mem, &teams_of(&[1, 1, 0]));
+    let sapphire = World::team(1) + world::OFF_SCORE;
+    let mut reads = 0;
+    let hooked = Hooked::new(mem, move |addr, len, mem| {
+        if addr != sapphire || len != 4 {
+            return;
+        }
+        reads += 1;
+        match reads {
+            // Amber scores right after Sapphire's score was read.
+            1 => w32(mem, World::team(0) + world::OFF_SCORE, 1),
+            // Once both scores were read again: a team is swapped in the list.
+            3 => w64(mem, world::TEAM_ARRAY + 16, World::team(1)),
+            _ => {}
+        }
+    });
+    let mut t = task(&mut tasks, "team_score");
+    for _ in 0..2 {
+        let mut p = Pass::default();
+        assert_eq!(t.run(&hooked, &mut p), Err(TaskError::Torn));
+        assert!(!staged(&p, "match_info", "team_score"));
+    }
+    // Now the list holds Sapphire twice.
+    assert!(matches!(run(&mut t, &hooked), Err(TaskError::Invalid(_))));
+}
+
+fn read_outcome(t: &mut Box<dyn Task>, mem: &dyn MemRead) -> Option<String> {
+    value(&run(t, mem).unwrap(), "match_info", "match_outcome").map(String::from)
+}
+
+/// Overwolf documents `{"winning_team":"SAPPHIRE"}` with the values AMBER and SAPPHIRE. The
+/// game's match-end panel shows the winner in PostGame and End.
+#[test]
+fn match_outcome_publishes_the_winner_after_the_match() {
+    let (mut mem, w, mut tasks) = fresh();
+    let mut t = task(&mut tasks, "match_outcome");
+    w.set_winner(&mut mem, 3);
+    for state in [8, 11] {
+        w.set_state(&mut mem, state);
+        assert_eq!(
+            read_outcome(&mut t, &mem).as_deref(),
+            Some(r#"{"winning_team":"SAPPHIRE"}"#),
+            "{state}"
+        );
+    }
+    w.set_winner(&mut mem, 2);
+    assert_eq!(
+        read_outcome(&mut t, &mem).as_deref(),
+        Some(r#"{"winning_team":"AMBER"}"#)
+    );
+    w.rules_present(&mut mem, false);
+    assert_eq!(read_outcome(&mut t, &mem), None);
+}
+
+/// No value in any other phase (in Abandoned the game shows `MatchAbandoned`), and none for a
+/// team number other than Amber's or Sapphire's.
+#[test]
+fn match_outcome_needs_a_shown_phase_and_a_named_team() {
+    let (mut mem, w, mut tasks) = fresh();
+    let mut t = task(&mut tasks, "match_outcome");
+    w.set_winner(&mut mem, 2);
+    for state in [0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 12, -1, i32::MAX] {
+        w.set_state(&mut mem, state);
+        assert_eq!(read_outcome(&mut t, &mem), None, "{state}");
+    }
+    w.set_state(&mut mem, 8);
+    for team in [0, 1, 4, 5, -1, 0x102, 0x103, i32::MAX, i32::MIN] {
+        w.set_winner(&mut mem, team);
+        assert_eq!(read_outcome(&mut t, &mem), None, "{team}");
+    }
+}
+
+#[test]
+fn match_outcome_change_during_read_is_discarded() {
+    let (mut mem, w, mut tasks) = fresh();
+    w.set_state(&mut mem, 8);
+    w.set_winner(&mut mem, 3);
+    let winner = world::RULES_OBJ + world::OFF_WINNER;
+    let mut fired = false;
+    let hooked = Hooked::new(mem, move |addr, len, mem| {
+        // The winner changes right after its first read.
+        if addr == winner && len == 4 && !fired {
+            fired = true;
+            w32(mem, winner, 2);
+        }
+    });
+    let mut t = task(&mut tasks, "match_outcome");
+    let mut p = Pass::default();
+    assert_eq!(t.run(&hooked, &mut p), Err(TaskError::Torn));
+    assert!(!staged(&p, "match_info", "match_outcome"));
+    assert_eq!(
+        read_outcome(&mut t, &hooked).as_deref(),
+        Some(r#"{"winning_team":"AMBER"}"#)
+    );
+}
+
+#[test]
+fn team_score_and_match_outcome_fit_their_keys() {
+    let (mut mem, w, mut tasks) = fresh();
+    w.set_players(&mut mem, &teams_of(&[0, 0]));
+    w.set_score(&mut mem, 0, i32::MIN);
+    w.set_score(&mut mem, 1, i32::MIN);
+    w.set_state(&mut mem, 8);
+    w.set_winner(&mut mem, 3);
+    let schema = deadlock_schema();
+    for key in ["team_score", "match_outcome"] {
+        let mut t = task(&mut tasks, key);
+        let p = run(&mut t, &mem).unwrap();
+        let v = value(&p, "match_info", key).unwrap();
+        let max = schema
+            .keys()
+            .find(|(c, k, _)| *c == "match_info" && *k == key)
+            .unwrap()
+            .2;
+        assert!(v.len() as u32 <= max, "{key}: {v}");
+    }
+}
+
 #[test]
 fn every_staged_key_is_in_the_schema_and_fits() {
     let (mut mem, w, tasks) = fresh();
@@ -854,7 +1067,7 @@ fn unresolved_fields_and_roots_list_the_task() {
     .unwrap();
     let names: Vec<_> = built.tasks.iter().map(|t| t.name()).collect();
     assert_eq!(names, vec!["phase", "match_id"]);
-    assert_eq!(built.unresolved.len(), 3);
+    assert_eq!(built.unresolved.len(), 5);
     assert_eq!(built.unresolved[0].0, "roster");
     assert!(built.unresolved[0].1.starts_with("unresolved: "));
     assert_eq!(built.unresolved[1].0, "clock");
@@ -867,6 +1080,20 @@ fn unresolved_fields_and_roots_list_the_task() {
         (
             "game_mode",
             "unresolved: C_CitadelGameRules.m_eMatchMode".to_string()
+        )
+    );
+    assert_eq!(
+        built.unresolved[3],
+        (
+            "team_score",
+            "unresolved: C_BaseEntity.m_iTeamNum".to_string()
+        )
+    );
+    assert_eq!(
+        built.unresolved[4],
+        (
+            "match_outcome",
+            "unresolved: C_CitadelGameRules.m_iWinningTeam".to_string()
         )
     );
 }

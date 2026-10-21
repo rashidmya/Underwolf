@@ -407,7 +407,7 @@ fn unknown_args_are_ignored() {
 fn corrupt_arg_shifts_the_named_offset() {
     let mut r = rig(Skip::default());
     // The phase moves from +0x74 to +0x7c, a word that reads as a valid phase; the layout
-    // check catches the move and switches off both tasks that read the field.
+    // check catches the move and switches off every task that reads the field.
     w32(&mut r.mem, world::RULES_OBJ + 0x7c, 3);
     let mut c = r.start("corrupt=C_CitadelGameRules.m_eGameState");
     r.tick(&mut c);
@@ -415,11 +415,12 @@ fn corrupt_arg_shifts_the_named_offset() {
     assert_eq!(
         r.value("gep_internal", "disabled_tasks"),
         Some(Some(format!(
-            r#"[{{"task":"phase","reason":"{why}"}},{{"task":"clock","reason":"{why}"}}]"#
+            r#"[{{"task":"phase","reason":"{why}"}},{{"task":"clock","reason":"{why}"}},{{"task":"match_outcome","reason":"{why}"}}]"#
         )))
     );
     assert_eq!(r.value("game_info", "phase"), None);
     assert_eq!(r.value("match_info", "match_clock"), None);
+    assert_eq!(r.value("match_info", "match_outcome"), None);
     assert_eq!(r.value("match_info", "match_id"), Some(Some("1234".into())));
     // A name that does not resolve changes nothing.
     let r2 = rig(Skip::default());
@@ -431,14 +432,23 @@ fn corrupt_arg_shifts_the_named_offset() {
     );
 }
 
-/// `corrupt=<arg>` moves a roster field: the roster is listed as disabled from the start with
-/// `invalid: layout: <arg>` and publishes nothing; phase, match id and clock keep running.
-fn corrupt_roster_field_disables_only_the_roster(arg: &str) {
+/// `corrupt=<arg>` moves a roster field: the roster (and each task in `also` that reads the
+/// field) is listed as disabled from the start with `invalid: layout: <arg>` and publishes
+/// nothing; phase, match id and clock keep running.
+fn corrupt_roster_field_disables_only_the_roster(arg: &str, also: &[&str]) {
     let mut r = rig(Skip::default());
     r.world.set_players(&mut r.mem, &teams_of(&[1, 1]));
     let mut c = r.start(&format!("corrupt={arg}"));
     assert_eq!(c.status(), &Status::Initialized);
-    let expect = format!(r#"[{{"task":"roster","reason":"invalid: layout: {arg}"}}]"#);
+    let expect = format!(
+        "[{}]",
+        ["roster"]
+            .iter()
+            .chain(also)
+            .map(|t| format!(r#"{{"task":"{t}","reason":"invalid: layout: {arg}"}}"#))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
     assert_eq!(
         r.value("gep_internal", "disabled_tasks"),
         Some(Some(expect.clone()))
@@ -456,6 +466,9 @@ fn corrupt_roster_field_disables_only_the_roster(arg: &str) {
             .any(|k| k.starts_with("match_info.roster_") || k.starts_with("match_info.items_")),
         "{keys:?}"
     );
+    for t in also {
+        assert!(r.value("match_info", t).is_none_or(|v| v.is_none()), "{t}");
+    }
     assert_eq!(
         r.value("game_info", "phase"),
         Some(Some("GameInProgress".into()))
@@ -467,13 +480,14 @@ fn corrupt_roster_field_disables_only_the_roster(arg: &str) {
 /// C6 Step 5: kills +88 became +96 (the assists) and the roster kept publishing.
 #[test]
 fn corrupt_kills_disables_the_roster_by_layout() {
-    corrupt_roster_field_disables_only_the_roster("PlayerDataGlobal_t.m_iPlayerKills");
+    corrupt_roster_field_disables_only_the_roster("PlayerDataGlobal_t.m_iPlayerKills", &[]);
 }
 
-/// The team id (u8 at +1007) moved onto byte 1015, inside `m_nNextThinkTick`.
+/// The team id (u8 at +1007) moved onto byte 1015, inside `m_nNextThinkTick`. team_score reads
+/// it too.
 #[test]
 fn corrupt_team_num_disables_the_roster_by_layout() {
-    corrupt_roster_field_disables_only_the_roster("C_BaseEntity.m_iTeamNum");
+    corrupt_roster_field_disables_only_the_roster("C_BaseEntity.m_iTeamNum", &["team_score"]);
 }
 
 #[test]

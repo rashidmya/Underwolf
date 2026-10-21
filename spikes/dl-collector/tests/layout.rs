@@ -183,6 +183,17 @@ fn a_moved_field_breaks_only_the_tasks_that_read_it() {
         [
             invalid("phase", "layout: C_CitadelGameRules.m_eGameState"),
             invalid("clock", "layout: C_CitadelGameRules.m_eGameState"),
+            invalid("match_outcome", "layout: C_CitadelGameRules.m_eGameState"),
+        ]
+    );
+
+    // The team number is read by the roster and by team_score.
+    let d = Dump::moved("C_BaseEntity", "m_iTeamNum");
+    assert_eq!(
+        broken_tasks(&d),
+        [
+            invalid("roster", "layout: C_BaseEntity.m_iTeamNum"),
+            invalid("team_score", "layout: C_BaseEntity.m_iTeamNum"),
         ]
     );
 }

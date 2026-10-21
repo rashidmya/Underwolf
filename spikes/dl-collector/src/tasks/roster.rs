@@ -8,7 +8,7 @@ use crate::roots::Roots;
 use crate::runner::{Pass, Task, TaskError};
 use crate::schema::FieldLookup;
 
-const MAX_TEAMS: usize = 32;
+pub(super) const MAX_TEAMS: usize = 32;
 const MAX_HANDLES: usize = 64;
 const MAX_UPGRADES: usize = 64;
 const NAME_MAX: usize = 128;
@@ -101,15 +101,15 @@ impl Player {
 }
 
 /// A `{count: i32, data: pointer}` vector header, as read.
-struct VecHeader {
+pub(super) struct VecHeader {
     addr: u64,
     raw: [u8; 16],
-    count: usize,
-    data: u64,
+    pub(super) count: usize,
+    pub(super) data: u64,
 }
 
 impl VecHeader {
-    fn read(m: &dyn MemRead, addr: u64, max: usize) -> Result<VecHeader, TaskError> {
+    pub(super) fn read(m: &dyn MemRead, addr: u64, max: usize) -> Result<VecHeader, TaskError> {
         let mut raw = [0u8; 16];
         m.read(addr, &mut raw)?;
         let count = i32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
@@ -131,22 +131,22 @@ impl VecHeader {
         })
     }
 
-    fn unchanged(&self, m: &dyn MemRead) -> Result<(), TaskError> {
+    pub(super) fn unchanged(&self, m: &dyn MemRead) -> Result<(), TaskError> {
         let mut raw = [0u8; 16];
         m.read(self.addr, &mut raw)?;
         ensure(raw == self.raw)
     }
 
-    fn elements(&self, m: &dyn MemRead, size: usize) -> Result<Vec<u8>, TaskError> {
+    pub(super) fn elements(&self, m: &dyn MemRead, size: usize) -> Result<Vec<u8>, TaskError> {
         read_bytes(m, self.data, self.count * size)
     }
 }
 
-fn ensure(same: bool) -> Result<(), TaskError> {
+pub(super) fn ensure(same: bool) -> Result<(), TaskError> {
     if same { Ok(()) } else { Err(TaskError::Torn) }
 }
 
-fn read_bytes(m: &dyn MemRead, addr: u64, len: usize) -> Result<Vec<u8>, TaskError> {
+pub(super) fn read_bytes(m: &dyn MemRead, addr: u64, len: usize) -> Result<Vec<u8>, TaskError> {
     let mut buf = vec![0u8; len];
     if len > 0 {
         m.read(addr, &mut buf)?;
@@ -155,7 +155,7 @@ fn read_bytes(m: &dyn MemRead, addr: u64, len: usize) -> Result<Vec<u8>, TaskErr
 }
 
 /// A pointer array element: null is `None`, an implausible value is an error.
-fn pointer(raw: &[u8]) -> Result<Option<u64>, TaskError> {
+pub(super) fn pointer(raw: &[u8]) -> Result<Option<u64>, TaskError> {
     let mut b = [0u8; 8];
     b.copy_from_slice(raw);
     match u64::from_le_bytes(b) {

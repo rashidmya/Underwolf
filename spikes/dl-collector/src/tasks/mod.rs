@@ -3,8 +3,10 @@
 mod clock;
 mod game_mode;
 mod match_id;
+mod match_outcome;
 mod phase;
 mod roster;
+mod team_score;
 
 use crate::mem::{MemRead, PTR_MAX, PTR_MIN, ReadError};
 use crate::roots::{CLOCK_RULE_FIELDS, ClockRoots, RootError, Roots};
@@ -14,13 +16,22 @@ use crate::schema::FieldLookup;
 pub use clock::Clock;
 pub use game_mode::{GAME_MODES, GameMode, MATCH_MODES};
 pub use match_id::MatchId;
+pub use match_outcome::MatchOutcome;
 pub use phase::Phase;
 pub use roster::{Roster, RosterFields};
+pub use team_score::TeamScore;
 
 /// Field offsets of 0 or beyond this are not believed (a broken schema read, not a field).
 const FIELD_OFFSET_MAX: u32 = 1 << 20;
 
 const RULES: &str = "C_CitadelGameRules";
+
+/// The game's team numbers of Overwolf's two teams. Build 6810's client.dll names 2 "Amber"
+/// (`#Citadel_Team1_Name`) and 3 "Sapphire" (`#Citadel_Team2_Name`) in its team table, and its
+/// parser turns `TEAM_AMBER` into 2 and `TEAM_SAPPHIRE` into 3 (`tests/installed_build.rs`
+/// checks the parser). Other numbers (0 unassigned, 1 spectator, 4 neutral) are not emitted.
+pub const TEAM_AMBER: u8 = 2;
+pub const TEAM_SAPPHIRE: u8 = 3;
 
 /// Every schema field each task reads, as `(task, class, field)`. The layout check
 /// (`crate::layout`) switches a task off when one of its fields moved. Tests hold this list to
@@ -52,6 +63,10 @@ pub const TASK_FIELDS: &[(&str, &str, &str)] = &[
     ("roster", "PlayerDataGlobal_t", "m_vecUpgrades"),
     ("game_mode", RULES, "m_eMatchMode"),
     ("game_mode", RULES, "m_eGameMode"),
+    ("team_score", "C_BaseEntity", "m_iTeamNum"),
+    ("team_score", "C_Team", "m_iScore"),
+    ("match_outcome", RULES, "m_eGameState"),
+    ("match_outcome", RULES, "m_iWinningTeam"),
 ];
 
 pub struct Built {
@@ -115,6 +130,29 @@ pub fn build(
         ))),
         (None, _) => unresolved.push(("game_mode", format!("unresolved: {RULES}.m_eMatchMode"))),
         (_, None) => unresolved.push(("game_mode", format!("unresolved: {RULES}.m_eGameMode"))),
+    }
+
+    match (
+        offset(fields, "C_BaseEntity", "m_iTeamNum"),
+        offset(fields, "C_Team", "m_iScore"),
+    ) {
+        (Some(team_num), Some(score)) => {
+            tasks.push(Box::new(TeamScore::new(roots, team_num, score)));
+        }
+        (None, _) => unresolved.push(("team_score", "unresolved: C_BaseEntity.m_iTeamNum".into())),
+        (_, None) => unresolved.push(("team_score", "unresolved: C_Team.m_iScore".into())),
+    }
+
+    match offset(fields, RULES, "m_iWinningTeam") {
+        Some(winner) => tasks.push(Box::new(MatchOutcome::new(
+            roots.game_rules_ptr,
+            state,
+            winner,
+        ))),
+        None => unresolved.push((
+            "match_outcome",
+            format!("unresolved: {RULES}.m_iWinningTeam"),
+        )),
     }
     Ok(Built { tasks, unresolved })
 }

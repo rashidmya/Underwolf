@@ -10,7 +10,7 @@ use uw_spike_dlcollector::roots::{
     resolve_roots,
 };
 use uw_spike_dlcollector::schema::SchemaFields;
-use uw_spike_dlcollector::tasks::{GAME_MODES, MATCH_MODES};
+use uw_spike_dlcollector::tasks::{GAME_MODES, MATCH_MODES, TEAM_AMBER, TEAM_SAPPHIRE};
 
 const DEFAULT_PATH: &str =
     "/home/buga/.local/share/Steam/steamapps/common/Deadlock/game/citadel/bin/win64/client.dll";
@@ -72,6 +72,8 @@ fn installed_build() {
         ("C_CitadelGameRules", "m_eGameState", 0x74),
         ("C_CitadelGameRules", "m_unMatchID", 0xa060),
         ("C_CitadelGameRules", "m_eMatchMode", 0xa8),
+        ("C_CitadelGameRules", "m_iWinningTeam", 0xc0),
+        ("C_Team", "m_iScore", 0x620),
         ("C_CitadelGameRules", "m_flMatchClockAtLastUpdate", 0x9fdc),
         ("C_Team", "m_aPlayerControllers", 0x5f0),
         ("C_BaseEntity", "m_iTeamNum", 0x3ef),
@@ -115,6 +117,57 @@ fn installed_build() {
         schema_enum(&mem, &client, "ECitadelGameMode"),
         named(&GAME_MODES, "k_ECitadelGameMode_")
     );
+
+    // team_score's and match_outcome's team numbers are this build's own.
+    assert_eq!(
+        team_parser_numbers(&mem, &client, &["TEAM_AMBER", "TEAM_SAPPHIRE"]),
+        [u32::from(TEAM_AMBER), u32::from(TEAM_SAPPHIRE)]
+    );
+}
+
+/// The team number the game's team-name parser stores for each of `names`. Each name has one
+/// `lea rdx,[rip+name]` in code, followed by `cmp rbx,rdx; je` to `mov dword [rdi],<number>`.
+fn team_parser_numbers(mem: &dyn MemRead, client: &Module, names: &[&str]) -> Vec<u32> {
+    let strings: Vec<u64> = names
+        .iter()
+        .map(|name| {
+            let found = find_in_data(mem, client, format!("\0{name}\0").as_bytes());
+            assert_eq!(found.len(), 1, "{name}: strings {found:x?}");
+            found[0] + 1
+        })
+        .collect();
+    let mut sites = vec![Vec::new(); names.len()];
+    for s in client.sections.iter().filter(|s| s.executable) {
+        let start = client.base + u64::from(s.rva);
+        let mut code = vec![0; s.size as usize];
+        mem.read(start, &mut code).unwrap();
+        for (i, w) in code.windows(7).enumerate() {
+            if w[..3] != [0x48, 0x8d, 0x15] {
+                continue;
+            }
+            let next = start + i as u64 + 7;
+            let target =
+                next.wrapping_add_signed(i32::from_le_bytes([w[3], w[4], w[5], w[6]]).into());
+            if let Some(n) = strings.iter().position(|&a| a == target) {
+                sites[n].push(next);
+            }
+        }
+    }
+    names
+        .iter()
+        .zip(sites)
+        .map(|(name, sites)| {
+            assert_eq!(sites.len(), 1, "{name}: lea sites {sites:x?}");
+            let mut cmp_je = [0u8; 5];
+            mem.read(sites[0], &mut cmp_je).unwrap();
+            assert_eq!(cmp_je[..4], [0x48, 0x3b, 0xda, 0x74], "{name}");
+            let store = (sites[0] + 5).wrapping_add_signed((cmp_je[4] as i8).into());
+            let mut mov = [0u8; 6];
+            mem.read(store, &mut mov).unwrap();
+            assert_eq!(mov[..2], [0xc7, 0x07], "{name}");
+            u32::from_le_bytes([mov[2], mov[3], mov[4], mov[5]])
+        })
+        .collect()
 }
 
 /// Every address in `client`'s data sections where `pat` starts.
@@ -248,4 +301,5 @@ fn installed_build_collector_starts_with_every_task() {
     // A file image's game-rules global is zero: nothing is loaded.
     assert!(value("phase").is_none() && value("match_id").is_none());
     assert!(value("game_mode").is_none());
+    assert!(value("team_score").is_none() && value("match_outcome").is_none());
 }

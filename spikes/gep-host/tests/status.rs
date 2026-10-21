@@ -136,3 +136,26 @@ fn game_mode_row_follows_its_own_task() {
     assert_eq!(t.row("game_mode").as_deref(), Some("supported"));
     assert_eq!(t.row("game_paused").as_deref(), Some("disabled: slow"));
 }
+
+#[test]
+fn team_score_and_match_outcome_rows_follow_their_own_tasks() {
+    let mut t = StatusTable::default();
+    t.observe(&info("match_info", "team_score", Some(r#"{"amber":"6","sapphire":"0"}"#)));
+    assert_eq!(t.row("team_score").as_deref(), Some("supported"));
+    // No winner yet: the key stays cleared until PostGame.
+    t.observe(&info("match_info", "match_outcome", None));
+    assert_eq!(t.row("match_outcome").as_deref(), Some("unavailable"));
+    t.observe(&info("match_info", "match_outcome", Some(r#"{"winning_team":"SAPPHIRE"}"#)));
+    assert_eq!(t.row("match_outcome").as_deref(), Some("supported"));
+    // A moved team number switches off the roster and team_score, not match_outcome.
+    let why = "invalid: layout: C_BaseEntity.m_iTeamNum";
+    let both = format!(r#"[{{"task":"roster","reason":"{why}"}},{{"task":"team_score","reason":"{why}"}}]"#);
+    t.observe(&info("gep_internal", "disabled_tasks", Some(&both)));
+    assert_eq!(t.row("team_score"), Some(format!("disabled: {why}")));
+    assert_eq!(t.row("roster"), Some(format!("disabled: {why}")));
+    assert_eq!(t.row("match_outcome").as_deref(), Some("supported"));
+    let why = "invalid: layout: C_CitadelGameRules.m_eGameState";
+    t.observe(&info("gep_internal", "disabled_tasks", Some(&format!(r#"[{{"task":"match_outcome","reason":"{why}"}}]"#))));
+    assert_eq!(t.row("match_outcome"), Some(format!("disabled: {why}")));
+    assert_eq!(t.row("team_score").as_deref(), Some("supported"));
+}

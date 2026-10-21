@@ -40,7 +40,9 @@ pub const OFF_PAUSED: u64 = 0x38;
 pub const OFF_START: u64 = 0x60;
 pub const OFF_MATCH_MODE: u64 = 0xa8;
 pub const OFF_MODE: u64 = 0xac;
+pub const OFF_WINNER: u64 = 0xc0;
 pub const OFF_PLAYERS: u64 = 0x5f0;
+pub const OFF_SCORE: u64 = 0x620;
 pub const OFF_TEAM_ID: u64 = 0x3ef;
 pub const OFF_NAME: u64 = 0x6fc;
 pub const OFF_STEAM: u64 = 0x788;
@@ -229,6 +231,21 @@ impl World {
         }
     }
 
+    /// The score of the `t`-th team written by `set_players`.
+    pub fn set_score(&self, mem: &mut FakeMem, t: u64, score: i32) {
+        w32(mem, Self::team(t) + OFF_SCORE, score as u32);
+    }
+
+    /// The game rules' winning team.
+    pub fn set_winner(&self, mem: &mut FakeMem, team: i32) {
+        w32(mem, RULES_OBJ + OFF_WINNER, team as u32);
+    }
+
+    /// Address of the `t`-th team object.
+    pub fn team(t: u64) -> u64 {
+        TEAM_OBJ + t * 0x1000
+    }
+
     /// Address of the handle array of team `t` and of the `n`-th player's controller.
     pub fn handles(t: u64) -> u64 {
         HANDLES + t * 0x100
@@ -272,6 +289,7 @@ pub fn add_classes(s: &mut Synth, missing_anchor: Option<&str>) -> u64 {
             ("m_flGameStartTime", OFF_START as u32),
             ("m_eMatchMode", OFF_MATCH_MODE as u32),
             ("m_eGameMode", OFF_MODE as u32),
+            ("m_iWinningTeam", OFF_WINNER as u32),
         ],
         m,
     );
@@ -288,7 +306,10 @@ pub fn add_classes(s: &mut Synth, missing_anchor: Option<&str>) -> u64 {
     let team = class(
         s,
         "C_Team",
-        &[("m_aPlayerControllers", OFF_PLAYERS as u32)],
+        &[
+            ("m_aPlayerControllers", OFF_PLAYERS as u32),
+            ("m_iScore", OFF_SCORE as u32),
+        ],
         m,
     );
     let entity = class(s, "C_BaseEntity", &[("m_iTeamNum", OFF_TEAM_ID as u32)], m);
