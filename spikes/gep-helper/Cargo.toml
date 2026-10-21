@@ -1,0 +1,20 @@
+[package]
+name = "uw-spike-gep-helper"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The Wine-side helper (`uw-gep-helper.exe`, built for x86_64-pc-windows-gnu): runs in the game's
+# Wine session, reads a GEP data channel (named shared memory) and relays it to `uw-gep` over TCP.
+# `relay` is portable and unit-tested on Linux.
+[lib]
+name = "uw_spike_gep_helper"
+
+[[bin]]
+name = "uw-gep-helper"
+path = "src/main.rs"
+
+[dependencies]
+uw-spike-gep-channel = { path = "../gep-channel" }
+uw-spike-ipc = { path = "../ipc" }

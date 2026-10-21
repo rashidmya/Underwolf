@@ -81,6 +81,16 @@ pub enum Msg {
     LoadPlugin { path: String, channel: u32, args: String },
     /// in-game module → host: the outcome of a `LoadPlugin`.
     PluginLoaded { path: String, ok: bool, error: Option<String> },
+    /// Wine-side GEP helper → `uw-gep`: attached to the producer on data channel `channel`.
+    GepConnected { channel: u32, pid: u32, version: u32 },
+    /// helper → `uw-gep`: one info key's value (`None` = cleared), with the producer's timestamp.
+    GepInfo { category: String, key: String, value: Option<String>, ts: u64 },
+    /// helper → `uw-gep`: one event from the ring.
+    GepEvent { name: String, data: String, ts: u64 },
+    /// helper → `uw-gep`: `events` ring records were overwritten before the helper read them.
+    GepLost { events: u64 },
+    /// helper → `uw-gep`: the producer went away.
+    GepDisconnected,
 }
 
 /// Window coordinates → swapchain pixels (the game may render at a different size than its

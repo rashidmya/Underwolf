@@ -27,10 +27,11 @@ fn main() {
 
 #[cfg(unix)]
 fn run() -> Result<i32, String> {
+    use std::ffi::OsString;
     use std::path::PathBuf;
 
-    use uw_spike_inject::launcher::{check_wine_session, find_pids, wine_command};
-    use uw_spike_inject::{config_info_for_prefix, proton_files_from_config_info, wine_env};
+    use uw_spike_inject::launcher::{GameSession, check_wine_session};
+    use uw_spike_inject::to_wine_path;
 
     let mut pid: Option<i32> = None;
     let mut exe = "deadlock.exe".to_string();
@@ -53,40 +54,21 @@ fn run() -> Result<i32, String> {
         }
     }
 
-    let pid = match pid {
-        Some(p) => p,
-        None => *find_pids(&exe).first().ok_or(format!("{exe} is not running"))?,
-    };
-    let environ = std::fs::read(format!("/proc/{pid}/environ")).map_err(|e| format!("environ of {pid}: {e}"))?;
-    let env = wine_env(&environ);
-    let prefix = env
-        .iter()
-        .find(|(k, _)| k == "WINEPREFIX")
-        .map(|(_, v)| PathBuf::from(v))
-        .ok_or(format!("pid {pid} has no WINEPREFIX (not a Wine process?)"))?;
-    let socket = check_wine_session(&prefix)?;
-
-    let proton = match proton {
-        Some(p) => p,
-        None => {
-            let info_path = config_info_for_prefix(&prefix);
-            let info = std::fs::read_to_string(&info_path).map_err(|e| format!("{}: {e}", info_path.display()))?;
-            proton_files_from_config_info(&info).ok_or(format!("no Proton path in {}", info_path.display()))?
-        }
-    };
-    for p in [proton.join("bin/wine"), injector.clone(), dll.clone()] {
+    let session = GameSession::find_with_proton(&exe, pid, proton)?;
+    for p in [injector.clone(), dll.clone()] {
         if !p.exists() {
             return Err(format!("missing {}", p.display()));
         }
     }
 
     eprintln!(
-        "[uw-spike-inject] {exe} pid {pid}; prefix {}; wineserver {}; wine {}",
-        prefix.display(),
-        socket.display(),
-        proton.join("bin/wine").display()
+        "[uw-spike-inject] {exe} pid {}; prefix {}; wineserver {}; wine {}",
+        session.pid,
+        session.prefix.display(),
+        check_wine_session(&session.prefix)?.display(),
+        session.proton.join("bin/wine").display()
     );
-    let mut cmd = wine_command(&proton, &env, &injector, &exe, &dll);
+    let mut cmd = session.wine(&injector, &[OsString::from(&exe), OsString::from(to_wine_path(&dll))]);
     if std::env::var_os("WINEDEBUG").is_none() {
         cmd.env("WINEDEBUG", "-all");
     }

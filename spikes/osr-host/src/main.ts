@@ -19,7 +19,10 @@
 // wine/surface, Ctrl+Tab, Escape or a click outside every widget leaves edit mode; for win32 only
 // the hook leaves edit mode. Runs on X11 (XWayland) so the surface can be positioned.
 //
-//   npm start -- [--consumer] [--capture wine|surface|win32] [--widget solid|animated|static|input]...
+// Spike 3 (--gep <args>, with --capture win32): each module Hello is also answered with LoadPlugin
+// for the collector (channel 1, start args <args>, may be ""); run `uw-gep watch --no-inject`.
+//
+//   npm start -- [--consumer] [--capture wine|surface|win32] [--gep <args>] [--widget solid|animated|static|input]...
 
 import { app, BrowserWindow, ipcMain, screen } from 'electron';
 import { spawn } from 'node:child_process';
@@ -30,8 +33,9 @@ type SendResult = 'acked' | 'dropped' | 'timeout';
 
 interface Bridge {
   startServer(socketPath: string): void;
-  /// Each in-game module `Hello` is answered with `ModuleConfig { input_hooks }`.
-  startInputServer(port: number, inputHooks: boolean): void;
+  /// Each in-game module `Hello` is answered with `ModuleConfig { input_hooks }`, then
+  /// `LoadPlugin` when `plugin` is given (`path` is a Windows path).
+  startInputServer(port: number, inputHooks: boolean, plugin?: { path: string; channel: number; args: string }): void;
   setCursor(x: number, y: number): boolean;
   peerGeneration(): number;
   takeEditRequests(): boolean[];
@@ -87,19 +91,22 @@ interface Widget {
 
 type Capture = 'wine' | 'surface' | 'win32';
 
-function parseArgs(argv: string[]): { consumer: boolean; capture: Capture; widgets: string[] } {
+function parseArgs(argv: string[]): { consumer: boolean; capture: Capture; widgets: string[]; gep?: string } {
   const widgets: string[] = [];
   let consumer = false;
   let capture: Capture = 'wine';
+  let gep: string | undefined;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--consumer') consumer = true;
+    // The value may be empty (`--gep ""`), so only its presence is checked.
+    else if (argv[i] === '--gep' && i + 1 < argv.length) gep = argv[++i];
     else if (argv[i] === '--widget' && argv[i + 1]) widgets.push(argv[++i]);
     else if (argv[i] === '--capture' && argv[i + 1]) {
       const c = argv[++i];
       capture = c === 'surface' ? 'surface' : c === 'win32' ? 'win32' : 'wine';
     }
   }
-  return { consumer, capture, widgets: widgets.length ? widgets : ['animated'] };
+  return { consumer, capture, widgets: widgets.length ? widgets : ['animated'], gep };
 }
 
 /// The C3 hook connects here (must match UW_SPIKE_HOST_PORT / the hook's default).
@@ -107,7 +114,14 @@ const HOST_PORT = Number(process.env.UW_SPIKE_HOST_PORT ?? 48610);
 
 /// C3: inject the hook DLL into the running game. Called when a game's layer connects, which means
 /// the game is up. Injecting a DLL that is already loaded is a no-op in the game.
-const INJECT = path.join(os.homedir(), '.local/share/underwolf-spike/uw-spike-inject');
+const INSTALL_DIR = path.join(os.homedir(), '.local/share/underwolf-spike');
+const INJECT = path.join(INSTALL_DIR, 'uw-spike-inject');
+/// Spike 3: the collector plugin on GEP data channel 1 (uw-gep's default channel).
+const GEP_CHANNEL = 1;
+/// A Unix path as Wine's Z: drive sees it (uw_spike_inject::to_wine_path).
+function toWinePath(p: string): string {
+  return 'Z:' + p.replace(/\//g, '\\');
+}
 let injecting = false;
 function injectHook() {
   if (injecting) return;
@@ -454,13 +468,20 @@ function onWin32Inputs() {
 // ---- Startup ---------------------------------------------------------------------------------
 
 app.whenReady().then(() => {
-  const { consumer, capture, widgets: names } = parseArgs(process.argv.slice(2));
+  const { consumer, capture, widgets: names, gep } = parseArgs(process.argv.slice(2));
   captureMode = capture;
   bridge.startServer(SOCKET);
   if (capture === 'win32') {
     // The module installs no input hooks until told to; the Hideout runs want them.
-    bridge.startInputServer(HOST_PORT, true);
+    const plugin =
+      gep === undefined
+        ? undefined
+        : { path: toWinePath(path.join(INSTALL_DIR, 'uw_spike_dlcollector.dll')), channel: GEP_CHANNEL, args: gep };
+    bridge.startInputServer(HOST_PORT, true, plugin);
     console.log(`[osr-host] C3 input listener on 127.0.0.1:${HOST_PORT}`);
+    if (plugin) console.log(`[osr-host] Spike 3: modules load ${plugin.path} (channel ${GEP_CHANNEL}, args "${gep}")`);
+  } else if (gep !== undefined) {
+    console.error('[osr-host] --gep needs --capture win32 (the in-game module loads the collector)');
   }
   console.log(`[osr-host] socket ${SOCKET}; capture ${capture}; widgets: ${names.join(', ')}`);
   for (const w of layout(names)) {

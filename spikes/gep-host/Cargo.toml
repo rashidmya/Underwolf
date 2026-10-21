@@ -1,0 +1,24 @@
+[package]
+name = "uw-spike-gep-host"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# `uw-gep` (Linux): injects the in-game module, has it load the collector plugin, runs the
+# Wine-side helper in the game's Wine session and turns what it relays into Overwolf-style info
+# updates and events (`provider`), written as JSONL, with a feature-status table (`status`).
+[lib]
+name = "uw_spike_gep_host"
+
+[[bin]]
+name = "uw-gep"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+uw-spike-inject = { path = "../inject" }
+uw-spike-ipc = { path = "../ipc" }

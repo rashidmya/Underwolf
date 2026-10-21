@@ -112,15 +112,27 @@ pub fn set_edit_mode(on: bool) -> bool {
     SERVER.get().is_some_and(|s| s.set_edit_mode(on))
 }
 
+/// A plugin for the in-game module to load (Spike 3's collector); `path` is a Windows path.
+#[napi(object)]
+pub struct JsPlugin {
+    pub path: String,
+    pub channel: u32,
+    pub args: String,
+}
+
 /// Starts the localhost TCP listener for the C3 in-game Win32 hook (candidate C3). Its edit-mode
 /// toggles and input join the same queues as `takeEditRequests`/`takeInputs`. Each module
-/// `Hello` is answered with `ModuleConfig { input_hooks }`.
+/// `Hello` is answered with `ModuleConfig { input_hooks }`, then `LoadPlugin` if `plugin` is set.
 #[napi]
-pub fn start_input_server(port: u32, input_hooks: bool) -> Result<()> {
+pub fn start_input_server(port: u32, input_hooks: bool, plugin: Option<JsPlugin>) -> Result<()> {
+    let mut on_hello = vec![Msg::ModuleConfig { input_hooks }];
+    if let Some(p) = plugin {
+        on_hello.push(Msg::LoadPlugin { path: p.path, channel: p.channel, args: p.args });
+    }
     SERVER
         .get()
         .ok_or_else(|| Error::from_reason("server not started"))?
-        .bind_input_tcp(port as u16, vec![Msg::ModuleConfig { input_hooks }])
+        .bind_input_tcp(port as u16, on_hello)
         .map_err(|e| Error::from_reason(e.to_string()))
 }
 

@@ -32,6 +32,12 @@ fn all_variants() -> Vec<Msg> {
         },
         Msg::PluginLoaded { path: r"Z:\p\c.dll".into(), ok: true, error: None },
         Msg::PluginLoaded { path: r"Z:\p\c.dll".into(), ok: false, error: Some("LoadLibraryW failed: 126".into()) },
+        Msg::GepConnected { channel: 1, pid: 1234, version: 1 },
+        Msg::GepInfo { category: "game_info".into(), key: "phase".into(), value: Some("GameInProgress".into()), ts: 99 },
+        Msg::GepInfo { category: "match_info".into(), key: "match_id".into(), value: None, ts: u64::MAX },
+        Msg::GepEvent { name: "clock".into(), data: r#"{"match_clock":"01:02"}"#.into(), ts: 7 },
+        Msg::GepLost { events: 3 },
+        Msg::GepDisconnected,
     ]
 }
 

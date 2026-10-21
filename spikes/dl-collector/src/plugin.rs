@@ -160,6 +160,9 @@ enum Mode {
         gate: TickGate,
     },
     Discovering(Discovering),
+    /// Started with `selftest=1`: the collector published its status and one event, and reads
+    /// nothing (no game modules are needed, so it also runs in a plain Wine process).
+    Selftest(Box<Collector>),
 }
 
 struct Plugin {
@@ -231,6 +234,11 @@ impl QpcSink for Sink {
 
 static SINK: Sink = Sink;
 
+/// `selftest=1` (the collector's own test mode), if present.
+fn selftest(args: &str) -> bool {
+    args.split_whitespace().any(|t| t == "selftest=1")
+}
+
 /// `discover=<seconds>` (1..=600), if present.
 fn discover_seconds(args: &str) -> Option<u64> {
     args.split_whitespace()
@@ -297,6 +305,26 @@ fn start(channel: u32, args: &str) -> i32 {
                     .status("error", Some(&format!("QPC hook: {why}")));
             }
         }
+        return 0;
+    }
+
+    if selftest(args) {
+        // The collector resolves nothing in selftest mode, so it never looks at this module.
+        let unused = Module {
+            name: "client.dll".into(),
+            base: 0,
+            image_size: 0,
+            sections: Vec::new(),
+        };
+        let collector = Collector::start(
+            &SelfProcess,
+            &unused,
+            Box::new(OutHandle(out.clone())),
+            args,
+            Box::new(qpc_now),
+            freq,
+        );
+        plugin.mode = Mode::Selftest(Box::new(collector));
         return 0;
     }
 
@@ -434,6 +462,8 @@ fn present() {
     match mode {
         Mode::Collecting { collector, .. } => collector.check_stall(),
         Mode::Discovering(d) if !d.done && qpc_now() >= d.deadline => finish_discovery(out, d),
+        // Retries the selftest event if the throttle or a busy channel refused it.
+        Mode::Selftest(collector) => collector.tick(&SelfProcess),
         Mode::Discovering(_) | Mode::Idle => {}
     }
     out.lock().flush();
