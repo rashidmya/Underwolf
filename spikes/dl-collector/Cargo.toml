@@ -11,6 +11,9 @@ publish.workspace = true
 name = "uw_spike_dlcollector"
 crate-type = ["lib", "cdylib"]
 
+[dependencies]
+uw-spike-gep-channel = { path = "../gep-channel" }
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_Foundation",

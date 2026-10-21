@@ -521,6 +521,7 @@ dependencies = [
 name = "uw-spike-dlcollector"
 version = "0.0.0"
 dependencies = [
+ "uw-spike-gep-channel",
  "windows",
 ]
 

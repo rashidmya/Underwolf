@@ -128,3 +128,16 @@ fn field_count_above_bound_skips_class() {
     assert_eq!(f.get("C_CitadelGameRules", "m_eGameState"), Some(0x74));
     assert_eq!(f.unreadable(), ["C_Huge".to_string()]);
 }
+
+#[test]
+fn add_offset_shifts_one_resolved_field() {
+    let (mem, module) = base_synth().finish();
+    let mut f = SchemaFields::load(&mem, &module).unwrap();
+    assert!(f.add_offset("C_CitadelGameRules", "m_eGameState", 8));
+    assert_eq!(f.get("C_CitadelGameRules", "m_eGameState"), Some(0x7c));
+    assert_eq!(f.get("C_CitadelGameRules", "m_unMatchID"), Some(0xa060));
+    assert!(!f.add_offset("C_CitadelGameRules", "m_nope", 8));
+    assert!(!f.add_offset("C_Nope", "m_eGameState", 8));
+    assert!(!f.add_offset("C_CitadelGameRules", "m_unMatchID", u32::MAX));
+    assert_eq!(f.get("C_CitadelGameRules", "m_unMatchID"), Some(0xa060));
+}

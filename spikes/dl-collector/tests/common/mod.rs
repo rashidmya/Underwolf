@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod world;
+
 use uw_spike_dlcollector::mem::FakeMem;
 use uw_spike_dlcollector::module::{Module, Section};
 use uw_spike_dlcollector::roots::CLASSES;
@@ -123,5 +125,29 @@ impl Synth {
             ],
         };
         (mem, module)
+    }
+}
+
+/// A memory that runs `hook` after every read, so a test can change the target between two
+/// reads of the same data.
+pub struct Hooked {
+    pub mem: std::cell::RefCell<FakeMem>,
+    pub hook: std::cell::RefCell<Box<dyn FnMut(u64, usize, &mut FakeMem)>>,
+}
+
+impl Hooked {
+    pub fn new(mem: FakeMem, hook: impl FnMut(u64, usize, &mut FakeMem) + 'static) -> Hooked {
+        Hooked {
+            mem: std::cell::RefCell::new(mem),
+            hook: std::cell::RefCell::new(Box::new(hook)),
+        }
+    }
+}
+
+impl uw_spike_dlcollector::mem::MemRead for Hooked {
+    fn read(&self, addr: u64, buf: &mut [u8]) -> Result<(), uw_spike_dlcollector::mem::ReadError> {
+        let r = self.mem.borrow().read(addr, buf);
+        (self.hook.borrow_mut())(addr, buf.len(), &mut self.mem.borrow_mut());
+        r
     }
 }

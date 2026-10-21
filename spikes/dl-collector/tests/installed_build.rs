@@ -1,3 +1,7 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use uw_spike_dlcollector::collector::{ChannelOut, Collector, Status};
 use uw_spike_dlcollector::mem::MemRead;
 use uw_spike_dlcollector::module::{Module, file_image};
 use uw_spike_dlcollector::roots::{CLOCK_RULE_FIELDS, resolve_clock_roots, resolve_roots};
@@ -80,4 +84,52 @@ fn installed_build() {
             f.ambiguous()
         );
     }
+}
+
+struct Recorder(Rc<RefCell<Vec<(String, String, Option<Vec<u8>>)>>>);
+
+impl ChannelOut for Recorder {
+    fn commit(&mut self, sets: &[(String, String, Option<Vec<u8>>)], _ts: u64) {
+        self.0.borrow_mut().extend_from_slice(sets);
+    }
+
+    fn push_event(&mut self, _name: &str, _data: &[u8], _ts: u64) -> bool {
+        true
+    }
+}
+
+/// The collector resolves every root, field and task on the installed build, with nothing
+/// disabled, and a pass over the (not running) file image publishes nothing but status.
+#[test]
+#[ignore]
+fn installed_build_collector_starts_with_every_task() {
+    let path = std::env::var("UW_DEADLOCK_CLIENT_DLL").unwrap_or_else(|_| DEFAULT_PATH.to_string());
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    let (mem, base) = file_image(&bytes).unwrap();
+    drop(bytes);
+    let client = Module::from_headers(&mem, "client.dll", base).unwrap();
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut c = Collector::start(
+        &mem,
+        &client,
+        Box::new(Recorder(log.clone())),
+        "",
+        Box::new(|| 0),
+        1000,
+    );
+    assert_eq!(c.status(), &Status::Initialized);
+    c.tick(&mem);
+    assert_eq!(c.status(), &Status::Scanning);
+    let value = |key: &str| {
+        log.borrow()
+            .iter()
+            .rev()
+            .find(|(_, k, _)| k == key)
+            .and_then(|(_, _, v)| v.clone())
+            .map(|v| String::from_utf8(v).unwrap())
+    };
+    assert_eq!(value("disabled_tasks").as_deref(), Some("[]"));
+    assert!(value("version_info").unwrap().contains("disk-class-v2"));
+    // A file image's game-rules global is zero: nothing is loaded.
+    assert!(value("phase").is_none() && value("match_id").is_none());
 }

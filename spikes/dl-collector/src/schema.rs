@@ -167,6 +167,25 @@ impl SchemaFields {
         self.classes.get(class)?.get(field).copied()
     }
 
+    /// Moves one resolved field's offset by `delta` (the collector's `corrupt=` fail-safe test
+    /// argument). False, and no change, if the field is not resolved or the sum overflows.
+    pub fn add_offset(&mut self, class: &str, field: &str, delta: u32) -> bool {
+        let Some(slot) = self
+            .classes
+            .get_mut(class)
+            .and_then(|fields| fields.get_mut(field))
+        else {
+            return false;
+        };
+        match slot.checked_add(delta) {
+            Some(v) => {
+                *slot = v;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Why classes or fields were excluded as ambiguous.
     pub fn ambiguous(&self) -> &[String] {
         &self.ambiguous

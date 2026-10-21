@@ -130,6 +130,20 @@ impl FakeMem {
         self.regions.push((base, bytes));
         self
     }
+
+    /// Overwrites bytes that lie inside one region; false (and no change) otherwise.
+    pub fn write(&mut self, addr: u64, bytes: &[u8]) -> bool {
+        for (base, data) in &mut self.regions {
+            if addr >= *base && addr - *base <= data.len() as u64 {
+                let off = (addr - *base) as usize;
+                if bytes.len() <= data.len() - off {
+                    data[off..off + bytes.len()].copy_from_slice(bytes);
+                    return true;
+                }
+            }
+        }
+        false
+    }
 }
 
 impl MemRead for FakeMem {
