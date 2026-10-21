@@ -309,7 +309,7 @@ fn throttled_events_are_retried_in_order() {
     let names: Vec<_> = log.events.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(names, ["clock", "clock", "game_paused"]);
     assert_eq!(log.events[1].1, r#"{"match_clock":"07:40"}"#);
-    assert_eq!(log.events[2].1, r#"{"game_paused":true}"#);
+    assert_eq!(log.events[2].1, "true");
 }
 
 #[test]
@@ -478,9 +478,9 @@ fn corrupt_team_num_disables_the_roster_by_layout() {
 
 #[test]
 fn missing_layout_anchor_disables_its_task() {
-    // m_eMatchMode anchors the clock's m_eGameMode.
+    // m_fLevelStartTime anchors the clock's m_flGameStartTime and nothing else.
     let mut r = rig(Skip {
-        missing_anchor: Some("m_eMatchMode"),
+        missing_anchor: Some("m_fLevelStartTime"),
         ..Skip::default()
     });
     r.world.set_players(&mut r.mem, &teams_of(&[1, 1]));
@@ -489,7 +489,7 @@ fn missing_layout_anchor_disables_its_task() {
     assert_eq!(
         r.value("gep_internal", "disabled_tasks"),
         Some(Some(
-            r#"[{"task":"clock","reason":"invalid: layout: C_CitadelGameRules.m_eGameMode"}]"#
+            r#"[{"task":"clock","reason":"invalid: layout: C_CitadelGameRules.m_flGameStartTime"}]"#
                 .into()
         ))
     );

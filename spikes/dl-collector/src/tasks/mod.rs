@@ -1,6 +1,7 @@
 //! The collection tasks and the resolution of what each one needs.
 
 mod clock;
+mod game_mode;
 mod match_id;
 mod phase;
 mod roster;
@@ -11,6 +12,7 @@ use crate::runner::{Task, TaskError};
 use crate::schema::FieldLookup;
 
 pub use clock::Clock;
+pub use game_mode::{GAME_MODES, GameMode, MATCH_MODES};
 pub use match_id::MatchId;
 pub use phase::Phase;
 pub use roster::{Roster, RosterFields};
@@ -48,6 +50,8 @@ pub const TASK_FIELDS: &[(&str, &str, &str)] = &[
     ("roster", "PlayerDataGlobal_t", "m_iDeaths"),
     ("roster", "PlayerDataGlobal_t", "m_iPlayerAssists"),
     ("roster", "PlayerDataGlobal_t", "m_vecUpgrades"),
+    ("game_mode", RULES, "m_eMatchMode"),
+    ("game_mode", RULES, "m_eGameMode"),
 ];
 
 pub struct Built {
@@ -98,6 +102,19 @@ pub fn build(
             state,
             [f[0], f[1], f[2], f[3], f[4]],
         ))),
+    }
+
+    match (
+        offset(fields, RULES, "m_eMatchMode"),
+        offset(fields, RULES, "m_eGameMode"),
+    ) {
+        (Some(match_mode), Some(game_mode)) => tasks.push(Box::new(GameMode::new(
+            roots.game_rules_ptr,
+            match_mode,
+            game_mode,
+        ))),
+        (None, _) => unresolved.push(("game_mode", format!("unresolved: {RULES}.m_eMatchMode"))),
+        (_, None) => unresolved.push(("game_mode", format!("unresolved: {RULES}.m_eGameMode"))),
     }
     Ok(Built { tasks, unresolved })
 }

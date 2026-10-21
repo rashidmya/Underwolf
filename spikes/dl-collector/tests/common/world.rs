@@ -38,6 +38,7 @@ pub const OFF_PAUSED_TICKS: u64 = 0x30;
 pub const OFF_PAUSE_START: u64 = 0x34;
 pub const OFF_PAUSED: u64 = 0x38;
 pub const OFF_START: u64 = 0x60;
+pub const OFF_MATCH_MODE: u64 = 0xa8;
 pub const OFF_MODE: u64 = 0xac;
 pub const OFF_PLAYERS: u64 = 0x5f0;
 pub const OFF_TEAM_ID: u64 = 0x3ef;
@@ -269,6 +270,7 @@ pub fn add_classes(s: &mut Synth, missing_anchor: Option<&str>) -> u64 {
             ("m_eGameState", OFF_STATE as u32),
             ("m_unMatchID", OFF_MATCH_ID as u32),
             ("m_flGameStartTime", OFF_START as u32),
+            ("m_eMatchMode", OFF_MATCH_MODE as u32),
             ("m_eGameMode", OFF_MODE as u32),
         ],
         m,

@@ -10,6 +10,7 @@ use uw_spike_dlcollector::roots::{
     resolve_roots,
 };
 use uw_spike_dlcollector::schema::SchemaFields;
+use uw_spike_dlcollector::tasks::{GAME_MODES, MATCH_MODES};
 
 const DEFAULT_PATH: &str =
     "/home/buga/.local/share/Steam/steamapps/common/Deadlock/game/citadel/bin/win64/client.dll";
@@ -70,6 +71,7 @@ fn installed_build() {
     let expect = [
         ("C_CitadelGameRules", "m_eGameState", 0x74),
         ("C_CitadelGameRules", "m_unMatchID", 0xa060),
+        ("C_CitadelGameRules", "m_eMatchMode", 0xa8),
         ("C_CitadelGameRules", "m_flMatchClockAtLastUpdate", 0x9fdc),
         ("C_Team", "m_aPlayerControllers", 0x5f0),
         ("C_BaseEntity", "m_iTeamNum", 0x3ef),
@@ -97,6 +99,66 @@ fn installed_build() {
             r.field
         );
     }
+
+    // game_mode's names and numbers are this build's own schema enums.
+    let named = |table: &[&str], prefix: &str| -> Vec<(String, i64)> {
+        (0..)
+            .zip(table)
+            .map(|(i, n)| (format!("{prefix}{n}"), i))
+            .collect()
+    };
+    assert_eq!(
+        schema_enum(&mem, &client, "ECitadelMatchMode"),
+        named(&MATCH_MODES, "k_ECitadelMatchMode_")
+    );
+    assert_eq!(
+        schema_enum(&mem, &client, "ECitadelGameMode"),
+        named(&GAME_MODES, "k_ECitadelGameMode_")
+    );
+}
+
+/// Every address in `client`'s data sections where `pat` starts.
+fn find_in_data(mem: &dyn MemRead, client: &Module, pat: &[u8]) -> Vec<u64> {
+    let mut out = Vec::new();
+    for s in client.sections.iter().filter(|s| !s.executable) {
+        let start = client.base + u64::from(s.rva);
+        let mut buf = vec![0; s.size as usize];
+        mem.read(start, &mut buf).unwrap();
+        out.extend(
+            buf.windows(pat.len())
+                .enumerate()
+                .filter(|(_, w)| *w == pat)
+                .map(|(i, _)| start + i as u64),
+        );
+    }
+    out
+}
+
+/// The enumerators `(name, value)` of the one schema enum record named `name`: its name
+/// pointer at +8, enumerator count (u16) at +0x1c, enumerator table at +0x20; each enumerator
+/// is 0x20 bytes, name pointer at +0 and value (i64) at +8.
+fn schema_enum(mem: &dyn MemRead, client: &Module, name: &str) -> Vec<(String, i64)> {
+    let mut records = Vec::new();
+    for at in find_in_data(mem, client, format!("\0{name}\0").as_bytes()) {
+        let string = at + 1;
+        records.extend(
+            find_in_data(mem, client, &string.to_le_bytes())
+                .into_iter()
+                .map(|p| p - 8),
+        );
+    }
+    assert_eq!(records.len(), 1, "{name}: records {records:x?}");
+    let record = records[0];
+    let count = mem.read_u16(record + 0x1c).unwrap();
+    assert!((1..=256).contains(&count), "{name}: {count} enumerators");
+    let table = mem.read_ptr(record + 0x20).unwrap();
+    (0..u64::from(count))
+        .map(|i| {
+            let e = table + i * 0x20;
+            let n = mem.read_cstr(mem.read_ptr(e).unwrap(), 128).unwrap();
+            (n, mem.read_u64(e + 8).unwrap() as i64)
+        })
+        .collect()
 }
 
 const DEFAULT_BIN_DIR: &str =
@@ -185,4 +247,5 @@ fn installed_build_collector_starts_with_every_task() {
     assert!(value("version_info").unwrap().contains("disk-class-v2"));
     // A file image's game-rules global is zero: nothing is loaded.
     assert!(value("phase").is_none() && value("match_id").is_none());
+    assert!(value("game_mode").is_none());
 }

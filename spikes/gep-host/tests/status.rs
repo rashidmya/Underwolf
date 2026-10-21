@@ -120,3 +120,19 @@ fn info_values_never_mark_event_rows_supported() {
     t.observe(&info("game_info", "match_id", Some("1")));
     assert_eq!(t.row("match_id").as_deref(), Some("unavailable"));
 }
+
+#[test]
+fn game_mode_row_follows_its_own_task() {
+    let mut t = StatusTable::default();
+    t.observe(&info("game_info", "game_mode", Some(r#"{"match_mode":"CoopBot","game_mode":"Normal"}"#)));
+    t.observe(&event("game_paused"));
+    assert_eq!(t.row("game_mode").as_deref(), Some("supported"));
+    let why = "invalid: layout: C_CitadelGameRules.m_eMatchMode";
+    t.observe(&info("gep_internal", "disabled_tasks", Some(&format!(r#"[{{"task":"game_mode","reason":"{why}"}}]"#))));
+    assert_eq!(t.row("game_mode"), Some(format!("disabled: {why}")));
+    assert_eq!(t.row("game_paused").as_deref(), Some("supported"));
+    // The clock switched off covers game_paused, not game_mode.
+    t.observe(&info("gep_internal", "disabled_tasks", Some(r#"[{"task":"clock","reason":"slow"}]"#)));
+    assert_eq!(t.row("game_mode").as_deref(), Some("supported"));
+    assert_eq!(t.row("game_paused").as_deref(), Some("disabled: slow"));
+}

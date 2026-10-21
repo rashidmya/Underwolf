@@ -196,8 +196,10 @@ impl Task for Clock {
         if self.last_clock.as_deref() != Some(clock.as_str()) {
             out.event("clock", format!("{{\"match_clock\":\"{clock}\"}}"));
         }
-        if self.last_paused == Some(false) && paused {
-            out.event("game_paused", "{\"game_paused\":true}".into());
+        // Overwolf's `game_paused` event: data `true`/`false`, on each pause and unpause seen
+        // between two passes of this match (the first pass has nothing to compare with).
+        if self.last_paused.is_some_and(|was| was != paused) {
+            out.event("game_paused", paused.to_string());
         }
         out.set(MATCH_INFO, "match_clock", Some(clock.clone()));
         out.set(MATCH_INFO, "game_paused", Some(paused.to_string()));

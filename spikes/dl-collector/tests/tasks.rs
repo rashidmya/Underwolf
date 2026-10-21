@@ -97,7 +97,8 @@ fn match_id_is_unsigned_and_zero_is_unset() {
 fn null_game_rules_clears_match_keys() {
     let (mut mem, w, mut tasks) = fresh();
     w.set_players(&mut mem, &teams_of(&[1, 1]));
-    for name in ["phase", "match_id", "clock", "roster"] {
+    set_modes(&mut mem, 3, 1);
+    for name in ["phase", "match_id", "clock", "roster", "game_mode"] {
         let mut t = task(&mut tasks, name);
         let p = run(&mut t, &mem).unwrap();
         // A valid pass first: the keys carry values.
@@ -105,6 +106,7 @@ fn null_game_rules_clears_match_keys() {
             "phase" => ("game_info", "phase"),
             "match_id" => ("match_info", "match_id"),
             "clock" => ("match_info", "match_clock"),
+            "game_mode" => ("game_info", "game_mode"),
             _ => ("match_info", "roster_0"),
         };
         assert!(value(&p, key.0, key.1).is_some(), "{name}");
@@ -591,21 +593,197 @@ fn clock_events_on_change_and_pause_edge() {
     w8(&mut mem, world::RULES_OBJ + world::OFF_PAUSED, 1);
     w32(&mut mem, world::RULES_OBJ + world::OFF_PAUSE_START, 16000);
     let p = run(&mut clock, &mem).unwrap();
+    // Overwolf's event data is the bare boolean: `{"name":"game_paused","data":true}`.
     assert_eq!(
         events(&p),
         vec![
             ("clock".into(), r#"{"match_clock":"07:40"}"#.into()),
-            ("game_paused".into(), r#"{"game_paused":true}"#.into()),
+            ("game_paused".into(), "true".into()),
         ]
     );
     assert_eq!(value(&p, "match_info", "game_paused"), Some("true"));
     // Still paused: nothing new.
     assert!(events(&run(&mut clock, &mem).unwrap()).is_empty());
+
+    // Unpausing (the paused ticks now include the pause) keeps 07:40 and emits `false`.
+    w8(&mut mem, world::RULES_OBJ + world::OFF_PAUSED, 0);
+    w32(&mut mem, world::RULES_OBJ + world::OFF_PAUSED_TICKS, 1120);
+    let p = run(&mut clock, &mem).unwrap();
+    assert_eq!(events(&p), vec![("game_paused".into(), "false".into())]);
+    assert_eq!(value(&p, "match_info", "game_paused"), Some("false"));
+    assert!(events(&run(&mut clock, &mem).unwrap()).is_empty());
+}
+
+#[test]
+fn game_paused_event_needs_a_seen_transition() {
+    // Paused from the first pass: the info key says so, but no change was seen, so no event.
+    let (mut mem, w, mut tasks) = fresh();
+    let mut clock = task(&mut tasks, "clock");
+    w8(&mut mem, world::RULES_OBJ + world::OFF_PAUSED, 1);
+    w32(&mut mem, world::RULES_OBJ + world::OFF_PAUSE_START, 16000);
+    let p = run(&mut clock, &mem).unwrap();
+    assert!(!p.events().iter().any(|(n, _)| n == "game_paused"));
+    assert_eq!(value(&p, "match_info", "game_paused"), Some("true"));
+
+    // Leaving GameInProgress clears the key and forgets the state: unpausing outside a match
+    // and coming back unpaused emits nothing.
+    w.set_state(&mut mem, 8);
+    assert_eq!(
+        value(&run(&mut clock, &mem).unwrap(), "match_info", "game_paused"),
+        None
+    );
+    w8(&mut mem, world::RULES_OBJ + world::OFF_PAUSED, 0);
+    w.set_state(&mut mem, 7);
+    let p = run(&mut clock, &mem).unwrap();
+    assert!(!p.events().iter().any(|(n, _)| n == "game_paused"));
+    assert_eq!(value(&p, "match_info", "game_paused"), Some("false"));
+
+    // A torn pass in between does not hide a transition.
+    let mut fired = false;
+    let globals = world::CLOCK_GLOBALS + 0x30;
+    let hooked = Hooked::new(mem, move |addr, len, mem| {
+        if addr == globals && len == 0x28 && !fired {
+            fired = true;
+            w8(mem, world::RULES_OBJ + world::OFF_PAUSED, 1);
+        }
+    });
+    assert_eq!(
+        clock.run(&hooked, &mut Pass::default()),
+        Err(TaskError::Torn)
+    );
+    let p = run(&mut clock, &hooked).unwrap();
+    assert_eq!(
+        p.events()
+            .iter()
+            .filter(|(n, _)| n == "game_paused")
+            .collect::<Vec<_>>(),
+        [&("game_paused".to_string(), "true".to_string())]
+    );
+}
+
+fn set_modes(mem: &mut FakeMem, match_mode: i32, game_mode: i32) {
+    w32(
+        mem,
+        world::RULES_OBJ + world::OFF_MATCH_MODE,
+        match_mode as u32,
+    );
+    w32(mem, world::RULES_OBJ + world::OFF_MODE, game_mode as u32);
+}
+
+fn read_mode(t: &mut Box<dyn Task>, mem: &dyn MemRead) -> Option<String> {
+    value(&run(t, mem).unwrap(), "game_info", "game_mode").map(String::from)
+}
+
+/// Overwolf documents `{"match_mode":"Unranked","game_mode":"Normal"}`: the game's
+/// `ECitadelMatchMode` / `ECitadelGameMode` names without their `k_ECitadel…_` prefix.
+#[test]
+fn game_mode_publishes_both_enum_names_in_overwolfs_shape() {
+    let (mut mem, w, mut tasks) = fresh();
+    let mut t = task(&mut tasks, "game_mode");
+    set_modes(&mut mem, 1, 1);
+    assert_eq!(
+        read_mode(&mut t, &mem).as_deref(),
+        Some(r#"{"match_mode":"Unranked","game_mode":"Normal"}"#)
+    );
+    // Every named value of build 6810, by number.
+    let match_modes = [
+        "Unranked",
+        "PrivateLobby",
+        "CoopBot",
+        "Ranked",
+        "ServerTest",
+        "Tutorial",
+        "HeroLabs",
+        "NewPlayerPlacement",
+    ];
+    for (i, name) in match_modes.iter().enumerate() {
+        set_modes(&mut mem, i as i32 + 1, 3);
+        assert_eq!(
+            read_mode(&mut t, &mem),
+            Some(format!(
+                r#"{{"match_mode":"{name}","game_mode":"Sandbox"}}"#
+            ))
+        );
+    }
+    let game_modes = [
+        "Normal",
+        "1v1Test",
+        "Sandbox",
+        "StreetBrawl",
+        "ExploreNYC",
+        "Internal",
+    ];
+    for (i, name) in game_modes.iter().enumerate() {
+        set_modes(&mut mem, 3, i as i32 + 1);
+        assert_eq!(
+            read_mode(&mut t, &mem),
+            Some(format!(
+                r#"{{"match_mode":"CoopBot","game_mode":"{name}"}}"#
+            ))
+        );
+    }
+    // Not tied to GameInProgress: published whenever the game rules exist.
+    w.set_state(&mut mem, 3);
+    assert!(read_mode(&mut t, &mem).is_some());
+    w.rules_present(&mut mem, false);
+    assert_eq!(read_mode(&mut t, &mem), None);
+}
+
+/// `Invalid` (0) means not set and a number without a name is unknown: neither is emitted.
+#[test]
+fn game_mode_leaves_out_invalid_and_unknown_values() {
+    let (mut mem, _, mut tasks) = fresh();
+    let mut t = task(&mut tasks, "game_mode");
+    for bad in [0, 9, -1, i32::MAX] {
+        set_modes(&mut mem, bad, 1);
+        assert_eq!(
+            read_mode(&mut t, &mem).as_deref(),
+            Some(r#"{"game_mode":"Normal"}"#),
+            "{bad}"
+        );
+    }
+    for bad in [0, 7, -1, i32::MIN] {
+        set_modes(&mut mem, 2, bad);
+        assert_eq!(
+            read_mode(&mut t, &mem).as_deref(),
+            Some(r#"{"match_mode":"PrivateLobby"}"#),
+            "{bad}"
+        );
+    }
+    set_modes(&mut mem, 0, 0);
+    assert_eq!(read_mode(&mut t, &mem), None);
+    set_modes(&mut mem, 100, -5);
+    assert_eq!(read_mode(&mut t, &mem), None);
+}
+
+#[test]
+fn game_mode_change_during_read_is_discarded() {
+    let (mut mem, _, mut tasks) = fresh();
+    set_modes(&mut mem, 3, 1);
+    let game_mode = world::RULES_OBJ + world::OFF_MODE;
+    let mut fired = false;
+    let hooked = Hooked::new(mem, move |addr, len, mem| {
+        // The match mode changes right after the first read of the game mode.
+        if addr == game_mode && len == 4 && !fired {
+            fired = true;
+            w32(mem, world::RULES_OBJ + world::OFF_MATCH_MODE, 1);
+        }
+    });
+    let mut t = task(&mut tasks, "game_mode");
+    let mut p = Pass::default();
+    assert_eq!(t.run(&hooked, &mut p), Err(TaskError::Torn));
+    assert!(!staged(&p, "game_info", "game_mode"));
+    assert_eq!(
+        read_mode(&mut t, &hooked).as_deref(),
+        Some(r#"{"match_mode":"Unranked","game_mode":"Normal"}"#)
+    );
 }
 
 #[test]
 fn every_staged_key_is_in_the_schema_and_fits() {
     let (mut mem, w, tasks) = fresh();
+    // The longest game_mode value.
+    set_modes(&mut mem, 8, 4);
     let mut teams = teams_of(&[6, 6]);
     for (n, p) in teams.iter_mut().flatten().enumerate() {
         p.items = (0..40).map(|i| 4_000_000_000 + i + n as u32).collect();
@@ -676,13 +854,20 @@ fn unresolved_fields_and_roots_list_the_task() {
     .unwrap();
     let names: Vec<_> = built.tasks.iter().map(|t| t.name()).collect();
     assert_eq!(names, vec!["phase", "match_id"]);
-    assert_eq!(built.unresolved.len(), 2);
+    assert_eq!(built.unresolved.len(), 3);
     assert_eq!(built.unresolved[0].0, "roster");
     assert!(built.unresolved[0].1.starts_with("unresolved: "));
     assert_eq!(built.unresolved[1].0, "clock");
     assert_eq!(
         built.unresolved[1].1,
         "unresolved: game time globals not found"
+    );
+    assert_eq!(
+        built.unresolved[2],
+        (
+            "game_mode",
+            "unresolved: C_CitadelGameRules.m_eMatchMode".to_string()
+        )
     );
 }
 
