@@ -25,6 +25,11 @@
 //! a localhost TCP socket (Wine's Winsock maps to real host sockets). The host runs a TCP listener
 //! for the C3 path (`docs/spikes/01-linux-input.md`).
 //!
+//! Commands: a reader thread on the same socket feeds every host message through
+//! [`ModuleCommands`]. Nothing is hooked at attach: the input hooks are installed only on
+//! `ModuleConfig { input_hooks: true }` (real-match runs send `false`), and `LoadPlugin` loads a
+//! plugin DLL (`super::plugin`) and answers `PluginLoaded`.
+//!
 //! Known gaps for hardware verification: keyboard is assumed legacy `WM_KEY*` (a raw-keyboard game
 //! would bypass the WndProc gate); the IAT hooks assume the raw-input functions are statically
 //! imported from user32 by a module loaded before injection (a dynamically resolved call would
@@ -33,7 +38,7 @@
 use std::ffi::c_void;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
-use std::sync::mpsc::{SyncSender, sync_channel};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -51,10 +56,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowLongPtrW, WNDPROC,
 };
 
-use uw_spike_ipc::{InputEvent, Msg, PROTOCOL, write_msg};
+use uw_spike_ipc::{InputEvent, Msg, PROTOCOL, read_msg, write_msg};
 
+use super::plugin;
 use super::{BTN_MIDDLE, BTN_RIGHT, HostSink, MessageOutcome, handle_message, handle_raw_buffer, handle_raw_record, wm};
 use crate::gate::{GameAction, InputGate};
+use crate::module::{ModuleAction, ModuleCommands};
 
 /// Tag on our synthetic releases so the raw hook lets them reach the game unmolested.
 const SYNTH_EXTRA_INFO: u32 = 0x5557_4F4C; // "UWOL"
@@ -368,8 +375,9 @@ fn host_port() -> u16 {
 }
 
 /// Own the socket on a background thread so the game's message pump never blocks on a slow or
-/// stalled host. Connects (with retry), greets, then drains the queue to the wire.
-fn run_sender(rx: std::sync::mpsc::Receiver<Msg>) {
+/// stalled host. Connects (with retry), greets, starts the command reader, then drains the queue
+/// to the wire.
+fn run_sender(rx: Receiver<Msg>, replies: SyncSender<Msg>) {
     let port = host_port();
     let mut stream = loop {
         match TcpStream::connect(("127.0.0.1", port)) {
@@ -381,6 +389,9 @@ fn run_sender(rx: std::sync::mpsc::Receiver<Msg>) {
     if write_msg(&mut stream, &hello).is_err() {
         return;
     }
+    if let Ok(reader) = stream.try_clone() {
+        std::thread::spawn(move || run_reader(reader, replies));
+    }
     while let Ok(msg) = rx.recv() {
         if write_msg(&mut stream, &msg).is_err() {
             break; // host went away; the hook keeps running as pure passthrough
@@ -388,12 +399,33 @@ fn run_sender(rx: std::sync::mpsc::Receiver<Msg>) {
     }
 }
 
-/// Wire up the non-blocking host channel, find the game window, and install the subclass + hooks.
-fn attach() {
-    let (tx, rx) = sync_channel::<Msg>(1024);
-    std::thread::spawn(move || run_sender(rx));
-    let _ = STATE.set(Mutex::new(HookState { gate: InputGate::new(), host: ChannelHost { tx } }));
+/// Carries out the host's commands until the host closes the connection.
+fn run_reader(mut stream: TcpStream, replies: SyncSender<Msg>) {
+    let mut commands = ModuleCommands::new();
+    while let Ok(msg) = read_msg(&mut stream) {
+        for action in commands.on_msg(&msg) {
+            match action {
+                ModuleAction::InstallInputHooks => {
+                    std::thread::spawn(install_when_window_appears);
+                }
+                ModuleAction::LoadPlugin { path, channel, args } => {
+                    let result = plugin::load(&path, channel, &args);
+                    eprintln!("[uw-spike-input] plugin {path}: {result:?}");
+                    let (ok, error) = match result {
+                        Ok(()) => (true, None),
+                        Err(e) => (false, Some(e)),
+                    };
+                    if replies.send(Msg::PluginLoaded { path, ok, error }).is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
 
+/// Find the game window, then install the subclass + input hooks.
+fn install_when_window_appears() {
     let hwnd = loop {
         if let Some(h) = find_main_window() {
             break h;
@@ -401,6 +433,14 @@ fn attach() {
         std::thread::sleep(Duration::from_millis(200));
     };
     unsafe { install(hwnd) };
+}
+
+/// Wire up the non-blocking host channel and the command reader. No hooks are installed here.
+fn attach() {
+    let (tx, rx) = sync_channel::<Msg>(1024);
+    let replies = tx.clone();
+    std::thread::spawn(move || run_sender(rx, replies));
+    let _ = STATE.set(Mutex::new(HookState { gate: InputGate::new(), host: ChannelHost { tx } }));
 }
 
 const DLL_PROCESS_ATTACH: u32 = 1;

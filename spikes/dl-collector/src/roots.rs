@@ -4,6 +4,7 @@ use std::fmt;
 use crate::mem::{MemRead, ReadError};
 use crate::module::Module;
 use crate::pattern::{Pattern, rip_target, scan};
+use crate::timing::CallerFilter;
 
 // Byte patterns and checks come from the owner's reader
 // ~/Dev/underlock/src/games/native/source2.js, verified there on Deadlock ClientVersion 6801
@@ -291,4 +292,62 @@ pub fn resolve_clock_roots(m: &dyn MemRead, client: &Module) -> Result<ClockRoot
         pregame_convar_ptr,
         pregame_enabled_ptr,
     })
+}
+
+// Main-loop QPC call site (spec §6.4 "Loading and timing"). Found with discovery mode
+// (`discover=<s>`) in the Hideout: the chain on the game window's thread, inside a game module,
+// firing at about the frame rate. `ret_offset` turns a pattern hit into the return address.
+// Not yet discovered (Task C4 Step 5, owner session): until then the plugin reports
+// `MAIN_LOOP_NOT_FOUND` and runs no passes.
+
+/// A masked byte pattern in `module` whose hit plus `ret_offset` is a return address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallerPattern {
+    pub module: &'static str,
+    pub pattern: &'static str,
+    pub ret_offset: u64,
+}
+
+/// The game's QPC call on its main loop (the immediate caller).
+pub const MAIN_LOOP_IMMEDIATE: Option<CallerPattern> = None;
+/// The frame above it, when the game reaches QPC through a tier0 wrapper.
+pub const MAIN_LOOP_OUTER: Option<CallerPattern> = None;
+
+pub const MAIN_LOOP_NOT_FOUND: &str = "main-loop caller not found";
+const MAIN_LOOP_AMBIGUOUS: &str = "main-loop caller is ambiguous";
+
+fn caller_site(m: &dyn MemRead, modules: &[Module], p: &CallerPattern) -> Result<u64, String> {
+    let module = modules
+        .iter()
+        .find(|md| md.name.eq_ignore_ascii_case(p.module))
+        .ok_or(MAIN_LOOP_NOT_FOUND)?;
+    match find_sites(m, module, p.pattern, 2, "main-loop caller") {
+        Ok(sites) if sites.len() == 1 => Ok(sites[0].wrapping_add(p.ret_offset)),
+        Ok(sites) if sites.len() > 1 => Err(MAIN_LOOP_AMBIGUOUS.into()),
+        Err(RootError::Ambiguous(_)) => Err(MAIN_LOOP_AMBIGUOUS.into()),
+        Ok(_) | Err(RootError::NotFound(_)) => Err(MAIN_LOOP_NOT_FOUND.into()),
+        Err(e) => Err(format!("main-loop caller: {e}")),
+    }
+}
+
+/// Resolves both patterns to exactly one hit each in their module; the outer one is required
+/// when it is defined.
+pub fn resolve_caller(
+    m: &dyn MemRead,
+    modules: &[Module],
+    immediate: Option<&CallerPattern>,
+    outer: Option<&CallerPattern>,
+) -> Result<CallerFilter, String> {
+    let immediate = caller_site(m, modules, immediate.ok_or(MAIN_LOOP_NOT_FOUND)?)?;
+    let outer = outer.map(|p| caller_site(m, modules, p)).transpose()?;
+    Ok(CallerFilter { immediate, outer })
+}
+
+pub fn resolve_main_loop(m: &dyn MemRead, modules: &[Module]) -> Result<CallerFilter, String> {
+    resolve_caller(
+        m,
+        modules,
+        MAIN_LOOP_IMMEDIATE.as_ref(),
+        MAIN_LOOP_OUTER.as_ref(),
+    )
 }

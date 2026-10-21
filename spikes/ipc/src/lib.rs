@@ -73,6 +73,14 @@ pub enum Msg {
     Input(InputEvent),
     /// layer → host: the edit-mode hotkey asks for this state. host → layer: the current state.
     EditMode { on: bool },
+    /// host → in-game module, the first reply to its `Hello`. The module installs no input hooks
+    /// until it receives `input_hooks: true` (real-match runs send `false`).
+    ModuleConfig { input_hooks: bool },
+    /// host → in-game module: load a plugin DLL (`path` is a Windows path) and start it on data
+    /// channel `channel` with the space-separated `args`.
+    LoadPlugin { path: String, channel: u32, args: String },
+    /// in-game module → host: the outcome of a `LoadPlugin`.
+    PluginLoaded { path: String, ok: bool, error: Option<String> },
 }
 
 /// Window coordinates → swapchain pixels (the game may render at a different size than its

@@ -27,6 +27,8 @@ const EVENT_WINDOW_DIV: u64 = 5;
 /// Events kept while the channel refuses them; the oldest are dropped beyond this.
 const EVENT_QUEUE_MAX: usize = 256;
 const STATS_INTERVAL_S: u64 = 10;
+/// No pass for this long while scanning publishes `plugin_status="stalled"`.
+pub const STALL_S: u64 = 5;
 const STATS_WINDOW_MAX: usize = 1024;
 /// Longest reason text inside `disabled_tasks`.
 const REASON_MAX: usize = 100;
@@ -44,6 +46,8 @@ pub enum Status {
     Initializing,
     Initialized,
     Scanning,
+    /// Scanning, but no pass ran for `STALL_S` (the main-loop call site stopped firing).
+    Stalled,
     /// Started with `selftest=1`: nothing is resolved or read.
     Selftest,
     Error(String),
@@ -56,6 +60,7 @@ impl Status {
             Status::Initializing => "initializing",
             Status::Initialized => "initialized",
             Status::Scanning => "scanning",
+            Status::Stalled => "stalled",
             Status::Selftest => "selftest",
             Status::Error(_) => "error",
         }
@@ -105,6 +110,8 @@ pub struct Collector {
     durations: Vec<u64>,
     window_passes: u64,
     last_stats: Option<u64>,
+    /// When the last pass ended (or scanning began).
+    last_pass: u64,
 }
 
 fn truncate(s: &str, max: usize) -> &str {
@@ -148,6 +155,7 @@ impl Collector {
             durations: Vec::new(),
             window_passes: 0,
             last_stats: None,
+            last_pass: 0,
         };
         let args = Args::parse(args);
         let result = catch_unwind(AssertUnwindSafe(|| {
@@ -176,6 +184,45 @@ impl Collector {
         if catch_unwind(AssertUnwindSafe(|| self.tick_inner(m))).is_err() {
             self.fail("collector panicked");
         }
+    }
+
+    /// The main-loop hook is armed: `Initialized` becomes `Scanning` (published). Any other state
+    /// is left alone.
+    pub fn scanning(&mut self) {
+        if self.status != Status::Initialized {
+            return;
+        }
+        self.status = Status::Scanning;
+        self.last_pass = (self.clock)();
+        let mut pass = Pass::default();
+        pass.set(
+            GEP_INTERNAL,
+            "plugin_status",
+            Some(self.status.text().into()),
+        );
+        self.publish(&pass);
+    }
+
+    /// Called periodically off the main thread: while scanning, no pass for `STALL_S` publishes
+    /// `plugin_status="stalled"`. The next pass publishes `"scanning"` again.
+    pub fn check_stall(&mut self) {
+        if self.status != Status::Scanning {
+            return;
+        }
+        let now = (self.clock)();
+        if u128::from(now.saturating_sub(self.last_pass))
+            < u128::from(STALL_S) * u128::from(self.freq)
+        {
+            return;
+        }
+        self.status = Status::Stalled;
+        let mut pass = Pass::default();
+        pass.set(
+            GEP_INTERNAL,
+            "plugin_status",
+            Some(self.status.text().into()),
+        );
+        let _ = catch_unwind(AssertUnwindSafe(|| self.publish(&pass)));
     }
 
     /// Publishes `plugin_status="shutdown"`; later ticks do nothing.
@@ -236,7 +283,8 @@ impl Collector {
 
     /// Publishes `plugin_status="error"` and the reason, and clears every game value that was
     /// committed before (nothing stays visible that the collector can no longer vouch for).
-    fn fail(&mut self, why: &str) {
+    /// Later ticks do nothing. Also used by the plugin when the main-loop caller is not found.
+    pub fn fail(&mut self, why: &str) {
         self.status = Status::Error(why.to_string());
         let mut pass = Pass::default();
         for (cat, key) in self.committed.keys() {
@@ -261,7 +309,7 @@ impl Collector {
                 self.flush_events();
                 return;
             }
-            Status::Initialized | Status::Scanning => {}
+            Status::Initialized | Status::Scanning | Status::Stalled => {}
         }
         let started = (self.clock)();
         let mut pass = self.runner.pass(m, &*self.clock, self.freq);
@@ -273,6 +321,7 @@ impl Collector {
             Some(self.status.text().into()),
         );
         pass.set(GEP_INTERNAL, "disabled_tasks", Some(self.disabled_json()));
+        self.last_pass = now;
         self.record_duration(now.saturating_sub(started));
         if let Some(stats) = self.stats_due(now) {
             pass.set(GEP_INTERNAL, "pass_stats", Some(stats));

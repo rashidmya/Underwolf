@@ -30,7 +30,8 @@ type SendResult = 'acked' | 'dropped' | 'timeout';
 
 interface Bridge {
   startServer(socketPath: string): void;
-  startInputServer(port: number): void;
+  /// Each in-game module `Hello` is answered with `ModuleConfig { input_hooks }`.
+  startInputServer(port: number, inputHooks: boolean): void;
   setCursor(x: number, y: number): boolean;
   peerGeneration(): number;
   takeEditRequests(): boolean[];
@@ -457,7 +458,8 @@ app.whenReady().then(() => {
   captureMode = capture;
   bridge.startServer(SOCKET);
   if (capture === 'win32') {
-    bridge.startInputServer(HOST_PORT);
+    // The module installs no input hooks until told to; the Hideout runs want them.
+    bridge.startInputServer(HOST_PORT, true);
     console.log(`[osr-host] C3 input listener on 127.0.0.1:${HOST_PORT}`);
   }
   console.log(`[osr-host] socket ${SOCKET}; capture ${capture}; widgets: ${names.join(', ')}`);

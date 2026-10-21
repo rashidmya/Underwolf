@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use std::net::{TcpListener, TcpStream};
 
-use uw_spike_ipc::{InputEvent, Msg, Plane, fourcc_for, parse_modifier, read_msg, recv, send};
+use uw_spike_ipc::{InputEvent, Msg, Plane, fourcc_for, parse_modifier, read_msg, recv, send, write_msg};
 
 pub struct PlaneFd {
     /// Owned by Electron; only borrowed for the duration of `send_frame`.
@@ -185,12 +185,15 @@ impl Server {
     /// Listens for the C3 Win32 hook (candidate C3), which runs inside the game under Proton and
     /// forwards edit-mode toggles and captured input over localhost TCP. Its messages feed the same
     /// `edit_requests`/`inputs` queues as the layer's C2 path, so the host routes them identically.
-    pub fn bind_input_tcp(&self, port: u16) -> io::Result<()> {
+    /// Each module `Hello` is answered with `on_hello`, in order (`ModuleConfig` first: the module
+    /// installs no input hooks until it is told to).
+    pub fn bind_input_tcp(&self, port: u16, on_hello: Vec<Msg>) -> io::Result<()> {
         let listener = TcpListener::bind(("127.0.0.1", port))?;
         let inner = self.inner.clone();
+        let on_hello = Arc::new(on_hello);
         std::thread::Builder::new()
             .name("uw-bridge-tcp".into())
-            .spawn(move || tcp_accept_loop(listener, inner))?;
+            .spawn(move || tcp_accept_loop(listener, inner, on_hello))?;
         Ok(())
     }
 
@@ -369,22 +372,32 @@ fn accept_loop(listener: UnixListener, inner: Arc<Inner>) {
     }
 }
 
-fn tcp_accept_loop(listener: TcpListener, inner: Arc<Inner>) {
+fn tcp_accept_loop(listener: TcpListener, inner: Arc<Inner>, on_hello: Arc<Vec<Msg>>) {
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         let inner = inner.clone();
-        let _ =
-            std::thread::Builder::new().name("uw-bridge-tcp-peer".into()).spawn(move || tcp_read_loop(stream, inner));
+        let on_hello = on_hello.clone();
+        let _ = std::thread::Builder::new()
+            .name("uw-bridge-tcp-peer".into())
+            .spawn(move || tcp_read_loop(stream, inner, &on_hello));
     }
 }
 
 /// Reads the C3 hook's framed messages. Edit-mode toggles and input go into the shared queues the
 /// host already drains. If the hook dies while edit mode is on, leave edit mode so the game can't
 /// get stuck frozen.
-fn tcp_read_loop(mut stream: TcpStream, inner: Arc<Inner>) {
+fn tcp_read_loop(mut stream: TcpStream, inner: Arc<Inner>, on_hello: &[Msg]) {
     let mut edit_on = false;
     while let Ok(msg) = read_msg(&mut stream) {
         match msg {
+            Msg::Hello { .. } => {
+                if on_hello.iter().any(|m| write_msg(&mut stream, m).is_err()) {
+                    break;
+                }
+            }
+            Msg::PluginLoaded { path, ok, error } => {
+                eprintln!("[osr-bridge] plugin {path}: {}", if ok { "loaded".into() } else { error.unwrap_or_default() });
+            }
             Msg::EditMode { on } => {
                 edit_on = on;
                 inner.edit_requests.lock().unwrap().push(on);

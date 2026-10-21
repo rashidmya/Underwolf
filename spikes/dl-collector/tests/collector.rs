@@ -472,6 +472,7 @@ fn schema_has_the_fixed_keys_and_limits() {
     assert_eq!(find("gep_internal", "plugin_error"), Some(256));
     assert_eq!(find("gep_internal", "disabled_tasks"), Some(1024));
     assert_eq!(find("gep_internal", "pass_stats"), Some(128));
+    assert_eq!(find("gep_internal", "discovery"), Some(4096));
     assert_eq!(find("game_info", "phase"), Some(64));
     assert_eq!(find("game_info", "game_mode"), Some(256));
     assert_eq!(find("match_info", "match_id"), Some(32));
@@ -484,7 +485,99 @@ fn schema_has_the_fixed_keys_and_limits() {
         assert_eq!(find("match_info", &format!("items_{i}")), Some(2048));
     }
     assert_eq!(find("match_info", "roster_12"), None);
-    assert_eq!(s.keys().count(), 5 + 2 + 5 + 24);
+    assert_eq!(s.keys().count(), 6 + 2 + 5 + 24);
+}
+
+#[test]
+fn main_loop_not_found_publishes_error_and_stops_passes() {
+    let r = rig(Skip::default());
+    let mut c = r.start("");
+    assert_eq!(c.status(), &Status::Initialized);
+    c.fail("main-loop caller not found");
+    assert_eq!(
+        c.status(),
+        &Status::Error("main-loop caller not found".into())
+    );
+    assert_eq!(
+        r.value("gep_internal", "plugin_status"),
+        Some(Some("error".into()))
+    );
+    assert_eq!(
+        r.value("gep_internal", "plugin_error"),
+        Some(Some("main-loop caller not found".into()))
+    );
+    let commits = r.log.borrow().commits.len();
+    r.now.fetch_add(100, Ordering::Relaxed);
+    r.tick(&mut c);
+    c.check_stall();
+    assert_eq!(r.log.borrow().commits.len(), commits);
+}
+
+#[test]
+fn scanning_is_published_once_the_hook_is_armed() {
+    let r = rig(Skip::default());
+    let mut c = r.start("");
+    c.scanning();
+    assert_eq!(c.status(), &Status::Scanning);
+    assert_eq!(
+        r.value("gep_internal", "plugin_status"),
+        Some(Some("scanning".into()))
+    );
+    // Arming an errored collector changes nothing.
+    let r = rig(Skip {
+        rules: true,
+        ..Skip::default()
+    });
+    let mut c = r.start("");
+    c.scanning();
+    assert!(matches!(c.status(), Status::Error(_)));
+    assert_eq!(
+        r.value("gep_internal", "plugin_status"),
+        Some(Some("error".into()))
+    );
+}
+
+#[test]
+fn no_pass_for_five_seconds_is_stalled_until_the_next_pass() {
+    let r = rig(Skip::default());
+    let mut c = r.start("");
+    c.scanning();
+    r.now.store(4_999, Ordering::Relaxed);
+    c.check_stall();
+    assert_eq!(c.status(), &Status::Scanning);
+    r.now.store(5_000, Ordering::Relaxed);
+    c.check_stall();
+    assert_eq!(c.status(), &Status::Stalled);
+    assert_eq!(
+        r.value("gep_internal", "plugin_status"),
+        Some(Some("stalled".into()))
+    );
+    let commits = r.log.borrow().commits.len();
+    c.check_stall();
+    assert_eq!(r.log.borrow().commits.len(), commits, "stalled once");
+
+    r.tick(&mut c);
+    assert_eq!(c.status(), &Status::Scanning);
+    assert_eq!(
+        r.value("gep_internal", "plugin_status"),
+        Some(Some("scanning".into()))
+    );
+    // The stall window restarts at the last pass.
+    r.now.store(9_000, Ordering::Relaxed);
+    c.check_stall();
+    assert_eq!(c.status(), &Status::Scanning);
+    r.now.store(10_000, Ordering::Relaxed);
+    c.check_stall();
+    assert_eq!(c.status(), &Status::Stalled);
+}
+
+#[test]
+fn stall_check_needs_scanning() {
+    let r = rig(Skip::default());
+    let mut c = r.start("");
+    r.now.store(60_000, Ordering::Relaxed);
+    c.check_stall();
+    assert_eq!(c.status(), &Status::Initialized);
 }
 
 fn keys_of(commit: &[Set]) -> Vec<(&str, Option<&[u8]>)> {

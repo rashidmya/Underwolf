@@ -8,6 +8,7 @@
 
 pub mod capture_win32_hook;
 pub mod gate;
+pub mod module;
 
 #[cfg(unix)]
 pub mod capture_wine_x11;

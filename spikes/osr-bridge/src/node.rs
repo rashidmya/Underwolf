@@ -8,6 +8,8 @@ use napi::bindgen_prelude::{AsyncTask, Buffer};
 use napi::{Env, Error, Result, Task};
 use napi_derive::napi;
 
+use uw_spike_ipc::Msg;
+
 use crate::{Bitmap, FrameInfo, PlaneFd, SendResult, Server};
 
 const ACK_TIMEOUT: Duration = Duration::from_millis(100);
@@ -111,13 +113,14 @@ pub fn set_edit_mode(on: bool) -> bool {
 }
 
 /// Starts the localhost TCP listener for the C3 in-game Win32 hook (candidate C3). Its edit-mode
-/// toggles and input join the same queues as `takeEditRequests`/`takeInputs`.
+/// toggles and input join the same queues as `takeEditRequests`/`takeInputs`. Each module
+/// `Hello` is answered with `ModuleConfig { input_hooks }`.
 #[napi]
-pub fn start_input_server(port: u32) -> Result<()> {
+pub fn start_input_server(port: u32, input_hooks: bool) -> Result<()> {
     SERVER
         .get()
         .ok_or_else(|| Error::from_reason("server not started"))?
-        .bind_input_tcp(port as u16)
+        .bind_input_tcp(port as u16, vec![Msg::ModuleConfig { input_hooks }])
         .map_err(|e| Error::from_reason(e.to_string()))
 }
 

@@ -23,7 +23,29 @@ fn all_variants() -> Vec<Msg> {
         Msg::Layout { widget: 3, x: 5, y: 6, visible: false },
         Msg::Slot { widget: 2, slot: 1, width: 400, height: 300, stride: 1600, drm_fourcc: 0x3432_5241 },
         Msg::FrameShm { id: 99, widget: 2, slot: 1, x: 100, y: 450 },
+        Msg::ModuleConfig { input_hooks: true },
+        Msg::ModuleConfig { input_hooks: false },
+        Msg::LoadPlugin {
+            path: r"Z:\home\u\.local\share\underwolf-spike\uw_spike_dlcollector.dll".into(),
+            channel: 1,
+            args: "discover=10 corrupt=C_Team.m_iTeamNum".into(),
+        },
+        Msg::PluginLoaded { path: r"Z:\p\c.dll".into(), ok: true, error: None },
+        Msg::PluginLoaded { path: r"Z:\p\c.dll".into(), ok: false, error: Some("LoadLibraryW failed: 126".into()) },
     ]
+}
+
+#[test]
+fn tcp_framing_roundtrip() {
+    let mut buf = Vec::new();
+    for m in all_variants() {
+        uw_spike_ipc::write_msg(&mut buf, &m).unwrap();
+    }
+    let mut r = &buf[..];
+    for m in all_variants() {
+        assert_eq!(uw_spike_ipc::read_msg(&mut r).unwrap(), m);
+    }
+    assert!(r.is_empty());
 }
 
 #[test]

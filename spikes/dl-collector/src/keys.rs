@@ -14,6 +14,7 @@ pub const ITEMS_MAX: u32 = 2048;
 pub const DISABLED_TASKS_MAX: u32 = 1024;
 pub const PLUGIN_STATUS_MAX: u32 = 32;
 pub const PLUGIN_ERROR_MAX: u32 = 256;
+pub const DISCOVERY_MAX: u32 = 4096;
 
 pub fn roster_key(slot: usize) -> String {
     format!("roster_{slot}")
@@ -44,6 +45,7 @@ pub fn deadlock_schema() -> Schema {
                     key("plugin_error", PLUGIN_ERROR_MAX),
                     key("disabled_tasks", DISABLED_TASKS_MAX),
                     key("pass_stats", 128),
+                    key("discovery", DISCOVERY_MAX),
                 ],
             ),
             (

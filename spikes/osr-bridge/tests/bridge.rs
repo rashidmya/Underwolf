@@ -4,7 +4,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use uw_spike_ipc::{InputEvent, Msg, recv, send, write_msg};
+use uw_spike_ipc::{InputEvent, Msg, read_msg, recv, send, write_msg};
 use uw_spike_osr_bridge::{FrameInfo, PlaneFd, SendResult, Server};
 
 const TIMEOUT: Duration = Duration::from_millis(100);
@@ -119,7 +119,7 @@ fn bind_replaces_stale_socket_file() {
 fn c3_tcp_peer_feeds_edit_and_input_queues() {
     let server = Server::bind(&socket_path("g.sock")).unwrap();
     let port = 40000 + (std::process::id() % 20000) as u16;
-    server.bind_input_tcp(port).unwrap();
+    server.bind_input_tcp(port, Vec::new()).unwrap();
     let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
     write_msg(&mut client, &Msg::Hello { protocol: 1, pid: 1 }).unwrap();
     write_msg(&mut client, &Msg::EditMode { on: true }).unwrap();
@@ -134,7 +134,7 @@ fn c3_tcp_peer_feeds_edit_and_input_queues() {
 fn c3_tcp_disconnect_while_editing_requests_edit_off() {
     let server = Server::bind(&socket_path("h.sock")).unwrap();
     let port = 40001 + (std::process::id() % 20000) as u16;
-    server.bind_input_tcp(port).unwrap();
+    server.bind_input_tcp(port, Vec::new()).unwrap();
     let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
     write_msg(&mut client, &Msg::EditMode { on: true }).unwrap();
     wait_until(|| server.pending_edit_requests() >= 1);
@@ -143,6 +143,27 @@ fn c3_tcp_disconnect_while_editing_requests_edit_off() {
     drop(client);
     wait_until(|| server.pending_edit_requests() >= 1);
     assert_eq!(server.take_edit_requests(), vec![false], "a dead hook must not leave the game frozen");
+}
+
+/// The in-game module installs input hooks only when told: the host answers each module `Hello`
+/// with its configured replies (`ModuleConfig` first), in order.
+#[test]
+fn module_hello_gets_the_configured_replies() {
+    let server = Server::bind(&socket_path("i.sock")).unwrap();
+    let port = 40002 + (std::process::id() % 20000) as u16;
+    let replies = vec![
+        Msg::ModuleConfig { input_hooks: true },
+        Msg::LoadPlugin { path: r"Z:\p.dll".into(), channel: 1, args: String::new() },
+    ];
+    server.bind_input_tcp(port, replies.clone()).unwrap();
+    for _ in 0..2 {
+        let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        write_msg(&mut client, &Msg::Hello { protocol: 1, pid: 1 }).unwrap();
+        for want in &replies {
+            assert_eq!(&read_msg(&mut client).unwrap(), want);
+        }
+    }
 }
 
 #[test]

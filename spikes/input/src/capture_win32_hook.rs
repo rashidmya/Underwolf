@@ -308,4 +308,6 @@ pub fn handle_message(
 }
 
 #[cfg(windows)]
+mod plugin;
+#[cfg(windows)]
 mod win32;

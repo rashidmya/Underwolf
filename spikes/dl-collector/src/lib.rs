@@ -7,7 +7,10 @@ pub mod keys;
 pub mod mem;
 pub mod module;
 pub mod pattern;
+#[cfg(windows)]
+mod plugin;
 pub mod roots;
 pub mod runner;
 pub mod schema;
 pub mod tasks;
+pub mod timing;
