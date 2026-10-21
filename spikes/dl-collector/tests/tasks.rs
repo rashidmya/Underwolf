@@ -1219,6 +1219,10 @@ fn tower_destroyed_change_during_read_is_discarded() {
             7 => w32(mem, world::RULES_OBJ + world::OFF_MATCH_ID, 5678),
             // Two passes later at the same point: the game rules global moves to RULES2.
             11 => w64(mem, rules_global, RULES2),
+            // Two passes later at the same point: the mode leaves Normal.
+            17 => w32(mem, RULES2 + world::OFF_MODE, 3),
+            // Two passes later at the same point: the match ends.
+            21 => w32(mem, RULES2 + world::OFF_STATE, 8),
             _ => {}
         }
     });
@@ -1251,6 +1255,25 @@ fn tower_destroyed_change_during_read_is_discarded() {
     assert!(towers(&mut t, &hooked).is_empty());
     w32(&mut hooked.mem.borrow_mut(), amber_alive, 8);
     assert_eq!(towers(&mut t, &hooked), [r#""Amber""#]);
+
+    // A mode that leaves Normal during the read is torn, and nothing fires after it.
+    w32(&mut hooked.mem.borrow_mut(), amber_alive, 7);
+    let mut p = Pass::default();
+    assert_eq!(t.run(&hooked, &mut p), Err(TaskError::Torn));
+    assert!(p.events().is_empty());
+    assert!(towers(&mut t, &hooked).is_empty());
+    w32(&mut hooked.mem.borrow_mut(), RULES2 + world::OFF_MODE, 1);
+    assert!(towers(&mut t, &hooked).is_empty());
+
+    // Counts are validated only once the match is read again: an implausible count (3 of 2)
+    // read while the match ends is torn, not invalid.
+    let sapphire_alive = World::team(1) + world::OFF_BOSSES_ALIVE;
+    w32(&mut hooked.mem.borrow_mut(), sapphire_alive, 3);
+    w32(&mut hooked.mem.borrow_mut(), sapphire_max, 2);
+    let mut p = Pass::default();
+    assert_eq!(t.run(&hooked, &mut p), Err(TaskError::Torn));
+    assert!(p.events().is_empty());
+    assert!(towers(&mut t, &hooked).is_empty());
 }
 
 #[test]
