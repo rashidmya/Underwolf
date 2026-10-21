@@ -225,3 +225,70 @@ fn torn_and_read_errors_drop_only_this_pass() {
     assert!(p.get("match_info", "roster_0").is_some());
     assert_eq!(p.events().len(), 1);
 }
+
+fn keys_task(
+    name: &'static str,
+    key: &'static str,
+    fail_on: u32,
+    fail: fn() -> Result<(), TaskError>,
+) -> Box<dyn Task> {
+    let mut n = 0;
+    task(name, move |p| {
+        n += 1;
+        p.set("match_info", key, Some(format!("v{n}")));
+        if n == fail_on { fail() } else { Ok(()) }
+    })
+}
+
+#[test]
+fn disabling_clears_the_keys_the_task_staged_earlier() {
+    fn invalid() -> Result<(), TaskError> {
+        Err(TaskError::Invalid("layout".into()))
+    }
+    fn crash() -> Result<(), TaskError> {
+        panic!("boom")
+    }
+    let mem = FakeMem::new();
+    let cases: [(fn() -> Result<(), TaskError>, &str); 2] =
+        [(invalid, "invalid: layout"), (crash, "crashed")];
+    for (fail, reason) in cases {
+        let mut r = Runner::new(vec![
+            keys_task("bad", "roster_0", 3, fail),
+            setter("ok", "roster_1"),
+        ]);
+        for _ in 0..2 {
+            let p = r.pass(&mem, &|| 0, FREQ);
+            assert!(p.get("match_info", "roster_0").unwrap().is_some());
+        }
+        let p = r.pass(&mem, &|| 0, FREQ);
+        assert_eq!(r.disabled(), vec![("bad", reason.to_string())]);
+        assert_eq!(p.get("match_info", "roster_0"), Some(None), "{reason}");
+        assert!(p.get("match_info", "roster_1").unwrap().is_some());
+    }
+}
+
+#[test]
+fn slow_disable_clears_the_keys_in_the_same_pass() {
+    let mem = FakeMem::new();
+    let clock = Rc::new(Cell::new(0u64));
+    let mut r = Runner::new(vec![slow(&clock, 25)]);
+    let now = now_of(&clock);
+    for _ in 0..10 {
+        let p = r.pass(&mem, &now, FREQ);
+        assert!(p.get("match_info", "roster_0").unwrap().is_some());
+    }
+    let p = r.pass(&mem, &now, FREQ);
+    assert_eq!(r.disabled(), vec![("slow", "slow".to_string())]);
+    assert_eq!(p.get("match_info", "roster_0"), Some(None));
+}
+
+#[test]
+fn failed_runs_before_disabling_do_not_add_keys_to_clear() {
+    let mem = FakeMem::new();
+    let mut r = Runner::new(vec![task("bad", |p| {
+        p.set("match_info", "roster_0", Some("x".into()));
+        Err(TaskError::Invalid("layout".into()))
+    })]);
+    let p = r.pass(&mem, &|| 0, FREQ);
+    assert!(p.get("match_info", "roster_0").is_none());
+}

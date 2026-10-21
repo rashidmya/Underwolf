@@ -1,6 +1,7 @@
 //! Task runner (spec §6.4): times every task, disables the slow, the crashing and the invalid
 //! ones, and merges the rest of a pass into one staged update.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -90,6 +91,8 @@ struct Slot {
     task: Box<dyn Task>,
     overruns: u32,
     disabled: Option<String>,
+    /// Every key this task has staged in a pass that was kept.
+    keys: BTreeSet<(String, String)>,
 }
 
 pub struct Runner {
@@ -105,13 +108,16 @@ impl Runner {
                     task,
                     overruns: 0,
                     disabled: None,
+                    keys: BTreeSet::new(),
                 })
                 .collect(),
         }
     }
 
     /// Runs every enabled task once. `clock` counts ticks of `freq` per second. A task's staged
-    /// values and events enter the result only when it returns `Ok`.
+    /// values and events enter the result only when it returns `Ok`. The pass in which a task
+    /// becomes disabled also clears every key that task ever staged, so no value of an
+    /// untrusted task stays visible.
     pub fn pass(&mut self, m: &dyn MemRead, clock: &dyn Fn() -> u64, freq: u64) -> Pass {
         let mut pass = Pass::default();
         for slot in &mut self.slots {
@@ -126,7 +132,11 @@ impl Runner {
                 Err(_) => slot.disabled = Some("crashed".into()),
                 Ok(Err(TaskError::Invalid(why))) => slot.disabled = Some(format!("invalid: {why}")),
                 Ok(Err(TaskError::Torn | TaskError::Read(_))) => {}
-                Ok(Ok(())) => pass.merge(staged),
+                Ok(Ok(())) => {
+                    slot.keys
+                        .extend(staged.sets().iter().map(|(c, k, _)| (c.clone(), k.clone())));
+                    pass.merge(staged);
+                }
             }
             if slot.disabled.is_none()
                 && u128::from(took) * 1000 > u128::from(OVERRUN_MS) * u128::from(freq)
@@ -134,6 +144,11 @@ impl Runner {
                 slot.overruns += 1;
                 if slot.overruns > MAX_OVERRUNS {
                     slot.disabled = Some("slow".into());
+                }
+            }
+            if slot.disabled.is_some() {
+                for (cat, key) in &slot.keys {
+                    pass.set(cat, key, None);
                 }
             }
         }

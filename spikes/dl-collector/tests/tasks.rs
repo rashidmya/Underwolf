@@ -630,16 +630,26 @@ fn every_staged_key_is_in_the_schema_and_fits() {
 }
 
 #[test]
-fn oversized_roster_value_is_invalid_not_truncated() {
+fn full_inventory_with_longest_name_fits_the_keys() {
     let (mut mem, w, mut tasks) = fresh();
     let mut teams = teams_of(&[1, 0]);
+    teams[0][0].name = "a".repeat(127);
     teams[0][0].items = (0..64).map(|i| 4_000_000_000 + i).collect();
     w.set_players(&mut mem, &teams);
     let mut roster = task(&mut tasks, "roster");
-    assert!(matches!(
-        roster.run(&mem, &mut Pass::default()),
-        Err(TaskError::Invalid(_))
-    ));
+    let p = run(&mut roster, &mem).unwrap();
+    let schema = deadlock_schema();
+    let max = |key: &str| {
+        schema
+            .keys()
+            .find(|(_, k, _)| *k == key)
+            .map(|x| x.2 as usize)
+            .unwrap()
+    };
+    let items = value(&p, "match_info", "items_0").unwrap();
+    assert!(items.len() > 1024, "{}", items.len());
+    assert!(items.len() <= max("items_0"));
+    assert!(value(&p, "match_info", "roster_0").unwrap().len() <= max("roster_0"));
 }
 
 #[test]

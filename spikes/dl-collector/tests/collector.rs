@@ -22,6 +22,7 @@ struct Log {
     answers: VecDeque<bool>,
     attempts: Vec<String>,
     panic_on_commit: bool,
+    panic_once_on_commit: bool,
 }
 
 impl Log {
@@ -52,7 +53,7 @@ struct Out(Rc<RefCell<Log>>);
 impl ChannelOut for Out {
     fn commit(&mut self, sets: &[Set], _ts: u64) {
         let mut l = self.0.borrow_mut();
-        if l.panic_on_commit {
+        if l.panic_on_commit || std::mem::take(&mut l.panic_once_on_commit) {
             panic!("commit failed");
         }
         l.commits.push(sets.to_vec());
@@ -480,8 +481,127 @@ fn schema_has_the_fixed_keys_and_limits() {
     assert_eq!(find("match_info", "match_outcome"), Some(64));
     for i in 0..12 {
         assert_eq!(find("match_info", &format!("roster_{i}")), Some(1024));
-        assert_eq!(find("match_info", &format!("items_{i}")), Some(1024));
+        assert_eq!(find("match_info", &format!("items_{i}")), Some(2048));
     }
     assert_eq!(find("match_info", "roster_12"), None);
     assert_eq!(s.keys().count(), 5 + 2 + 5 + 24);
+}
+
+fn keys_of(commit: &[Set]) -> Vec<(&str, Option<&[u8]>)> {
+    commit
+        .iter()
+        .map(|(_, k, v)| (k.as_str(), v.as_deref()))
+        .collect()
+}
+
+#[test]
+fn disabling_the_clock_clears_its_keys_in_that_pass() {
+    let mut r = rig(Skip::default());
+    r.world.set_players(&mut r.mem, &teams_of(&[1, 1]));
+    let mut c = r.start("");
+    r.tick(&mut c);
+    assert!(r.value("match_info", "match_clock").unwrap().is_some());
+    assert!(r.value("match_info", "game_paused").unwrap().is_some());
+
+    world::w64(&mut r.mem, world::VTABLE + 0x220, 0x9999_9999);
+    r.tick(&mut c);
+    let log = r.log.borrow();
+    let last = log.commits.last().unwrap();
+    let k = keys_of(last);
+    assert!(k.contains(&("match_clock", None)), "{k:?}");
+    assert!(k.contains(&("game_paused", None)), "{k:?}");
+    let d = log
+        .value("gep_internal", "disabled_tasks")
+        .unwrap()
+        .unwrap();
+    assert!(d.contains(r#""task":"clock","reason":"invalid: "#), "{d}");
+    // The other tasks' values stay.
+    assert_eq!(
+        log.value("game_info", "phase"),
+        Some(Some("GameInProgress".into()))
+    );
+    assert!(log.value("match_info", "roster_0").unwrap().is_some());
+}
+
+#[test]
+fn disabling_the_roster_clears_roster_and_items_keys() {
+    let mut r = rig(Skip::default());
+    let mut teams = teams_of(&[2, 1]);
+    teams[0][0].items = vec![5, 6];
+    r.world.set_players(&mut r.mem, &teams);
+    let mut c = r.start("");
+    r.tick(&mut c);
+    assert!(r.value("match_info", "items_0").unwrap().is_some());
+
+    teams[0][0].local = true;
+    teams[1][0].local = true;
+    r.world.set_players(&mut r.mem, &teams);
+    r.tick(&mut c);
+    let log = r.log.borrow();
+    let k = keys_of(log.commits.last().unwrap());
+    for i in 0..3 {
+        assert!(k.contains(&(format!("roster_{i}").as_str(), None)), "{k:?}");
+        assert!(k.contains(&(format!("items_{i}").as_str(), None)), "{k:?}");
+    }
+    assert!(log.value("match_info", "match_clock").unwrap().is_some());
+}
+
+#[test]
+fn panic_in_tick_clears_game_keys_with_the_error_status() {
+    let mut r = rig(Skip::default());
+    r.world.set_players(&mut r.mem, &teams_of(&[1, 1]));
+    let mut c = r.start("");
+    r.tick(&mut c);
+    assert!(r.value("game_info", "phase").unwrap().is_some());
+    let before = r.log.borrow().commits.len();
+
+    // The next commit panics once; the collector fails and clears what it had published.
+    r.log.borrow_mut().panic_once_on_commit = true;
+    w32(&mut r.mem, world::RULES_OBJ + world::OFF_STATE, 8);
+    r.tick(&mut c);
+    assert!(matches!(c.status(), Status::Error(_)));
+    let log = r.log.borrow();
+    assert_eq!(
+        log.commits.len(),
+        before + 1,
+        "one commit: the error commit"
+    );
+    let k = keys_of(log.commits.last().unwrap());
+    assert!(
+        k.contains(&("plugin_status", Some(b"error".as_slice()))),
+        "{k:?}"
+    );
+    for key in [
+        "phase",
+        "match_id",
+        "match_clock",
+        "game_paused",
+        "roster_0",
+        "roster_1",
+        "items_0",
+    ] {
+        assert!(k.contains(&(key, None)), "{key} not cleared: {k:?}");
+    }
+    assert_eq!(log.value("game_info", "phase"), Some(None));
+    assert_eq!(log.value("match_info", "roster_0"), Some(None));
+    // Status keys are not cleared.
+    assert!(log.value("gep_internal", "version_info").unwrap().is_some());
+}
+
+#[test]
+fn a_64_item_inventory_with_a_long_name_fits() {
+    let mut r = rig(Skip::default());
+    let name = "\u{1}".repeat(127);
+    let mut teams = teams_of(&[1, 1]);
+    teams[0][0].name = name;
+    teams[0][0].items = (0..64).map(|i| 4_000_000_000 + i).collect();
+    r.world.set_players(&mut r.mem, &teams);
+    let mut c = r.start("");
+    r.tick(&mut c);
+    let items = r.value("match_info", "items_0").unwrap().unwrap();
+    assert!(items.len() > 1024 && items.len() <= 2048, "{}", items.len());
+    assert!(r.value("match_info", "roster_0").unwrap().unwrap().len() <= 1024);
+    assert!(r.value("match_info", "roster_1").unwrap().is_some());
+    let d = r.value("gep_internal", "disabled_tasks").unwrap().unwrap();
+    assert_eq!(d, "[]");
 }

@@ -234,10 +234,16 @@ impl Collector {
         self.flush_events();
     }
 
-    /// Publishes `plugin_status="error"` and the reason, nothing else.
+    /// Publishes `plugin_status="error"` and the reason, and clears every game value that was
+    /// committed before (nothing stays visible that the collector can no longer vouch for).
     fn fail(&mut self, why: &str) {
         self.status = Status::Error(why.to_string());
         let mut pass = Pass::default();
+        for (cat, key) in self.committed.keys() {
+            if cat != GEP_INTERNAL {
+                pass.set(cat, key, None);
+            }
+        }
         pass.set(GEP_INTERNAL, "plugin_status", Some("error".into()));
         pass.set(
             GEP_INTERNAL,

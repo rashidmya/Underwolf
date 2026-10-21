@@ -2,7 +2,7 @@
 //! vector header, handle list, entity page and entry re-read after use.
 
 use super::{at, json_str, offset, rules_object};
-use crate::keys::{MATCH_INFO, SLOT_MAX, SLOTS, items_key, roster_key};
+use crate::keys::{ITEMS_MAX, MATCH_INFO, ROSTER_MAX, SLOTS, items_key, roster_key};
 use crate::mem::{MemRead, PTR_MAX, PTR_MIN, ReadError};
 use crate::roots::Roots;
 use crate::runner::{Pass, Task, TaskError};
@@ -371,10 +371,10 @@ impl Task for Roster {
         for (i, p) in placed.iter().enumerate() {
             let values = p.map(|p| (p.roster_json(), p.items_json()));
             if let Some((r, it)) = &values
-                && (r.len() > SLOT_MAX as usize || it.len() > SLOT_MAX as usize)
+                && (r.len() > ROSTER_MAX as usize || it.len() > ITEMS_MAX as usize)
             {
                 return Err(TaskError::Invalid(format!(
-                    "slot {i} value is longer than {SLOT_MAX} bytes"
+                    "slot {i} value is longer than its key allows"
                 )));
             }
             staged.push((roster_key(i), values.as_ref().map(|v| v.0.clone())));
