@@ -65,7 +65,8 @@ pub fn ring_push(region: &mut [u8], name: &str, data: &[u8], ts: u64) -> Result<
         return Err(ChannelError::TooLong);
     }
     check(region)?;
-    let seq = rd_u64(region, OFF_SEQ) + 1;
+    // A stored write_seq of u64::MAX (corruption) restarts the sequence; readers resynchronise.
+    let seq = rd_u64(region, OFF_SEQ).checked_add(1).unwrap_or(1);
     let rec = &mut region[slot(seq)..][..RECORD];
     wr_u64(rec, REC_SEQ, seq);
     wr_u64(rec, REC_TS, ts);
@@ -90,7 +91,7 @@ impl RingReader {
     /// Starts after the newest record: only events pushed from now on are returned.
     pub fn from_tail(region: &[u8]) -> RingReader {
         let seq = if check(region).is_ok() { rd_u64(region, OFF_SEQ) } else { 0 };
-        RingReader { next_seq: seq + 1 }
+        RingReader { next_seq: seq.saturating_add(1) }
     }
 
     /// Returns the new records in order and the number lost (overwritten before they were read).
@@ -99,12 +100,19 @@ impl RingReader {
             return (Vec::new(), 0);
         }
         let write_seq = rd_u64(region, OFF_SEQ);
+        if write_seq == u64::MAX {
+            return (Vec::new(), 0);
+        }
         let oldest = write_seq.saturating_sub(RING_SLOTS as u64 - 1).max(1);
         let mut lost = 0;
-        if self.next_seq < oldest {
+        if self.next_seq > write_seq + 1 {
+            // The writer's sequence went backwards (region re-initialised): start over.
+            self.next_seq = oldest;
+        } else if self.next_seq < oldest {
             lost = oldest - self.next_seq;
             self.next_seq = oldest;
         }
+        // From here at most RING_SLOTS records are read, and `next_seq + 1` cannot overflow.
         let mut out = Vec::new();
         while self.next_seq <= write_seq {
             let rec = &region[slot(self.next_seq)..][..RECORD];

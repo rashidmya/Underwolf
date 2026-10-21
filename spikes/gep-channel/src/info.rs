@@ -157,7 +157,7 @@ impl Txn<'_, '_> {
         if self.changed {
             let w = self.w;
             let seq = rd_u64(w.region, OFF_COMMIT_SEQ);
-            wr_u64(w.region, OFF_COMMIT_SEQ, seq + 1);
+            wr_u64(w.region, OFF_COMMIT_SEQ, seq.wrapping_add(1));
         }
         self.changed
     }

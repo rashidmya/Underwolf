@@ -14,7 +14,7 @@ use windows::Win32::System::Memory::{
     MapViewOfFile, OpenFileMappingW, PAGE_READWRITE, UnmapViewOfFile, VirtualQuery,
 };
 use windows::Win32::System::Threading::{
-    CreateEventW, CreateMutexW, GetCurrentProcessId, INFINITE, OpenEventW, OpenMutexW, ReleaseMutex, ResetEvent,
+    CreateEventW, CreateMutexW, GetCurrentProcessId, OpenEventW, OpenMutexW, ReleaseMutex, ResetEvent,
     SetEvent, SYNCHRONIZATION_ACCESS_RIGHTS, WaitForMultipleObjects, WaitForSingleObject,
 };
 use windows::core::PCWSTR;
@@ -27,6 +27,8 @@ const SYNCHRONIZE: u32 = 0x0010_0000;
 const EVENT_MODIFY_STATE: u32 = 0x0002;
 const MUTEX_MODIFY_STATE: u32 = 0x0001;
 const HELLO_SIZE: usize = 8;
+/// How long the helper waits for a region mutex before giving up on one read.
+const CONSUMER_LOCK_MS: u32 = 2000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Wake {
@@ -94,11 +96,11 @@ impl Drop for View {
 struct Guard<'a>(&'a Handle);
 
 impl<'a> Guard<'a> {
-    // An abandoned mutex (previous owner died) is still acquired, so both results are fine.
-    fn lock(mutex: &'a Handle) -> Guard<'a> {
-        let r = unsafe { WaitForSingleObject(mutex.0, INFINITE) };
-        debug_assert!(r == WAIT_OBJECT_0 || r == WAIT_ABANDONED);
-        Guard(mutex)
+    /// Waits up to `timeout_ms` for the mutex. An abandoned mutex (previous owner died) is acquired;
+    /// a timeout or failure yields `None`, with nothing held.
+    fn try_lock(mutex: &'a Handle, timeout_ms: u32) -> Option<Guard<'a>> {
+        let r = unsafe { WaitForSingleObject(mutex.0, timeout_ms) };
+        (r == WAIT_OBJECT_0 || r == WAIT_ABANDONED).then_some(Guard(mutex))
     }
 }
 
@@ -211,14 +213,17 @@ impl Producer {
         Ok(p)
     }
 
-    pub fn with_info<R>(&mut self, f: impl FnOnce(&mut [u8]) -> R) -> R {
-        let _g = Guard::lock(&self.info_mutex);
-        f(self.info.1.bytes_mut(self.info_size))
+    /// Runs `f` on the info region under its mutex. Never blocks: if another process holds the
+    /// mutex this returns `None` without running `f`, and the caller retries on its next pass.
+    pub fn with_info<R>(&mut self, f: impl FnOnce(&mut [u8]) -> R) -> Option<R> {
+        let _g = Guard::try_lock(&self.info_mutex, 0)?;
+        Some(f(self.info.1.bytes_mut(self.info_size)))
     }
 
-    pub fn with_events<R>(&mut self, f: impl FnOnce(&mut [u8]) -> R) -> R {
-        let _g = Guard::lock(&self.events_mutex);
-        f(self.events.1.bytes_mut(self.ring_size))
+    /// Like `with_info`, for the event ring.
+    pub fn with_events<R>(&mut self, f: impl FnOnce(&mut [u8]) -> R) -> Option<R> {
+        let _g = Guard::try_lock(&self.events_mutex, 0)?;
+        Some(f(self.events.1.bytes_mut(self.ring_size)))
     }
 
     pub fn signal_info(&self) {
@@ -299,15 +304,17 @@ impl Consumer {
         self.hello
     }
 
-    /// Holds the info mutex while `f` runs, so keep `f` short (copy out, then process).
-    pub fn with_info<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
-        let _g = Guard::lock(&self.info_mutex);
-        f(self.info.1.bytes(self.info_size))
+    /// Holds the info mutex while `f` runs, so keep `f` short (copy out, then process). Waits up to
+    /// 2 s for the mutex; `None` (timeout or wait failure) means `f` did not run.
+    pub fn with_info<R>(&self, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
+        let _g = Guard::try_lock(&self.info_mutex, CONSUMER_LOCK_MS)?;
+        Some(f(self.info.1.bytes(self.info_size)))
     }
 
-    pub fn with_events<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
-        let _g = Guard::lock(&self.events_mutex);
-        f(self.events.1.bytes(self.ring_size))
+    /// Like `with_info`, for the event ring.
+    pub fn with_events<R>(&self, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
+        let _g = Guard::try_lock(&self.events_mutex, CONSUMER_LOCK_MS)?;
+        Some(f(self.events.1.bytes(self.ring_size)))
     }
 
     /// Waits for new info, new events, or the producer going away. `Disconnect` wins ties.

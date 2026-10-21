@@ -68,3 +68,52 @@ fn bad_regions_are_rejected() {
     assert_eq!(ring_push(&mut m[..n - 1], "a", b"", 1), Err(ChannelError::Truncated));
     assert_eq!(RingReader::new().drain(&[0u8; 8]), (vec![], 0));
 }
+
+const OFF_WRITE_SEQ: usize = 8;
+
+fn set_write_seq(m: &mut [u8], v: u64) {
+    m[OFF_WRITE_SEQ..OFF_WRITE_SEQ + 8].copy_from_slice(&v.to_le_bytes());
+}
+
+#[test]
+fn max_write_seq_does_not_panic_and_recovers() {
+    let mut m = ring();
+    ring_push(&mut m, "a", b"", 1).unwrap();
+    let mut r = RingReader::new();
+    assert_eq!(r.drain(&m).0.len(), 1);
+    set_write_seq(&mut m, u64::MAX);
+    assert_eq!(r.drain(&m), (vec![], 0));
+    assert_eq!(RingReader::from_tail(&m).drain(&m), (vec![], 0));
+    // The writer restarts the sequence at 1. A fresh reader sees the record; a reader that was
+    // already past seq 1 cannot tell it from "nothing new" and picks up from the next push.
+    ring_push(&mut m, "b", b"", 2).unwrap();
+    assert_eq!(RingReader::new().drain(&m).0[0].name, "b");
+    ring_push(&mut m, "c", b"", 3).unwrap();
+    let (recs, lost) = r.drain(&m);
+    assert_eq!((recs.len(), lost), (1, 0));
+    assert_eq!(recs[0].name, "c");
+}
+
+#[test]
+fn hostile_large_write_seq_is_bounded() {
+    let mut m = ring();
+    set_write_seq(&mut m, u64::MAX - 1);
+    let (recs, lost) = RingReader::new().drain(&m);
+    assert!(recs.is_empty());
+    assert!(lost >= RING_SLOTS as u64);
+}
+
+#[test]
+fn reader_resyncs_when_sequence_goes_backwards() {
+    let mut m = ring();
+    for i in 0..5 {
+        ring_push(&mut m, &format!("old{i}"), b"", i).unwrap();
+    }
+    let mut r = RingReader::new();
+    assert_eq!(r.drain(&m).0.len(), 5);
+    ring_init(&mut m);
+    ring_push(&mut m, "fresh", b"", 9).unwrap();
+    let (recs, lost) = r.drain(&m);
+    assert_eq!((recs.len(), lost), (1, 0));
+    assert_eq!(recs[0].name, "fresh");
+}

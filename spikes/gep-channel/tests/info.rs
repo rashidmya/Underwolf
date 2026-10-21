@@ -172,3 +172,29 @@ fn bad_regions_are_rejected() {
     assert!(matches!(InfoReader::attach(&mem[..mem.len() - 1]), Err(ChannelError::Truncated)));
     assert!(matches!(InfoWriter::attach(&mut [0u8; 64]), Err(ChannelError::BadMagic)));
 }
+
+#[test]
+fn max_commit_seq_does_not_panic() {
+    let s = schema();
+    let mut mem = region(&s);
+    InfoWriter::init(&mut mem, &s).unwrap();
+    mem[24..32].copy_from_slice(&u64::MAX.to_le_bytes());
+    let mut w = InfoWriter::attach(&mut mem).unwrap();
+    let mut t = w.begin();
+    t.set("game_info", "phase", Some(b"x"), 1).unwrap();
+    assert!(t.commit());
+    drop(w);
+    assert_eq!(InfoReader::attach(&mem).unwrap().snapshot(&mem).len(), 1);
+}
+
+#[test]
+fn max_timestamp_does_not_panic() {
+    let s = schema();
+    let mut mem = region(&s);
+    let mut w = InfoWriter::init(&mut mem, &s).unwrap();
+    for v in [&b"a"[..], b"b"] {
+        let mut t = w.begin();
+        t.set("game_info", "phase", Some(v), u64::MAX).unwrap();
+        assert!(t.commit());
+    }
+}
