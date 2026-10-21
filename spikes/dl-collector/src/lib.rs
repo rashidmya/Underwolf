@@ -4,6 +4,7 @@
 
 pub mod collector;
 pub mod keys;
+pub mod layout;
 pub mod mem;
 pub mod module;
 pub mod pattern;

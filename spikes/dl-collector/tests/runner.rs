@@ -292,3 +292,28 @@ fn failed_runs_before_disabling_do_not_add_keys_to_clear() {
     let p = r.pass(&mem, &|| 0, FREQ);
     assert!(p.get("match_info", "roster_0").is_none());
 }
+
+#[test]
+fn a_task_disabled_before_it_runs_never_runs() {
+    let mem = FakeMem::new();
+    let ran = Rc::new(Cell::new(0));
+    let count = ran.clone();
+    let mut r = Runner::new(vec![
+        task("a", move |p| {
+            count.set(count.get() + 1);
+            p.set("match_info", "roster_0", Some("v".into()));
+            Ok(())
+        }),
+        setter("b", "roster_1"),
+    ]);
+    assert!(r.disable("a", &TaskError::Invalid("layout: C.m_x".into())));
+    assert!(!r.disable("nope", &TaskError::Invalid("x".into())));
+    assert_eq!(
+        r.disabled(),
+        vec![("a", "invalid: layout: C.m_x".to_string())]
+    );
+    let p = r.pass(&mem, &|| 0, FREQ);
+    assert_eq!(ran.get(), 0);
+    assert!(p.get("match_info", "roster_0").is_none());
+    assert!(p.get("match_info", "roster_1").is_some());
+}

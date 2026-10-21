@@ -12,10 +12,11 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use uw_spike_gep_channel::{Schema, Throttle};
 
 use crate::keys::{GEP_INTERNAL, PLUGIN_ERROR_MAX, deadlock_schema};
+use crate::layout::broken_tasks;
 use crate::mem::MemRead;
 use crate::module::Module;
 use crate::roots::{resolve_clock_roots, resolve_main_loop, resolve_roots};
-use crate::runner::{Pass, Runner};
+use crate::runner::{Pass, Runner, TaskError};
 use crate::schema::SchemaFields;
 use crate::tasks::{Built, build, json_str};
 use crate::timing::CallerFilter;
@@ -123,6 +124,15 @@ fn truncate(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
+/// What `Collector::resolve` found.
+struct Resolved {
+    built: Built,
+    /// The schema layout name.
+    layout: &'static str,
+    /// Tasks the layout check switches off before they ever run.
+    broken: Vec<(&'static str, TaskError)>,
+}
+
 fn key_limits(schema: &Schema) -> HashMap<(String, String), u32> {
     schema
         .keys()
@@ -131,7 +141,8 @@ fn key_limits(schema: &Schema) -> HashMap<(String, String), u32> {
 }
 
 impl Collector {
-    /// Resolves the roots and fields (or publishes the failure) and publishes the first status.
+    /// Resolves the roots and fields (or publishes the failure), switches off every task with a
+    /// field that fails the layout check (`crate::layout`), and publishes the first status.
     /// `clock` counts ticks of `freq` per second. Arguments: see `Args::parse`.
     pub fn start(
         m: &dyn MemRead,
@@ -164,7 +175,7 @@ impl Collector {
                 c.begin_selftest();
             } else {
                 match Collector::resolve(m, client, &args) {
-                    Ok((built, layout)) => c.begin(built, layout),
+                    Ok(resolved) => c.begin(resolved),
                     Err(why) => c.fail(&why),
                 }
             }
@@ -234,11 +245,7 @@ impl Collector {
         self.publish(&pass);
     }
 
-    fn resolve(
-        m: &dyn MemRead,
-        client: &Module,
-        args: &Args,
-    ) -> Result<(Built, &'static str), String> {
+    fn resolve(m: &dyn MemRead, client: &Module, args: &Args) -> Result<Resolved, String> {
         let roots = resolve_roots(m, client).map_err(|e| e.to_string())?;
         let mut fields = SchemaFields::load(m, client).map_err(|e| format!("schema: {e}"))?;
         // Moves a resolved offset on purpose (the fail-safe run); an unresolved name is ignored.
@@ -246,11 +253,25 @@ impl Collector {
             fields.add_offset(class, field, CORRUPT_DELTA);
         }
         let built = build(&roots, resolve_clock_roots(m, client), &fields)?;
-        Ok((built, fields.layout_name()))
+        // After `corrupt=`: a moved field fails its relation like a real layout change.
+        Ok(Resolved {
+            built,
+            layout: fields.layout_name(),
+            broken: broken_tasks(&fields),
+        })
     }
 
-    fn begin(&mut self, built: Built, layout: &str) {
+    fn begin(&mut self, resolved: Resolved) {
+        let Resolved {
+            built,
+            layout,
+            broken,
+        } = resolved;
         self.runner = Runner::new(built.tasks);
+        for (task, why) in &broken {
+            // A task that was not built is already listed as unresolved.
+            self.runner.disable(task, why);
+        }
         self.unresolved = built.unresolved;
         self.status = Status::Initialized;
         let mut pass = Pass::default();

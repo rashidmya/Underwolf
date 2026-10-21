@@ -34,6 +34,18 @@ const LAYOUTS: [Layout; 2] = [
 const PROBE_CLASS: &str = "C_CitadelGameRules";
 const PROBE_FIELD: &str = "m_eGameState";
 
+/// A field offset by class and field name. The tasks and the layout check read offsets through
+/// this, so the same code runs over the in-game `SchemaFields` and over an offline dump.
+pub trait FieldLookup {
+    fn get(&self, class: &str, field: &str) -> Option<u32>;
+}
+
+impl FieldLookup for SchemaFields {
+    fn get(&self, class: &str, field: &str) -> Option<u32> {
+        SchemaFields::get(self, class, field)
+    }
+}
+
 /// Field offsets keyed by class and field name, read from the game's schema data.
 #[derive(Debug, Default)]
 pub struct SchemaFields {

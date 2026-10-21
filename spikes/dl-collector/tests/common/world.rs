@@ -4,6 +4,7 @@
 //! one heap region, with the module-level roots pointing at them.
 
 use super::Synth;
+use uw_spike_dlcollector::layout::RELATIONS;
 use uw_spike_dlcollector::mem::FakeMem;
 use uw_spike_dlcollector::module::Module;
 use uw_spike_dlcollector::roots::{
@@ -241,9 +242,28 @@ impl World {
     }
 }
 
-/// Class records for every field the tasks read, at the offsets of build 6801.
-pub fn add_classes(s: &mut Synth) -> u64 {
-    let rules = s.class(
+/// A class record with `fields` plus the anchor of each of their relations
+/// (`layout::RELATIONS`) at the field's offset minus the delta, so the layout check holds.
+/// `missing` names an anchor to leave out.
+fn class(s: &mut Synth, name: &str, fields: &[(&'static str, u32)], missing: Option<&str>) -> u64 {
+    let mut all = fields.to_vec();
+    for r in RELATIONS.iter().filter(|r| r.class == name) {
+        let Some(&(_, at)) = fields.iter().find(|(f, _)| *f == r.field) else {
+            continue;
+        };
+        if Some(r.anchor) != missing && !all.iter().any(|(f, _)| *f == r.anchor) {
+            all.push((r.anchor, (i64::from(at) - r.delta) as u32));
+        }
+    }
+    s.class(name, &all)
+}
+
+/// Class records for every field the tasks read (and their layout anchors), at the offsets of
+/// build 6801. `missing_anchor`: see `Skip`.
+pub fn add_classes(s: &mut Synth, missing_anchor: Option<&str>) -> u64 {
+    let m = missing_anchor;
+    let rules = class(
+        s,
         "C_CitadelGameRules",
         &[
             ("m_eGameState", OFF_STATE as u32),
@@ -251,30 +271,43 @@ pub fn add_classes(s: &mut Synth) -> u64 {
             ("m_flGameStartTime", OFF_START as u32),
             ("m_eGameMode", OFF_MODE as u32),
         ],
+        m,
     );
-    let base_rules = s.class(
+    let base_rules = class(
+        s,
         "C_GameRules",
         &[
             ("m_nTotalPausedTicks", OFF_PAUSED_TICKS as u32),
             ("m_nPauseStartTick", OFF_PAUSE_START as u32),
             ("m_bGamePaused", OFF_PAUSED as u32),
         ],
+        m,
     );
-    let team = s.class("C_Team", &[("m_aPlayerControllers", OFF_PLAYERS as u32)]);
-    let entity = s.class("C_BaseEntity", &[("m_iTeamNum", OFF_TEAM_ID as u32)]);
-    let ctrl = s.class(
+    let team = class(
+        s,
+        "C_Team",
+        &[("m_aPlayerControllers", OFF_PLAYERS as u32)],
+        m,
+    );
+    let entity = class(s, "C_BaseEntity", &[("m_iTeamNum", OFF_TEAM_ID as u32)], m);
+    let ctrl = class(
+        s,
         "CBasePlayerController",
         &[
             ("m_iszPlayerName", OFF_NAME as u32),
             ("m_steamID", OFF_STEAM as u32),
             ("m_bIsLocalPlayerController", OFF_LOCAL as u32),
         ],
+        m,
     );
-    let citadel = s.class(
+    let citadel = class(
+        s,
         "CCitadelPlayerController",
         &[("m_PlayerDataGlobal", OFF_DATA as u32)],
+        m,
     );
-    let data = s.class(
+    let data = class(
+        s,
         "PlayerDataGlobal_t",
         &[
             ("m_nHeroID", OFF_HERO as u32),
@@ -283,6 +316,7 @@ pub fn add_classes(s: &mut Synth) -> u64 {
             ("m_iPlayerAssists", OFF_ASSISTS as u32),
             ("m_vecUpgrades", OFF_UPGRADES as u32),
         ],
+        m,
     );
     s.class_table(&[rules, base_rules, team, entity, ctrl, citadel, data])
 }
@@ -290,7 +324,7 @@ pub fn add_classes(s: &mut Synth) -> u64 {
 /// Schema fields of build 6801 for the tasks, without a module image.
 pub fn fields() -> SchemaFields {
     let mut s = Synth::new();
-    let table = add_classes(&mut s);
+    let table = add_classes(&mut s, None);
     s.classes_site(0x100, table);
     let (mem, module) = s.finish();
     SchemaFields::load(&mem, &module).unwrap()
@@ -309,6 +343,8 @@ pub struct Skip {
     pub clock: bool,
     pub roster_class: bool,
     pub match_id_field: bool,
+    /// A layout anchor (`layout::RELATIONS`) left out of the schema.
+    pub missing_anchor: Option<&'static str>,
 }
 
 /// A synthetic `client.dll` with every root pattern and schema class, plus a live heap.
@@ -323,21 +359,28 @@ pub fn image(skip: Skip) -> (FakeMem, Module, World) {
     let enabled = s.alloc(&[0; 8]);
 
     if skip.match_id_field {
-        let rules = s.class("C_CitadelGameRules", &[("m_eGameState", OFF_STATE as u32)]);
+        let rules = class(
+            &mut s,
+            "C_CitadelGameRules",
+            &[("m_eGameState", OFF_STATE as u32)],
+            None,
+        );
         let table = s.class_table(&[rules]);
         s.classes_site(0x100, table);
     } else if skip.roster_class {
-        let rules = s.class(
+        let rules = class(
+            &mut s,
             "C_CitadelGameRules",
             &[
                 ("m_eGameState", OFF_STATE as u32),
                 ("m_unMatchID", OFF_MATCH_ID as u32),
             ],
+            None,
         );
         let table = s.class_table(&[rules]);
         s.classes_site(0x100, table);
     } else {
-        let table = add_classes(&mut s);
+        let table = add_classes(&mut s, skip.missing_anchor);
         s.classes_site(0x100, table);
     }
     if !skip.rules {

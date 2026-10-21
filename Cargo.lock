@@ -617,6 +617,7 @@ name = "uw-spike-dlcollector"
 version = "0.0.0"
 dependencies = [
  "minhook",
+ "serde_json",
  "uw-spike-gep-channel",
  "windows",
 ]

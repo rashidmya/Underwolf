@@ -155,6 +155,21 @@ impl Runner {
         pass
     }
 
+    /// Switches the task named `task` off before it ever runs, with the reason `why` gives (as if
+    /// a run had returned it). For start-up only: a task that already ran would keep the keys it
+    /// published. False if no enabled task has that name.
+    pub fn disable(&mut self, task: &str, why: &TaskError) -> bool {
+        let mut found = false;
+        for slot in &mut self.slots {
+            if slot.disabled.is_none() && slot.task.name() == task {
+                debug_assert!(slot.keys.is_empty(), "{task} already published keys");
+                slot.disabled = Some(why.to_string());
+                found = true;
+            }
+        }
+        found
+    }
+
     pub fn disabled(&self) -> Vec<(&'static str, String)> {
         self.slots
             .iter()

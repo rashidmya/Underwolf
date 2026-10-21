@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use uw_spike_dlcollector::collector::{ChannelOut, Collector, Status};
+use uw_spike_dlcollector::layout::{RELATIONS, holds};
 use uw_spike_dlcollector::mem::{FakeMem, MemRead};
 use uw_spike_dlcollector::module::{Module, file_image};
 use uw_spike_dlcollector::roots::{
@@ -85,6 +86,15 @@ fn installed_build() {
             Some(off),
             "{class}.{field} (ambiguous: {:?})",
             f.ambiguous()
+        );
+    }
+    // The layout relations of build 6801 hold on this build too.
+    for r in RELATIONS {
+        assert!(
+            holds(&f, r.class, r.field),
+            "layout: {}.{}",
+            r.class,
+            r.field
         );
     }
 }

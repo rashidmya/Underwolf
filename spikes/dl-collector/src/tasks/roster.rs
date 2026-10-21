@@ -6,7 +6,7 @@ use crate::keys::{ITEMS_MAX, MATCH_INFO, ROSTER_MAX, SLOTS, items_key, roster_ke
 use crate::mem::{MemRead, PTR_MAX, PTR_MIN, ReadError};
 use crate::roots::Roots;
 use crate::runner::{Pass, Task, TaskError};
-use crate::schema::SchemaFields;
+use crate::schema::FieldLookup;
 
 const MAX_TEAMS: usize = 32;
 const MAX_HANDLES: usize = 64;
@@ -34,7 +34,7 @@ pub struct RosterFields {
 
 impl RosterFields {
     /// `Err` names the first field that is missing.
-    pub fn resolve(f: &SchemaFields) -> Result<RosterFields, String> {
+    pub fn resolve(f: &dyn FieldLookup) -> Result<RosterFields, String> {
         let get = |class: &str, field: &str| {
             offset(f, class, field).ok_or_else(|| format!("{class}.{field}"))
         };

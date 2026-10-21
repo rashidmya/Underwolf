@@ -8,7 +8,7 @@ mod roster;
 use crate::mem::{MemRead, PTR_MAX, PTR_MIN, ReadError};
 use crate::roots::{CLOCK_RULE_FIELDS, ClockRoots, RootError, Roots};
 use crate::runner::{Task, TaskError};
-use crate::schema::SchemaFields;
+use crate::schema::FieldLookup;
 
 pub use clock::Clock;
 pub use match_id::MatchId;
@@ -20,18 +20,47 @@ const FIELD_OFFSET_MAX: u32 = 1 << 20;
 
 const RULES: &str = "C_CitadelGameRules";
 
+/// Every schema field each task reads, as `(task, class, field)`. The layout check
+/// (`crate::layout`) switches a task off when one of its fields moved; a test holds this list to
+/// exactly the fields `build` looks up.
+pub const TASK_FIELDS: &[(&str, &str, &str)] = &[
+    ("phase", RULES, "m_eGameState"),
+    ("match_id", RULES, "m_unMatchID"),
+    ("clock", RULES, "m_eGameState"),
+    ("clock", "C_GameRules", "m_nTotalPausedTicks"),
+    ("clock", "C_GameRules", "m_nPauseStartTick"),
+    ("clock", "C_GameRules", "m_bGamePaused"),
+    ("clock", RULES, "m_flGameStartTime"),
+    ("clock", RULES, "m_eGameMode"),
+    ("roster", "C_Team", "m_aPlayerControllers"),
+    ("roster", "C_BaseEntity", "m_iTeamNum"),
+    ("roster", "CBasePlayerController", "m_iszPlayerName"),
+    ("roster", "CBasePlayerController", "m_steamID"),
+    (
+        "roster",
+        "CBasePlayerController",
+        "m_bIsLocalPlayerController",
+    ),
+    ("roster", "CCitadelPlayerController", "m_PlayerDataGlobal"),
+    ("roster", "PlayerDataGlobal_t", "m_nHeroID"),
+    ("roster", "PlayerDataGlobal_t", "m_iPlayerKills"),
+    ("roster", "PlayerDataGlobal_t", "m_iDeaths"),
+    ("roster", "PlayerDataGlobal_t", "m_iPlayerAssists"),
+    ("roster", "PlayerDataGlobal_t", "m_vecUpgrades"),
+];
+
 pub struct Built {
     pub tasks: Vec<Box<dyn Task>>,
     /// Tasks that were not created, with `"unresolved: <what>"`.
     pub unresolved: Vec<(&'static str, String)>,
 }
 
-fn offset(f: &SchemaFields, class: &str, field: &str) -> Option<u32> {
+fn offset(f: &dyn FieldLookup, class: &str, field: &str) -> Option<u32> {
     f.get(class, field)
         .filter(|&o| o != 0 && o <= FIELD_OFFSET_MAX)
 }
 
-fn required(f: &SchemaFields, class: &str, field: &str) -> Result<u32, String> {
+fn required(f: &dyn FieldLookup, class: &str, field: &str) -> Result<u32, String> {
     offset(f, class, field).ok_or_else(|| format!("required field {class}.{field} not found"))
 }
 
@@ -40,7 +69,7 @@ fn required(f: &SchemaFields, class: &str, field: &str) -> Result<u32, String> {
 pub fn build(
     roots: &Roots,
     clock: Result<ClockRoots, RootError>,
-    fields: &SchemaFields,
+    fields: &dyn FieldLookup,
 ) -> Result<Built, String> {
     let state = required(fields, RULES, "m_eGameState")?;
     let match_id = required(fields, RULES, "m_unMatchID")?;
