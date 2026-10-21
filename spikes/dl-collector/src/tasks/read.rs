@@ -1,8 +1,33 @@
-//! Read helpers shared by the tasks: vector headers, pointer array elements, byte ranges, and
-//! the check that a value read again is unchanged.
+//! Read helpers shared by the tasks: vector headers, pointer array elements, byte ranges, the
+//! check that a value read again is unchanged, and the game's team list.
 
+use super::MAX_TEAMS;
 use crate::mem::{MemRead, PTR_MAX, PTR_MIN, ReadError};
 use crate::runner::TaskError;
+
+/// Every team object in the game's team list at `root` (at most `MAX_TEAMS`, null slots
+/// skipped), with what `read_team` reads from it. Every team is read again, then the list header
+/// and its pointer array: values that changed meanwhile are not one state (`Torn`).
+pub(super) fn read_team_list<T: PartialEq>(
+    m: &dyn MemRead,
+    root: u64,
+    read_team: impl Fn(&dyn MemRead, u64) -> Result<T, TaskError>,
+) -> Result<Vec<(u64, T)>, TaskError> {
+    let list = VecHeader::read(m, root, MAX_TEAMS)?;
+    let raw = list.elements(m, 8)?;
+    let mut teams = Vec::new();
+    for team_raw in raw.chunks_exact(8) {
+        if let Some(team) = pointer(team_raw)? {
+            teams.push((team, read_team(m, team)?));
+        }
+    }
+    for (team, read) in &teams {
+        ensure(read_team(m, *team)? == *read)?;
+    }
+    list.unchanged(m)?;
+    ensure(list.count == 0 || read_bytes(m, list.data, raw.len())? == raw)?;
+    Ok(teams)
+}
 
 /// A `{count: i32, data: pointer}` vector header, as read.
 pub(super) struct VecHeader {

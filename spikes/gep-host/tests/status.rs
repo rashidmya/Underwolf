@@ -159,3 +159,20 @@ fn team_score_and_match_outcome_rows_follow_their_own_tasks() {
     assert_eq!(t.row("match_outcome"), Some(format!("disabled: {why}")));
     assert_eq!(t.row("team_score").as_deref(), Some("supported"));
 }
+
+#[test]
+fn tower_destroyed_row_follows_its_own_task_and_incoming_damage_has_none() {
+    let mut t = StatusTable::default();
+    assert_eq!(t.row("tower_destroyed").as_deref(), Some("unavailable"));
+    t.observe(&Emission::Event { name: "tower_destroyed".into(), data: r#""Amber""#.into() });
+    assert_eq!(t.row("tower_destroyed").as_deref(), Some("supported"));
+    // A moved team number switches off the roster, team_score and tower_destroyed.
+    let why = "invalid: layout: C_BaseEntity.m_iTeamNum";
+    let all = format!(
+        r#"[{{"task":"roster","reason":"{why}"}},{{"task":"team_score","reason":"{why}"}},{{"task":"tower_destroyed","reason":"{why}"}}]"#
+    );
+    t.observe(&info("gep_internal", "disabled_tasks", Some(&all)));
+    assert_eq!(t.row("tower_destroyed"), Some(format!("disabled: {why}")));
+    // No task feeds incoming_damage, so nothing marks it.
+    assert_eq!(t.row("incoming_damage").as_deref(), Some("unavailable"));
+}

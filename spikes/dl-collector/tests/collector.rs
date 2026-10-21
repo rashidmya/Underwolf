@@ -415,7 +415,7 @@ fn corrupt_arg_shifts_the_named_offset() {
     assert_eq!(
         r.value("gep_internal", "disabled_tasks"),
         Some(Some(format!(
-            r#"[{{"task":"phase","reason":"{why}"}},{{"task":"clock","reason":"{why}"}},{{"task":"match_outcome","reason":"{why}"}}]"#
+            r#"[{{"task":"phase","reason":"{why}"}},{{"task":"clock","reason":"{why}"}},{{"task":"match_outcome","reason":"{why}"}},{{"task":"tower_destroyed","reason":"{why}"}}]"#
         )))
     );
     assert_eq!(r.value("game_info", "phase"), None);
@@ -483,11 +483,14 @@ fn corrupt_kills_disables_the_roster_by_layout() {
     corrupt_roster_field_disables_only_the_roster("PlayerDataGlobal_t.m_iPlayerKills", &[]);
 }
 
-/// The team id (u8 at +1007) moved onto byte 1015, inside `m_nNextThinkTick`. team_score reads
-/// it too.
+/// The team id (u8 at +1007) moved onto byte 1015, inside `m_nNextThinkTick`. team_score and
+/// tower_destroyed read it too.
 #[test]
 fn corrupt_team_num_disables_the_roster_by_layout() {
-    corrupt_roster_field_disables_only_the_roster("C_BaseEntity.m_iTeamNum", &["team_score"]);
+    corrupt_roster_field_disables_only_the_roster(
+        "C_BaseEntity.m_iTeamNum",
+        &["team_score", "tower_destroyed"],
+    );
 }
 
 #[test]

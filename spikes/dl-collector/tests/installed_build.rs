@@ -74,6 +74,8 @@ fn installed_build() {
         ("C_CitadelGameRules", "m_eMatchMode", 0xa8),
         ("C_CitadelGameRules", "m_iWinningTeam", 0xc0),
         ("C_Team", "m_iScore", 0x620),
+        ("C_CitadelTeam", "m_nBossesAlive", 0x6b8),
+        ("C_CitadelTeam", "m_nBossesMax", 0x6bc),
         ("C_CitadelGameRules", "m_flMatchClockAtLastUpdate", 0x9fdc),
         ("C_Team", "m_aPlayerControllers", 0x5f0),
         ("C_BaseEntity", "m_iTeamNum", 0x3ef),

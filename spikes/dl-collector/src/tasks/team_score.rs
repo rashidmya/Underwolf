@@ -3,8 +3,8 @@
 //! 6810 the HUD sets its `team_kills` dialog variable from the team's score getter
 //! (`mov eax,[rcx+0x620]; ret` at client.dll+0xb256a0, its only call at +0x1c6f6ce).
 
-use super::read::{VecHeader, ensure, pointer, read_bytes};
-use super::{MAX_TEAMS, TEAM_AMBER, TEAM_SAPPHIRE, at, rules_object};
+use super::read::read_team_list;
+use super::{TEAM_AMBER, TEAM_SAPPHIRE, at, rules_object};
 use crate::keys::MATCH_INFO;
 use crate::mem::MemRead;
 use crate::roots::Roots;
@@ -55,20 +55,7 @@ impl TeamScore {
 
     /// `(team number, score)` of every team in the game's team list.
     fn read_teams(&self, m: &dyn MemRead) -> Result<Vec<(u8, i32)>, TaskError> {
-        let list = VecHeader::read(m, self.teams, MAX_TEAMS)?;
-        let raw = list.elements(m, 8)?;
-        let mut teams = Vec::new();
-        for team_raw in raw.chunks_exact(8) {
-            if let Some(team) = pointer(team_raw)? {
-                teams.push((team, self.team(m, team)?));
-            }
-        }
-        // Every team again, then the list: values that changed meanwhile are not one state.
-        for &(team, read) in &teams {
-            ensure(self.team(m, team)? == read)?;
-        }
-        list.unchanged(m)?;
-        ensure(list.count == 0 || read_bytes(m, list.data, raw.len())? == raw)?;
+        let teams = read_team_list(m, self.teams, |m, team| self.team(m, team))?;
         Ok(teams.into_iter().map(|(_, read)| read).collect())
     }
 }

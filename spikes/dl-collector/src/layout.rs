@@ -37,7 +37,7 @@ const DATA: &str = "PlayerDataGlobal_t";
 /// One relation per field in `TASK_FIELDS`. The anchor is the field's nearest lower-offset
 /// neighbour in `dumps/schema-6801.json`, or the nearest higher one (negative delta) for the
 /// lowest field of its class. Relations only: no absolute offsets.
-pub const RELATIONS: [Relation; 21] = [
+pub const RELATIONS: [Relation; 23] = [
     rel(RULES, "m_eGameState", "m_flPlayOfTheGameStateEndTime", 4),
     rel(RULES, "m_unMatchID", "m_bGGMarkAsNotScored", 4),
     rel(RULES, "m_flGameStartTime", "m_fLevelStartTime", 4),
@@ -49,6 +49,13 @@ pub const RELATIONS: [Relation; 21] = [
     rel(BASE_RULES, "m_bGamePaused", "m_nPauseStartTick", 4),
     rel("C_Team", "m_aPlayerControllers", "m_aPlayers", -24),
     rel("C_Team", "m_iScore", "m_aPlayers", 24),
+    rel(
+        "C_CitadelTeam",
+        "m_nBossesAlive",
+        "m_bHasValidBaseLocation",
+        4,
+    ),
+    rel("C_CitadelTeam", "m_nBossesMax", "m_nBossesAlive", 4),
     rel("C_BaseEntity", "m_iTeamNum", "m_bClientSideRagdoll", 1),
     rel(CONTROLLER, "m_iszPlayerName", "m_iMostConnected", 4),
     rel(CONTROLLER, "m_steamID", "m_iszPlayerName", 140),

@@ -130,8 +130,9 @@ fn clock_event_becomes_match_clock() {
     let mut p = Provider::default();
     let data = r#"{"match_clock":"01:02"}"#;
     assert_eq!(p.on_event("clock", data), [Emission::Event { name: "match_clock".into(), data: data.into() }]);
-    // Other events pass through unchanged, `game_paused` with Overwolf's bare boolean.
-    for (name, data) in [("game_paused", "true"), ("game_paused", "false"), ("tower_destroyed", "{}")] {
+    // Other events pass through unchanged, `game_paused` with Overwolf's bare boolean and
+    // `tower_destroyed` with its team name as a JSON string.
+    for (name, data) in [("game_paused", "true"), ("game_paused", "false"), ("tower_destroyed", r#""Amber""#)] {
         assert_eq!(p.on_event(name, data), [Emission::Event { name: name.into(), data: data.into() }]);
     }
 }

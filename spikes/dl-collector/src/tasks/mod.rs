@@ -8,6 +8,7 @@ mod phase;
 mod read;
 mod roster;
 mod team_score;
+mod tower_destroyed;
 
 use crate::mem::{MemRead, PTR_MAX, PTR_MIN, ReadError};
 use crate::roots::{CLOCK_RULE_FIELDS, ClockRoots, RootError, Roots};
@@ -21,11 +22,13 @@ pub use match_outcome::MatchOutcome;
 pub use phase::Phase;
 pub use roster::{Roster, RosterFields};
 pub use team_score::TeamScore;
+pub use tower_destroyed::{MAX_BOSSES, TowerDestroyed};
 
 /// Field offsets of 0 or beyond this are not believed (a broken schema read, not a field).
 const FIELD_OFFSET_MAX: u32 = 1 << 20;
 
 const RULES: &str = "C_CitadelGameRules";
+const TEAM: &str = "C_CitadelTeam";
 
 /// The game's team numbers of Overwolf's two teams. Build 6810's client.dll names 2 "Amber"
 /// (`#Citadel_Team1_Name`) and 3 "Sapphire" (`#Citadel_Team2_Name`) in its team table, and its
@@ -71,6 +74,10 @@ pub const TASK_FIELDS: &[(&str, &str, &str)] = &[
     ("team_score", "C_Team", "m_iScore"),
     ("match_outcome", RULES, "m_eGameState"),
     ("match_outcome", RULES, "m_iWinningTeam"),
+    ("tower_destroyed", RULES, "m_eGameState"),
+    ("tower_destroyed", "C_BaseEntity", "m_iTeamNum"),
+    ("tower_destroyed", TEAM, "m_nBossesAlive"),
+    ("tower_destroyed", TEAM, "m_nBossesMax"),
 ];
 
 pub struct Built {
@@ -156,6 +163,28 @@ pub fn build(
         None => unresolved.push((
             "match_outcome",
             format!("unresolved: {RULES}.m_iWinningTeam"),
+        )),
+    }
+
+    match (
+        offset(fields, "C_BaseEntity", "m_iTeamNum"),
+        offset(fields, TEAM, "m_nBossesAlive"),
+        offset(fields, TEAM, "m_nBossesMax"),
+    ) {
+        (Some(team_num), Some(alive), Some(max)) => tasks.push(Box::new(TowerDestroyed::new(
+            roots, state, team_num, alive, max,
+        ))),
+        (None, _, _) => unresolved.push((
+            "tower_destroyed",
+            "unresolved: C_BaseEntity.m_iTeamNum".into(),
+        )),
+        (_, None, _) => unresolved.push((
+            "tower_destroyed",
+            format!("unresolved: {TEAM}.m_nBossesAlive"),
+        )),
+        (_, _, None) => unresolved.push((
+            "tower_destroyed",
+            format!("unresolved: {TEAM}.m_nBossesMax"),
         )),
     }
     Ok(Built { tasks, unresolved })

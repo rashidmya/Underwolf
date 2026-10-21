@@ -974,6 +974,165 @@ fn match_outcome_change_during_read_is_discarded() {
     );
 }
 
+fn towers(t: &mut Box<dyn Task>, mem: &dyn MemRead) -> Vec<String> {
+    let p = run(t, mem).unwrap();
+    assert!(p.sets().is_empty(), "tower_destroyed has no info key");
+    p.events()
+        .iter()
+        .map(|(name, data)| {
+            assert_eq!(name, "tower_destroyed");
+            data.clone()
+        })
+        .collect()
+}
+
+/// Overwolf documents `{"events":[{"name":"tower_destroyed","data":"Amber"}]}` with the values
+/// Amber and Sapphire; its plugin names the team whose `m_nBossesAlive` changed. One event per
+/// boss the count lost since the last pass; the first pass only sets the baseline.
+#[test]
+fn tower_destroyed_fires_once_per_boss_a_team_loses() {
+    let (mut mem, w, mut tasks) = fresh();
+    let mut t = task(&mut tasks, "tower_destroyed");
+    // `set_players` numbers the teams 2, 3, 4 (neutral, not emitted).
+    w.set_players(&mut mem, &teams_of(&[1, 1, 0]));
+    w.set_bosses(&mut mem, 0, 12, 12);
+    w.set_bosses(&mut mem, 1, 12, 12);
+    w.set_bosses(&mut mem, 2, 3, 3);
+    assert!(towers(&mut t, &mem).is_empty());
+    assert!(towers(&mut t, &mem).is_empty());
+
+    w.set_bosses(&mut mem, 0, 11, 12);
+    assert_eq!(towers(&mut t, &mem), [r#""Amber""#]);
+    assert!(towers(&mut t, &mem).is_empty());
+    // Two of Sapphire's in one pass.
+    w.set_bosses(&mut mem, 1, 10, 12);
+    assert_eq!(towers(&mut t, &mem), [r#""Sapphire""#, r#""Sapphire""#]);
+    // Another team's bosses are not Overwolf's.
+    w.set_bosses(&mut mem, 2, 0, 3);
+    assert!(towers(&mut t, &mem).is_empty());
+    // A rise only moves the baseline.
+    w.set_bosses(&mut mem, 0, 12, 13);
+    assert!(towers(&mut t, &mem).is_empty());
+    w.set_bosses(&mut mem, 0, 11, 13);
+    assert_eq!(towers(&mut t, &mem), [r#""Amber""#]);
+
+    // Names follow the team number. Swapped numbers put each name on another team object,
+    // which starts its own count.
+    w8(&mut mem, World::team(0) + world::OFF_TEAM_ID, 3);
+    w8(&mut mem, World::team(1) + world::OFF_TEAM_ID, 2);
+    assert!(towers(&mut t, &mem).is_empty());
+    w.set_bosses(&mut mem, 0, 10, 13);
+    assert_eq!(towers(&mut t, &mem), [r#""Sapphire""#]);
+    // A team that leaves the list and comes back has no baseline in between.
+    w64(&mut mem, world::TEAM_ARRAY, 0);
+    assert!(towers(&mut t, &mem).is_empty());
+    w.set_bosses(&mut mem, 0, 9, 13);
+    w64(&mut mem, world::TEAM_ARRAY, World::team(0));
+    assert!(towers(&mut t, &mem).is_empty());
+    w.set_bosses(&mut mem, 0, 0, 13);
+    assert_eq!(towers(&mut t, &mem).len(), 9);
+}
+
+/// Only drops seen between two passes of `GameInProgress` count: leaving the phase or losing the
+/// game rules forgets the baseline, and objectives removed outside it fire nothing.
+#[test]
+fn tower_destroyed_needs_a_match_in_progress() {
+    let (mut mem, w, mut tasks) = fresh();
+    let mut t = task(&mut tasks, "tower_destroyed");
+    w.set_players(&mut mem, &teams_of(&[1, 1]));
+    w.set_bosses(&mut mem, 0, 12, 12);
+    w.set_bosses(&mut mem, 1, 12, 12);
+    assert!(towers(&mut t, &mem).is_empty());
+    for state in [8, 9, 10, 11, 6, 0] {
+        w.set_state(&mut mem, state);
+        w.set_bosses(&mut mem, 0, 5, 12);
+        assert!(towers(&mut t, &mem).is_empty(), "{state}");
+    }
+    w.set_state(&mut mem, 7);
+    assert!(towers(&mut t, &mem).is_empty());
+    w.set_bosses(&mut mem, 0, 4, 12);
+    assert_eq!(towers(&mut t, &mem), [r#""Amber""#]);
+
+    w.rules_present(&mut mem, false);
+    w.set_bosses(&mut mem, 0, 3, 12);
+    assert!(towers(&mut t, &mem).is_empty());
+    w.rules_present(&mut mem, true);
+    assert!(towers(&mut t, &mem).is_empty());
+}
+
+/// Counts outside `0 <= alive <= max <= MAX_BOSSES`, or two teams with one number, are not a
+/// state of the game. Teams that are not Amber or Sapphire are not read.
+#[test]
+fn tower_destroyed_rejects_implausible_counts_and_duplicate_teams() {
+    use uw_spike_dlcollector::tasks::MAX_BOSSES;
+    let (mut mem, w, mut tasks) = fresh();
+    w.set_players(&mut mem, &teams_of(&[1, 1, 0]));
+    w.set_bosses(&mut mem, 2, -1, i32::MIN);
+    for (alive, max, ok) in [
+        (0, 0, true),
+        (MAX_BOSSES, MAX_BOSSES, true),
+        (3, 2, false),
+        (-1, 0, false),
+        (0, MAX_BOSSES + 1, false),
+        (i32::MIN, i32::MAX, false),
+    ] {
+        let mut t = task(&mut tasks, "tower_destroyed");
+        w.set_bosses(&mut mem, 1, alive, max);
+        let r = run(&mut t, &mem);
+        assert_eq!(r.is_ok(), ok, "{alive} of {max}: {r:?}");
+        if !ok {
+            assert!(matches!(r, Err(TaskError::Invalid(_))), "{r:?}");
+        }
+        tasks.push(t);
+    }
+    w.set_bosses(&mut mem, 1, 0, 0);
+    w8(&mut mem, World::team(1) + world::OFF_TEAM_ID, 2);
+    let mut t = task(&mut tasks, "tower_destroyed");
+    assert!(matches!(run(&mut t, &mem), Err(TaskError::Invalid(_))));
+}
+
+#[test]
+fn tower_destroyed_change_during_read_is_discarded() {
+    let (mut mem, w, mut tasks) = fresh();
+    w.set_players(&mut mem, &teams_of(&[1, 1]));
+    w.set_bosses(&mut mem, 0, 12, 12);
+    w.set_bosses(&mut mem, 1, 12, 12);
+    let mut t = task(&mut tasks, "tower_destroyed");
+    assert!(towers(&mut t, &mem).is_empty());
+
+    let sapphire_max = World::team(1) + world::OFF_BOSSES_MAX;
+    let mut reads = 0;
+    let hooked = Hooked::new(mem, move |addr, len, mem| {
+        if addr != sapphire_max || len != 4 {
+            return;
+        }
+        reads += 1;
+        match reads {
+            // Amber loses a boss right after Sapphire's first read.
+            1 => w32(mem, World::team(0) + world::OFF_BOSSES_ALIVE, 11),
+            // Two passes later, once both teams were read again: the match ends.
+            5 => w32(mem, world::RULES_OBJ + world::OFF_STATE, 8),
+            _ => {}
+        }
+    });
+    let mut p = Pass::default();
+    assert_eq!(t.run(&hooked, &mut p), Err(TaskError::Torn));
+    assert!(p.events().is_empty());
+    // The baseline is the last good pass, so the drop is not lost.
+    assert_eq!(towers(&mut t, &hooked), [r#""Amber""#]);
+
+    // A drop read as the phase leaves GameInProgress fires nothing, then or later.
+    let amber_alive = World::team(0) + world::OFF_BOSSES_ALIVE;
+    w32(&mut hooked.mem.borrow_mut(), amber_alive, 10);
+    let mut p = Pass::default();
+    assert_eq!(t.run(&hooked, &mut p), Err(TaskError::Torn));
+    assert!(p.events().is_empty());
+    assert!(towers(&mut t, &hooked).is_empty());
+    let state = world::RULES_OBJ + world::OFF_STATE;
+    w32(&mut hooked.mem.borrow_mut(), state, 7);
+    assert!(towers(&mut t, &hooked).is_empty());
+}
+
 #[test]
 fn team_score_and_match_outcome_fit_their_keys() {
     let (mut mem, w, mut tasks) = fresh();
@@ -1071,7 +1230,7 @@ fn unresolved_fields_and_roots_list_the_task() {
     .unwrap();
     let names: Vec<_> = built.tasks.iter().map(|t| t.name()).collect();
     assert_eq!(names, vec!["phase", "match_id"]);
-    assert_eq!(built.unresolved.len(), 5);
+    assert_eq!(built.unresolved.len(), 6);
     assert_eq!(built.unresolved[0].0, "roster");
     assert!(built.unresolved[0].1.starts_with("unresolved: "));
     assert_eq!(built.unresolved[1].0, "clock");
@@ -1098,6 +1257,13 @@ fn unresolved_fields_and_roots_list_the_task() {
         (
             "match_outcome",
             "unresolved: C_CitadelGameRules.m_iWinningTeam".to_string()
+        )
+    );
+    assert_eq!(
+        built.unresolved[5],
+        (
+            "tower_destroyed",
+            "unresolved: C_BaseEntity.m_iTeamNum".to_string()
         )
     );
 }

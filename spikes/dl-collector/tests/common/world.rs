@@ -43,6 +43,8 @@ pub const OFF_MODE: u64 = 0xac;
 pub const OFF_WINNER: u64 = 0xc0;
 pub const OFF_PLAYERS: u64 = 0x5f0;
 pub const OFF_SCORE: u64 = 0x620;
+pub const OFF_BOSSES_ALIVE: u64 = 0x6b8;
+pub const OFF_BOSSES_MAX: u64 = 0x6bc;
 pub const OFF_TEAM_ID: u64 = 0x3ef;
 pub const OFF_NAME: u64 = 0x6fc;
 pub const OFF_STEAM: u64 = 0x788;
@@ -236,6 +238,12 @@ impl World {
         w32(mem, Self::team(t) + OFF_SCORE, score as u32);
     }
 
+    /// Bosses alive and bosses max of the `t`-th team written by `set_players`.
+    pub fn set_bosses(&self, mem: &mut FakeMem, t: u64, alive: i32, max: i32) {
+        w32(mem, Self::team(t) + OFF_BOSSES_ALIVE, alive as u32);
+        w32(mem, Self::team(t) + OFF_BOSSES_MAX, max as u32);
+    }
+
     /// The game rules' winning team.
     pub fn set_winner(&self, mem: &mut FakeMem, team: i32) {
         w32(mem, RULES_OBJ + OFF_WINNER, team as u32);
@@ -312,6 +320,15 @@ pub fn add_classes(s: &mut Synth, missing_anchor: Option<&str>) -> u64 {
         ],
         m,
     );
+    let citadel_team = class(
+        s,
+        "C_CitadelTeam",
+        &[
+            ("m_nBossesAlive", OFF_BOSSES_ALIVE as u32),
+            ("m_nBossesMax", OFF_BOSSES_MAX as u32),
+        ],
+        m,
+    );
     let entity = class(s, "C_BaseEntity", &[("m_iTeamNum", OFF_TEAM_ID as u32)], m);
     let ctrl = class(
         s,
@@ -341,7 +358,16 @@ pub fn add_classes(s: &mut Synth, missing_anchor: Option<&str>) -> u64 {
         ],
         m,
     );
-    s.class_table(&[rules, base_rules, team, entity, ctrl, citadel, data])
+    s.class_table(&[
+        rules,
+        base_rules,
+        team,
+        citadel_team,
+        entity,
+        ctrl,
+        citadel,
+        data,
+    ])
 }
 
 /// Schema fields of build 6801 for the tasks, without a module image.
