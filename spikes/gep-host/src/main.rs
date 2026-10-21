@@ -14,11 +14,28 @@
 //!   {"t_ms":…,"kind":"event","name":…,"data":…,"ts":…}
 //!   {"t_ms":…,"kind":"status","status":"connected"|"disconnected"|"lost"|"plugin_loaded",…}
 //! `t_ms` is Unix time in ms when `uw-gep` received it; `ts` is the collector's own clock (ms).
-//! On Ctrl+C it prints the feature-status table. Artifacts come from `--install-dir` (default
+//! On Ctrl+C it prints the feature-status table.
+//!
+//!   uw-gep verify --jsonl out.jsonl --match-id <id> [--metadata file.json]
+//!
+//! compares the final roster in a JSONL log with deadlock-api.com's metadata for that match
+//! (fetched with curl, or read from `--metadata`) and prints OK/MISMATCH/MISSING per field. Exit
+//! code: 0 all OK, 1 a MISMATCH, 3 only MISSING, 2 usage or fetch error. Artifacts come from `--install-dir` (default
 //! `~/.local/share/underwolf-spike`, see `spikes/inject/install.sh`).
 
 #[cfg(unix)]
 fn main() {
+    let mut args = std::env::args().skip(1).peekable();
+    if args.peek().map(String::as_str) == Some("verify") {
+        args.next();
+        match uw_spike_gep_host::verify::run(args) {
+            Ok(code) => std::process::exit(code),
+            Err(msg) => {
+                eprintln!("[uw-gep] {msg}");
+                std::process::exit(2);
+            }
+        }
+    }
     match app::run() {
         Ok(()) => {}
         Err(msg) => {

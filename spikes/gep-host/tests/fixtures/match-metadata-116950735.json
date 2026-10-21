@@ -1,0 +1,121 @@
+{
+ "match_info": {
+  "match_id": 116950735,
+  "duration_s": 3271,
+  "start_time": 1792011349,
+  "game_mode": 1,
+  "match_mode": 1,
+  "match_outcome": 0,
+  "winning_team": 0,
+  "players": [
+   {
+    "account_id": 1595847997,
+    "player_slot": 7,
+    "team": 1,
+    "hero_id": 76,
+    "kills": 5,
+    "deaths": 15,
+    "assists": 26
+   },
+   {
+    "account_id": 172855351,
+    "player_slot": 6,
+    "team": 0,
+    "hero_id": 10,
+    "kills": 10,
+    "deaths": 15,
+    "assists": 25
+   },
+   {
+    "account_id": 1046353150,
+    "player_slot": 11,
+    "team": 1,
+    "hero_id": 25,
+    "kills": 8,
+    "deaths": 13,
+    "assists": 20
+   },
+   {
+    "account_id": 1000584902,
+    "player_slot": 8,
+    "team": 1,
+    "hero_id": 66,
+    "kills": 21,
+    "deaths": 21,
+    "assists": 25
+   },
+   {
+    "account_id": 763130279,
+    "player_slot": 1,
+    "team": 0,
+    "hero_id": 1,
+    "kills": 9,
+    "deaths": 14,
+    "assists": 29
+   },
+   {
+    "account_id": 921340607,
+    "player_slot": 3,
+    "team": 0,
+    "hero_id": 8,
+    "kills": 20,
+    "deaths": 13,
+    "assists": 13
+   },
+   {
+    "account_id": 320164202,
+    "player_slot": 10,
+    "team": 1,
+    "hero_id": 63,
+    "kills": 19,
+    "deaths": 9,
+    "assists": 22
+   },
+   {
+    "account_id": 295824243,
+    "player_slot": 4,
+    "team": 0,
+    "hero_id": 84,
+    "kills": 11,
+    "deaths": 11,
+    "assists": 36
+   },
+   {
+    "account_id": 143124889,
+    "player_slot": 12,
+    "team": 1,
+    "hero_id": 77,
+    "kills": 9,
+    "deaths": 14,
+    "assists": 34
+   },
+   {
+    "account_id": 249316195,
+    "player_slot": 9,
+    "team": 1,
+    "hero_id": 67,
+    "kills": 18,
+    "deaths": 10,
+    "assists": 28
+   },
+   {
+    "account_id": 1560123767,
+    "player_slot": 2,
+    "team": 0,
+    "hero_id": 64,
+    "kills": 14,
+    "deaths": 13,
+    "assists": 14
+   },
+   {
+    "account_id": 140405622,
+    "player_slot": 5,
+    "team": 0,
+    "hero_id": 2,
+    "kills": 18,
+    "deaths": 14,
+    "assists": 26
+   }
+  ]
+ }
+}
