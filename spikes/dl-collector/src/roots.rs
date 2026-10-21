@@ -145,9 +145,10 @@ pub fn resolve_roots(m: &dyn MemRead, client: &Module) -> Result<Roots, RootErro
 // SHA-256 a7d0d9e88d11f09a36294569662718394cfa36d99286774ecf8c9fd6ea4f589e). Each pattern is the
 // owner's objdump of the previous build (d61348c5…, where underlock's clock was validated live)
 // with rel32 displacements, jump offsets, stack offsets and game-rules field displacements
-// masked; each matches exactly once on 6801. Kept fixed: the ConVar value offset +0x58, the
-// global game time +0x30 and tick interval +0x54, and the rules vtable slot +0x220, because the
-// clock reader depends on them.
+// masked; each matches exactly once on 6801. Kept fixed, because the clock reader depends on
+// them: the ConVar value offset +0x58 (CLOCK_SECONDS, CONVAR_GETTER), the rules vtable slot
+// +0x220 and global game time +0x30 on the unpaused path (GAME_TIME, plus a decoded check that
+// its `je` lands on that load), and the tick interval +0x54 (ADJUST_TIME and GAME_TIME).
 
 /// The match-clock seconds function (the `%d:%02d` formatter's callee): loads the clock-offset
 /// ConVar, tests the pregame-enabled ConVar and the game mode, loads the pregame-offset ConVar,
@@ -155,9 +156,14 @@ pub fn resolve_roots(m: &dyn MemRead, client: &Module) -> Result<Roots, RootErro
 /// getter call at +18, pregame-enabled data pointer at +25, pregame ConVar object at +53,
 /// getter call at +58, game-time call at +77.
 pub const CLOCK_SECONDS: &str = "0f 29 74 24 30 48 8d 0d ?? ?? ?? ?? 0f 29 7c 24 20 e8 ?? ?? ?? ?? 48 8b 05 ?? ?? ?? ?? 0f 28 f8 0f 57 f6 80 78 58 00 74 ?? 83 bb ?? ?? ?? ?? 01 75 ?? 48 8d 0d ?? ?? ?? ?? e8 ?? ?? ?? ?? 0f 28 f0 45 33 c0 48 8d 54 24 ?? 48 8b cb e8 ?? ?? ?? ?? 48 8d 53 ??";
-/// The game-time function: fetches the rules' vtable slot +0x220 and loads the globals pointer
-/// (rel32 at +0x16) to pass global time +0x30 to it.
-pub const GAME_TIME: &str = "40 53 48 83 ec 20 48 8b 01 48 8b da 4c 8b 90 20 02 00 00 48 8b 05 ?? ?? ?? ?? 45 85 c0 74 ?? 80 78 40 00";
+/// The whole game-time function up to its unpaused tail call: fetches the rules' vtable slot
+/// +0x220, loads the globals pointer (rel32 at +0x16), and when its flag argument is zero jumps
+/// (`je` rel8 at +0x1e) to `movss xmm2,[rax+0x30]` at +0x5f, global time, and calls the slot.
+/// The paused branches between (+0x23..+0x5f) read globals +0x40/+0x4c/+0x38/+0x54.
+pub const GAME_TIME: &str = "40 53 48 83 ec 20 48 8b 01 48 8b da 4c 8b 90 20 02 00 00 48 8b 05 ?? ?? ?? ?? 45 85 c0 74 ?? 80 78 40 00 74 ?? f3 0f 10 50 4c 45 8b c8 41 ff d2 48 8b c3 48 83 c4 20 5b c3 f3 0f 10 50 38 45 8b c8 f3 0f 5c 15 ?? ?? ?? ?? f3 0f 59 50 54 f3 0f 58 50 4c 41 ff d2 48 8b c3 48 83 c4 20 5b c3 f3 0f 10 50 30 45 8b c8 41 ff d2";
+/// GAME_TIME's `je` (rel8 at +0x1e, next instruction +0x1f) must land on its +0x30 load.
+const GAME_TIME_JE: u64 = 0x1e;
+const GAME_TIME_LOAD_0X30: u64 = 0x5f;
 /// The game-time adjust function (C_CitadelGameRules vtable +0x220): subtracts total paused
 /// ticks times the tick interval at globals +0x54; the globals load is the rel32 at +0x5f.
 pub const ADJUST_TIME: &str = "48 89 5c 24 08 57 48 83 ec 30 0f 29 74 24 20 0f 28 f2 48 8b da 48 8b f9 45 85 c9 75 ?? 44 38 49 ?? 74 ?? 8b 49 ?? 85 c9 7f ?? 8b 0d ?? ?? ?? ?? ba 03 00 00 00 ff 15 ?? ?? ?? ?? 84 c0 74 ?? 8b 0d ?? ?? ?? ?? 4c 8d 05 ?? ?? ?? ?? ba 03 00 00 00 ff 15 ?? ?? ?? ?? 66 0f 6e 47 ?? 48 8b 05 ?? ?? ?? ?? 0f 5b c0 f3 0f 59 40 54 f3 0f 5c f0";
@@ -205,6 +211,14 @@ fn game_time(m: &dyn MemRead, module: &Module) -> Result<(u64, BTreeSet<u64>), R
     let what = "game time globals";
     let mut sites = Vec::new();
     for site in find_sites(m, module, GAME_TIME, MAX_SITES, what)? {
+        let je = m.read_u8(site + GAME_TIME_JE)? as i8;
+        if site
+            .wrapping_add(GAME_TIME_JE + 1)
+            .wrapping_add(je as i64 as u64)
+            != site + GAME_TIME_LOAD_0X30
+        {
+            continue;
+        }
         let globals = rip_target(m, site, 0x16, 0x1a)?;
         if in_data(module, globals) {
             sites.push((site, globals));

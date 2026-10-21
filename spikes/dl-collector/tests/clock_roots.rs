@@ -31,6 +31,8 @@ fn globals(s: &mut Synth) -> Globals {
 
 fn game_time_site(s: &mut Synth, at: usize, globals: u64) {
     s.place(at, GAME_TIME, &[(0x16, 0x1a, globals)]);
+    // `je` over the paused branches to the unpaused `movss xmm2,[rax+0x30]` at +0x5f.
+    s.poke(at + 0x1e, 0x40);
 }
 
 fn adjust_site(s: &mut Synth, at: usize, globals: u64) {
@@ -147,6 +149,30 @@ fn convar_pointers_must_be_outside_code() {
     assert_eq!(
         resolve_clock_roots(&mem, &module),
         Err(RootError::NotFound("pregame enabled ConVar"))
+    );
+}
+
+#[test]
+fn game_time_must_load_global_time_at_0x30() {
+    let (mut s, _) = image(None);
+    // `movss xmm2,[rax+0x30]` at +0x5f becomes `[rax+0x34]`.
+    assert_eq!(s.code[GAME_TIME_AT + 0x63], 0x30);
+    s.poke(GAME_TIME_AT + 0x63, 0x34);
+    let (mem, module) = s.finish();
+    assert_eq!(
+        resolve_clock_roots(&mem, &module),
+        Err(RootError::NotFound("game time globals"))
+    );
+}
+
+#[test]
+fn game_time_unpaused_branch_must_reach_the_0x30_load() {
+    let (mut s, _) = image(None);
+    s.poke(GAME_TIME_AT + 0x1e, 0x3a);
+    let (mem, module) = s.finish();
+    assert_eq!(
+        resolve_clock_roots(&mem, &module),
+        Err(RootError::NotFound("game time globals"))
     );
 }
 
