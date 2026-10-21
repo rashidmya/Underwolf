@@ -1,5 +1,5 @@
-//! The `tower_destroyed` event: one per boss objective an Overwolf team loses during
-//! `GameInProgress`, with that team's name as data. Overwolf documents
+//! The `tower_destroyed` event: one per boss objective an Overwolf team loses during a Normal
+//! match in `GameInProgress`, with that team's name as data. Overwolf documents
 //! `{"name":"tower_destroyed","data":"Amber"}` with the values `Amber` and `Sapphire`.
 //!
 //! Source: each team's `C_CitadelTeam.m_nBossesAlive`, the field Overwolf's plugin compares from
@@ -9,17 +9,18 @@
 //! - server.dll+0x86c180 adds 1 (and 1 to `m_nBossesMax`) when an entity joins the team and
 //!   its class is `CLASS_TROOPER_BOSS`, `CLASS_DESTROYABLE_BUILDING`, `CLASS_BOSS_TIER_2`,
 //!   `CLASS_BOSS_BARRACKS` or `CLASS_BOSS_TIER_3`.
-//! - server.dll+0x8a7950 takes 1 off when such an entity leaves the team. Only two virtuals of
-//!   the boss classes call it: `ChangeTeam` (slot 105) and slot 14, read as the entity's
-//!   removal (not proven offline; the live check settles it).
+//! - server.dll+0x8a7950 takes 1 off for every boss passed to it, whether or not its handle
+//!   was in the team's list. Only virtuals at slots 14 and 105 call it; for the boss classes
+//!   these are `ChangeTeam` (slot 105) and slot 14, read as the entity's removal (not proven
+//!   offline; the live check settles it, and that each boss is removed once).
 //!
-//! A drop between two passes of a match is therefore that many of the team's boss objectives
+//! A drop between two passes of one match is therefore that many of the team's boss objectives
 //! gone. A rise only moves the baseline. The first pass of a match has nothing to compare
-//! with.
+//! with. Only Normal matches count (see `counted`).
 
 use super::phase::GAME_IN_PROGRESS;
 use super::read::read_team_list;
-use super::{TEAM_AMBER, TEAM_SAPPHIRE, at, rules_object};
+use super::{GAME_MODES, TEAM_AMBER, TEAM_SAPPHIRE, at, rules_object};
 use crate::mem::MemRead;
 use crate::roots::Roots;
 use crate::runner::{Pass, Task, TaskError};
@@ -63,39 +64,68 @@ fn bosses(teams: &[(u64, TeamRead)]) -> Result<Bosses, TaskError> {
     Ok(out)
 }
 
+/// The schema offsets the task reads: game rules `m_eGameState`, `m_eGameMode` and
+/// `m_unMatchID`; the team's `m_iTeamNum`, `m_nBossesAlive` and `m_nBossesMax`.
+pub struct TowerOffsets {
+    pub state: u32,
+    pub game_mode: u32,
+    pub match_id: u32,
+    pub team_num: u32,
+    pub alive: u32,
+    pub max: u32,
+}
+
+/// The match a baseline belongs to: the game rules object and its match id.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Match {
+    rules: u64,
+    id: u32,
+}
+
 pub struct TowerDestroyed {
     teams: u64,
     rules_ptr: u64,
-    state: u32,
-    team_num: u32,
-    alive: u32,
-    max: u32,
-    /// The bosses alive at the last good pass of this match.
-    last: Bosses,
+    at: TowerOffsets,
+    /// The bosses alive at the last good pass, and the match they were read in.
+    last: Option<(Match, Bosses)>,
 }
 
 impl TowerDestroyed {
-    pub fn new(roots: &Roots, state: u32, team_num: u32, alive: u32, max: u32) -> TowerDestroyed {
+    pub fn new(roots: &Roots, at: TowerOffsets) -> TowerDestroyed {
         TowerDestroyed {
             teams: roots.teams,
             rules_ptr: roots.game_rules_ptr,
-            state,
-            team_num,
-            alive,
-            max,
-            last: [None; 2],
+            at,
+            last: None,
         }
     }
 
+    /// `(phase, game mode, match id)` of the game rules object `rules`.
+    fn rules(&self, m: &dyn MemRead, rules: u64) -> Result<(i32, i32, u32), TaskError> {
+        Ok((
+            m.read_i32(at(rules, self.at.state.into())?)?,
+            m.read_i32(at(rules, self.at.game_mode.into())?)?,
+            m.read_u32(at(rules, self.at.match_id.into())?)?,
+        ))
+    }
+
     fn team(&self, m: &dyn MemRead, team: u64) -> Result<TeamRead, TaskError> {
-        let number = m.read_u8(at(team, self.team_num.into())?)?;
+        let number = m.read_u8(at(team, self.at.team_num.into())?)?;
         if !TEAMS.iter().any(|&(n, _)| n == number) {
             return Ok((number, None));
         }
-        let alive = m.read_i32(at(team, self.alive.into())?)?;
-        let max = m.read_i32(at(team, self.max.into())?)?;
+        let alive = m.read_i32(at(team, self.at.alive.into())?)?;
+        let max = m.read_i32(at(team, self.at.max.into())?)?;
         Ok((number, Some((alive, max))))
     }
+}
+
+/// Only a Normal match in progress: the game mode is the schema enum's `Normal`
+/// (`GAME_MODES`, checked against the installed build's `ECitadelGameMode`). Other modes
+/// (Sandbox in the Hideout, StreetBrawl with its rounds) were not analysed.
+fn counted(state: i32, mode: i32) -> bool {
+    state == GAME_IN_PROGRESS
+        && usize::try_from(mode).ok().and_then(|i| GAME_MODES.get(i)) == Some(&"Normal")
 }
 
 impl Task for TowerDestroyed {
@@ -105,32 +135,38 @@ impl Task for TowerDestroyed {
 
     fn run(&mut self, m: &dyn MemRead, out: &mut Pass) -> Result<(), TaskError> {
         let Some(rules) = rules_object(m, self.rules_ptr)? else {
-            self.last = [None; 2];
+            self.last = None;
             return Ok(());
         };
-        let state = at(rules, self.state.into())?;
-        if m.read_i32(state)? != GAME_IN_PROGRESS {
-            self.last = [None; 2];
+        let (state, mode, id) = self.rules(m, rules)?;
+        if !counted(state, mode) {
+            self.last = None;
             return Ok(());
         }
-        let now = bosses(&read_team_list(m, self.teams, |m, team| {
-            self.team(m, team)
-        })?)?;
-        // The phase again: a drop read as the match ends is not one in it.
-        if m.read_i32(state)? != GAME_IN_PROGRESS {
+        let teams = read_team_list(m, self.teams, |m, team| self.team(m, team))?;
+        // The match again: counts read as it ends or changes are not one state of it.
+        if rules_object(m, self.rules_ptr)? != Some(rules)
+            || self.rules(m, rules)? != (state, mode, id)
+        {
             return Err(TaskError::Torn);
         }
-        for ((&(_, name), was), is) in TEAMS.iter().zip(&self.last).zip(&now) {
-            // Only within one team object: a new object starts its own count.
-            if let (Some((team_was, alive_was)), Some((team, alive))) = (was, is)
-                && team_was == team
-            {
-                for _ in *alive..*alive_was {
-                    out.event("tower_destroyed", format!("\"{name}\""));
+        let now = bosses(&teams)?;
+        let here = Match { rules, id };
+        if let Some((there, was)) = &self.last
+            && *there == here
+        {
+            for ((&(_, name), was), is) in TEAMS.iter().zip(was).zip(&now) {
+                // Only within one team object: a new object starts its own count.
+                if let (Some((team_was, alive_was)), Some((team, alive))) = (was, is)
+                    && team_was == team
+                {
+                    for _ in *alive..*alive_was {
+                        out.event("tower_destroyed", format!("\"{name}\""));
+                    }
                 }
             }
         }
-        self.last = now;
+        self.last = Some((here, now));
         Ok(())
     }
 }

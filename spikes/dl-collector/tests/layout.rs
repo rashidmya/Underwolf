@@ -226,12 +226,14 @@ fn a_moved_anchor_or_a_missing_one_breaks_the_relation() {
         .get_mut("C_CitadelGameRules")
         .unwrap()
         .remove("m_eMatchMode");
-    // m_eMatchMode anchors the clock's m_eGameMode and is read by game_mode itself.
+    // m_eMatchMode anchors m_eGameMode (read by the clock and tower_destroyed) and is read by
+    // game_mode itself.
     assert_eq!(
         broken_tasks(&d),
         [
             invalid("clock", "layout: C_CitadelGameRules.m_eGameMode"),
             invalid("game_mode", "layout: C_CitadelGameRules.m_eMatchMode"),
+            invalid("tower_destroyed", "layout: C_CitadelGameRules.m_eGameMode"),
         ]
     );
 }

@@ -22,7 +22,7 @@ pub use match_outcome::MatchOutcome;
 pub use phase::Phase;
 pub use roster::{Roster, RosterFields};
 pub use team_score::TeamScore;
-pub use tower_destroyed::{MAX_BOSSES, TowerDestroyed};
+pub use tower_destroyed::{MAX_BOSSES, TowerDestroyed, TowerOffsets};
 
 /// Field offsets of 0 or beyond this are not believed (a broken schema read, not a field).
 const FIELD_OFFSET_MAX: u32 = 1 << 20;
@@ -75,6 +75,8 @@ pub const TASK_FIELDS: &[(&str, &str, &str)] = &[
     ("match_outcome", RULES, "m_eGameState"),
     ("match_outcome", RULES, "m_iWinningTeam"),
     ("tower_destroyed", RULES, "m_eGameState"),
+    ("tower_destroyed", RULES, "m_eGameMode"),
+    ("tower_destroyed", RULES, "m_unMatchID"),
     ("tower_destroyed", "C_BaseEntity", "m_iTeamNum"),
     ("tower_destroyed", TEAM, "m_nBossesAlive"),
     ("tower_destroyed", TEAM, "m_nBossesMax"),
@@ -170,21 +172,34 @@ pub fn build(
         offset(fields, "C_BaseEntity", "m_iTeamNum"),
         offset(fields, TEAM, "m_nBossesAlive"),
         offset(fields, TEAM, "m_nBossesMax"),
+        offset(fields, RULES, "m_eGameMode"),
     ) {
-        (Some(team_num), Some(alive), Some(max)) => tasks.push(Box::new(TowerDestroyed::new(
-            roots, state, team_num, alive, max,
-        ))),
-        (None, _, _) => unresolved.push((
+        (Some(team_num), Some(alive), Some(max), Some(game_mode)) => {
+            let at = TowerOffsets {
+                state,
+                game_mode,
+                match_id,
+                team_num,
+                alive,
+                max,
+            };
+            tasks.push(Box::new(TowerDestroyed::new(roots, at)));
+        }
+        (None, ..) => unresolved.push((
             "tower_destroyed",
             "unresolved: C_BaseEntity.m_iTeamNum".into(),
         )),
-        (_, None, _) => unresolved.push((
+        (_, None, ..) => unresolved.push((
             "tower_destroyed",
             format!("unresolved: {TEAM}.m_nBossesAlive"),
         )),
-        (_, _, None) => unresolved.push((
+        (_, _, None, _) => unresolved.push((
             "tower_destroyed",
             format!("unresolved: {TEAM}.m_nBossesMax"),
+        )),
+        (.., None) => unresolved.push((
+            "tower_destroyed",
+            format!("unresolved: {RULES}.m_eGameMode"),
         )),
     }
     Ok(Built { tasks, unresolved })

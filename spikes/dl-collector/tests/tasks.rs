@@ -986,15 +986,22 @@ fn towers(t: &mut Box<dyn Task>, mem: &dyn MemRead) -> Vec<String> {
         .collect()
 }
 
+/// A Normal match in progress (match id 1234) with `sizes` players per team, numbered 2, 3, 4,
+/// and the tower_destroyed task.
+fn tower_match(sizes: &[usize]) -> (FakeMem, World, Box<dyn Task>) {
+    let (mut mem, w, mut tasks) = fresh();
+    set_modes(&mut mem, 3, 1);
+    w.set_players(&mut mem, &teams_of(sizes));
+    (mem, w, task(&mut tasks, "tower_destroyed"))
+}
+
 /// Overwolf documents `{"events":[{"name":"tower_destroyed","data":"Amber"}]}` with the values
 /// Amber and Sapphire; its plugin names the team whose `m_nBossesAlive` changed. One event per
 /// boss the count lost since the last pass; the first pass only sets the baseline.
 #[test]
 fn tower_destroyed_fires_once_per_boss_a_team_loses() {
-    let (mut mem, w, mut tasks) = fresh();
-    let mut t = task(&mut tasks, "tower_destroyed");
-    // `set_players` numbers the teams 2, 3, 4 (neutral, not emitted).
-    w.set_players(&mut mem, &teams_of(&[1, 1, 0]));
+    // The third team is neutral (4), not emitted.
+    let (mut mem, w, mut t) = tower_match(&[1, 1, 0]);
     w.set_bosses(&mut mem, 0, 12, 12);
     w.set_bosses(&mut mem, 1, 12, 12);
     w.set_bosses(&mut mem, 2, 3, 3);
@@ -1037,9 +1044,7 @@ fn tower_destroyed_fires_once_per_boss_a_team_loses() {
 /// game rules forgets the baseline, and objectives removed outside it fire nothing.
 #[test]
 fn tower_destroyed_needs_a_match_in_progress() {
-    let (mut mem, w, mut tasks) = fresh();
-    let mut t = task(&mut tasks, "tower_destroyed");
-    w.set_players(&mut mem, &teams_of(&[1, 1]));
+    let (mut mem, w, mut t) = tower_match(&[1, 1]);
     w.set_bosses(&mut mem, 0, 12, 12);
     w.set_bosses(&mut mem, 1, 12, 12);
     assert!(towers(&mut t, &mem).is_empty());
@@ -1060,13 +1065,80 @@ fn tower_destroyed_needs_a_match_in_progress() {
     assert!(towers(&mut t, &mem).is_empty());
 }
 
+/// Only the schema enum's `Normal` mode counts (`k_ECitadelGameMode_Normal`); other modes were
+/// not analysed. Outside it the teams are not even read, so their counts can't switch the task
+/// off, and the baseline is forgotten.
+#[test]
+fn tower_destroyed_only_in_normal_mode() {
+    use uw_spike_dlcollector::tasks::GAME_MODES;
+    assert_eq!(GAME_MODES[1], "Normal");
+    let (mut mem, w, mut t) = tower_match(&[1, 1]);
+    w.set_bosses(&mut mem, 0, 12, 12);
+    w.set_bosses(&mut mem, 1, 12, 12);
+    assert!(towers(&mut t, &mem).is_empty());
+    for mode in [0, 2, 3, 4, 5, 6, 7, -1, 0x101] {
+        set_modes(&mut mem, 3, mode);
+        w.set_bosses(&mut mem, 0, 5, 12);
+        w.set_bosses(&mut mem, 1, -1, i32::MIN);
+        assert!(towers(&mut t, &mem).is_empty(), "{mode}");
+    }
+    set_modes(&mut mem, 3, 1);
+    w.set_bosses(&mut mem, 1, 12, 12);
+    assert!(towers(&mut t, &mem).is_empty());
+    w.set_bosses(&mut mem, 0, 4, 12);
+    assert_eq!(towers(&mut t, &mem), [r#""Amber""#]);
+}
+
+/// The baseline belongs to one game rules object and one match id: leaving a match mid-game
+/// for the Hideout (GameInProgress to GameInProgress, no PostGame) must not compare the
+/// Hideout's teams with the match's, even if the team objects sit at the same addresses.
+#[test]
+fn tower_destroyed_baseline_belongs_to_one_match() {
+    let (mut mem, w, mut t) = tower_match(&[1, 1]);
+    w.set_bosses(&mut mem, 0, 12, 12);
+    w.set_bosses(&mut mem, 1, 12, 12);
+    assert!(towers(&mut t, &mem).is_empty());
+
+    // Another match id in the same rules object.
+    w32(&mut mem, world::RULES_OBJ + world::OFF_MATCH_ID, 5678);
+    w.set_bosses(&mut mem, 0, 11, 12);
+    assert!(towers(&mut t, &mem).is_empty());
+    w.set_bosses(&mut mem, 0, 10, 12);
+    assert_eq!(towers(&mut t, &mem), [r#""Amber""#]);
+
+    // A new game rules object with the same match id (and phase, mode, teams).
+    const RULES2: u64 = 0x3_0000_0000;
+    mem.add(RULES2, vec![0; 0xb000]);
+    for off in [world::OFF_STATE, world::OFF_MODE, world::OFF_MATCH_ID] {
+        let mut b = [0u8; 4];
+        mem.read(world::RULES_OBJ + off, &mut b).unwrap();
+        w32(&mut mem, RULES2 + off, u32::from_le_bytes(b));
+    }
+    w64(&mut mem, w.roots.game_rules_ptr, RULES2);
+    w.set_bosses(&mut mem, 0, 9, 12);
+    assert!(towers(&mut t, &mem).is_empty());
+    w.set_bosses(&mut mem, 0, 8, 12);
+    assert_eq!(towers(&mut t, &mem), [r#""Amber""#]);
+
+    // Left for the Hideout without a pass in between: new rules, no match id, Sandbox, and
+    // the team objects reused with fewer bosses. Nothing fires, then or after.
+    w32(&mut mem, RULES2 + world::OFF_MATCH_ID, 0);
+    w32(&mut mem, RULES2 + world::OFF_MODE, 3);
+    w64(&mut mem, w.roots.game_rules_ptr, world::RULES_OBJ);
+    w32(&mut mem, world::RULES_OBJ + world::OFF_MATCH_ID, 0);
+    set_modes(&mut mem, 3, 3);
+    w.set_bosses(&mut mem, 0, 0, 0);
+    w.set_bosses(&mut mem, 1, 0, 0);
+    assert!(towers(&mut t, &mem).is_empty());
+    assert!(towers(&mut t, &mem).is_empty());
+}
+
 /// Counts outside `0 <= alive <= max <= MAX_BOSSES`, or two teams with one number, are not a
-/// state of the game. Teams that are not Amber or Sapphire are not read.
+/// state of the game.
 #[test]
 fn tower_destroyed_rejects_implausible_counts_and_duplicate_teams() {
     use uw_spike_dlcollector::tasks::MAX_BOSSES;
-    let (mut mem, w, mut tasks) = fresh();
-    w.set_players(&mut mem, &teams_of(&[1, 1, 0]));
+    let (mut mem, w, mut t) = tower_match(&[1, 1, 0]);
     w.set_bosses(&mut mem, 2, -1, i32::MIN);
     for (alive, max, ok) in [
         (0, 0, true),
@@ -1076,29 +1148,60 @@ fn tower_destroyed_rejects_implausible_counts_and_duplicate_teams() {
         (0, MAX_BOSSES + 1, false),
         (i32::MIN, i32::MAX, false),
     ] {
-        let mut t = task(&mut tasks, "tower_destroyed");
         w.set_bosses(&mut mem, 1, alive, max);
         let r = run(&mut t, &mem);
         assert_eq!(r.is_ok(), ok, "{alive} of {max}: {r:?}");
         if !ok {
             assert!(matches!(r, Err(TaskError::Invalid(_))), "{r:?}");
         }
-        tasks.push(t);
     }
     w.set_bosses(&mut mem, 1, 0, 0);
     w8(&mut mem, World::team(1) + world::OFF_TEAM_ID, 2);
-    let mut t = task(&mut tasks, "tower_destroyed");
     assert!(matches!(run(&mut t, &mem), Err(TaskError::Invalid(_))));
+}
+
+/// Teams other than Amber and Sapphire are not read past their number: a team object that is
+/// not a `C_CitadelTeam` can't turn reads at the boss offsets into failed passes.
+#[test]
+fn tower_destroyed_reads_only_amber_and_sapphire_counts() {
+    let (mut mem, w, mut t) = tower_match(&[1, 1, 0]);
+    w.set_bosses(&mut mem, 0, 12, 12);
+    w.set_bosses(&mut mem, 1, 12, 12);
+    let counts = |team: u64| [world::OFF_BOSSES_ALIVE, world::OFF_BOSSES_MAX].map(|o| team + o);
+    let (amber, sapphire, neutral) = (
+        counts(World::team(0)),
+        counts(World::team(1)),
+        counts(World::team(2)),
+    );
+    let seen = std::rc::Rc::new(std::cell::RefCell::new([0usize; 3]));
+    let log = seen.clone();
+    let hooked = Hooked::new(mem, move |addr, _, _| {
+        for (i, team) in [amber, sapphire, neutral].iter().enumerate() {
+            if team.contains(&addr) {
+                log.borrow_mut()[i] += 1;
+            }
+        }
+    });
+    assert!(towers(&mut t, &hooked).is_empty());
+    let [a, s, n] = *seen.borrow();
+    // Each of both counts read, then read again.
+    assert_eq!((a, s, n), (4, 4, 0));
 }
 
 #[test]
 fn tower_destroyed_change_during_read_is_discarded() {
-    let (mut mem, w, mut tasks) = fresh();
-    w.set_players(&mut mem, &teams_of(&[1, 1]));
+    let (mut mem, w, mut t) = tower_match(&[1, 1]);
     w.set_bosses(&mut mem, 0, 12, 12);
     w.set_bosses(&mut mem, 1, 12, 12);
-    let mut t = task(&mut tasks, "tower_destroyed");
     assert!(towers(&mut t, &mem).is_empty());
+
+    // A second game rules object: the same phase and mode, and the match id set below.
+    const RULES2: u64 = 0x3_0000_0000;
+    mem.add(RULES2, vec![0; 0xb000]);
+    w32(&mut mem, RULES2 + world::OFF_STATE, 7);
+    w32(&mut mem, RULES2 + world::OFF_MODE, 1);
+    w32(&mut mem, RULES2 + world::OFF_MATCH_ID, 5678);
+    let rules_global = w.roots.game_rules_ptr;
 
     let sapphire_max = World::team(1) + world::OFF_BOSSES_MAX;
     let mut reads = 0;
@@ -1112,6 +1215,10 @@ fn tower_destroyed_change_during_read_is_discarded() {
             1 => w32(mem, World::team(0) + world::OFF_BOSSES_ALIVE, 11),
             // Two passes later, once both teams were read again: the match ends.
             5 => w32(mem, world::RULES_OBJ + world::OFF_STATE, 8),
+            // A pass later at the same point: the match id changes.
+            7 => w32(mem, world::RULES_OBJ + world::OFF_MATCH_ID, 5678),
+            // Two passes later at the same point: the game rules global moves to RULES2.
+            11 => w64(mem, rules_global, RULES2),
             _ => {}
         }
     });
@@ -1130,7 +1237,20 @@ fn tower_destroyed_change_during_read_is_discarded() {
     assert!(towers(&mut t, &hooked).is_empty());
     let state = world::RULES_OBJ + world::OFF_STATE;
     w32(&mut hooked.mem.borrow_mut(), state, 7);
+    // A match id that changes during the read is torn too.
+    let mut p = Pass::default();
+    assert_eq!(t.run(&hooked, &mut p), Err(TaskError::Torn));
+    assert!(p.events().is_empty());
     assert!(towers(&mut t, &hooked).is_empty());
+    // So is a game rules global that moves during the read; the new object starts its own
+    // baseline.
+    w32(&mut hooked.mem.borrow_mut(), amber_alive, 9);
+    let mut p = Pass::default();
+    assert_eq!(t.run(&hooked, &mut p), Err(TaskError::Torn));
+    assert!(p.events().is_empty());
+    assert!(towers(&mut t, &hooked).is_empty());
+    w32(&mut hooked.mem.borrow_mut(), amber_alive, 8);
+    assert_eq!(towers(&mut t, &hooked), [r#""Amber""#]);
 }
 
 #[test]
@@ -1334,6 +1454,8 @@ fn reads_per_task(
 fn task_fields_list_exactly_the_tasks_whose_reads_follow_each_field() {
     let (mut mem, w) = World::standalone();
     w.set_players(&mut mem, &teams_of(&[2, 2]));
+    // A Normal match, so tower_destroyed reads the teams.
+    set_modes(&mut mem, 3, 1);
     let base = reads_per_task(&mem, &w, &world::fields());
     for &(_, class, field) in TASK_FIELDS {
         let mut f = world::fields();
