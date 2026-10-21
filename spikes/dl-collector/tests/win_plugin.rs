@@ -49,7 +49,11 @@ fn discovery_publishes_the_busiest_qpc_chains() {
     let json = value(&c, "discovery").unwrap();
     eprintln!("discovery: {json}");
     assert!(json.len() <= 4096);
-    assert!(json.starts_with(r#"[{"frames":[{"module":"#), "{json}");
+    assert!(json.starts_with(r#"{"dropped_busy":"#), "{json}");
+    assert!(
+        json.contains(r#""chains":[{"frames":[{"module":"#),
+        "{json}"
+    );
     assert!(
         json.contains("win_plugin-"),
         "the test exe's own call site is listed: {json}"

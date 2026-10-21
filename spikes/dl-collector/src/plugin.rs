@@ -31,7 +31,7 @@ use crate::mem::SelfProcess;
 use crate::module::Module;
 use crate::roots::resolve_main_loop;
 use crate::timing::{
-    self, Chain, DISCOVERY_FRAMES, DISCOVERY_TOP, Discovery, Frame, QpcSink, TickGate,
+    self, Chain, DISCOVERY_FRAMES, DISCOVERY_TOP, Frame, QpcSink, SharedDiscovery, TickGate,
     discovery_json,
 };
 
@@ -174,7 +174,7 @@ unsafe impl Send for Plugin {}
 
 static PLUGIN: Mutex<Option<Plugin>> = Mutex::new(None);
 static STARTED: AtomicBool = AtomicBool::new(false);
-static CHAINS: Mutex<Option<Discovery>> = Mutex::new(None);
+static CHAINS: SharedDiscovery = SharedDiscovery::new();
 
 fn qpc_now() -> u64 {
     let mut v = 0i64;
@@ -224,9 +224,8 @@ impl QpcSink for Sink {
     fn discovery_call(&self, frames: [u64; DISCOVERY_FRAMES]) {
         // SAFETY: no arguments, no side effects.
         let thread = unsafe { GetCurrentThreadId() };
-        if let Some(d) = CHAINS.lock().unwrap_or_else(|p| p.into_inner()).as_mut() {
-            d.record(frames, thread);
-        }
+        // Never waits: a held lock drops (and counts) this call.
+        CHAINS.record(frames, thread);
     }
 }
 
@@ -281,7 +280,7 @@ fn start(channel: u32, args: &str) -> i32 {
     let modules = loaded_modules();
 
     if let Some(seconds) = discover_seconds(args) {
-        *CHAINS.lock().unwrap_or_else(|p| p.into_inner()) = Some(Discovery::new());
+        CHAINS.begin();
         let now = qpc_now();
         plugin.mode = Mode::Discovering(Discovering {
             started: now,
@@ -400,7 +399,7 @@ fn window_thread() -> u32 {
 fn finish_discovery(out: &OutHandle, d: &mut Discovering) {
     timing::stop_discovery();
     d.done = true;
-    let Some(chains) = CHAINS.lock().unwrap_or_else(|p| p.into_inner()).take() else {
+    let Some((chains, busy)) = CHAINS.finish() else {
         return;
     };
     let seconds = (qpc_now().saturating_sub(d.started) as f64 / qpc_freq() as f64).max(1e-3);
@@ -414,7 +413,7 @@ fn finish_discovery(out: &OutHandle, d: &mut Discovering) {
             window_thread: window != 0 && thread == window,
         })
         .collect();
-    let json = discovery_json(&top, DISCOVERY_MAX as usize);
+    let json = discovery_json(&top, busy, chains.dropped(), DISCOVERY_MAX as usize);
     let mut out = out.lock();
     out.commit(
         &[(

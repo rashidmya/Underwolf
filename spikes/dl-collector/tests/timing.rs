@@ -8,7 +8,8 @@ use uw_spike_dlcollector::roots::{
     CallerPattern, MAIN_LOOP_NOT_FOUND, resolve_caller, resolve_main_loop,
 };
 use uw_spike_dlcollector::timing::{
-    CallerFilter, Chain, Discovery, Frame, PASS_INTERVAL_MS, TickGate, discovery_json,
+    CallerFilter, Chain, Discovery, Frame, PASS_INTERVAL_MS, SharedDiscovery, TickGate,
+    discovery_json,
 };
 
 const IMM: u64 = 0x1_4000_1234;
@@ -125,6 +126,44 @@ fn discovery_is_bounded() {
     assert_eq!(d.top(1), vec![([0, 0, 0], 1, 2)]);
 }
 
+#[test]
+fn discovery_record_never_grows_the_map() {
+    let mut d = Discovery::new();
+    let cap = d.capacity();
+    assert!(cap >= Discovery::MAX_CHAINS, "{cap}");
+    for i in 0..(Discovery::MAX_CHAINS as u64 + 100) {
+        d.record([i, 1, 2], (i % 7) as u32);
+        assert_eq!(d.capacity(), cap, "reallocated at record {i}");
+    }
+}
+
+#[test]
+fn held_discovery_lock_drops_the_call_without_blocking() {
+    let s = std::sync::Arc::new(SharedDiscovery::new());
+    assert!(!s.record([1, 2, 3], 1), "not started: nothing recorded");
+    s.begin();
+    assert!(s.record([1, 2, 3], 1));
+    let held = s.lock();
+    // Same thread and another thread: both return at once and count the call as busy-dropped.
+    assert!(!s.record([1, 2, 3], 1));
+    let other = s.clone();
+    let t = std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        let recorded = other.record([4, 5, 6], 2);
+        (recorded, start.elapsed())
+    });
+    let (recorded, took) = t.join().unwrap();
+    assert!(!recorded);
+    assert!(took < std::time::Duration::from_millis(100), "{took:?}");
+    drop(held);
+    assert!(s.record([1, 2, 3], 1));
+    let (d, busy) = s.finish().unwrap();
+    assert_eq!(busy, 2);
+    assert_eq!(d.top(32), vec![([1, 2, 3], 1, 2)]);
+    assert!(s.finish().is_none());
+    assert!(!s.record([1, 2, 3], 1), "finished: nothing recorded");
+}
+
 fn chain(n: usize) -> Chain {
     Chain {
         frames: (0..3)
@@ -144,24 +183,30 @@ fn chain(n: usize) -> Chain {
 
 #[test]
 fn discovery_json_shape() {
-    let json = discovery_json(&[chain(0)], 4096);
+    let json = discovery_json(&[chain(0)], 7, 3, 4096);
     assert_eq!(
         json,
-        r#"[{"frames":[{"module":"engine2.dll","rva":"0x1000"},{"module":"engine2.dll","rva":"0x1001"},{"module":null,"rva":"0x1002"}],"per_sec":240.5,"window_thread":true}]"#
+        r#"{"dropped_busy":7,"dropped_full":3,"chains":[{"frames":[{"module":"engine2.dll","rva":"0x1000"},{"module":"engine2.dll","rva":"0x1001"},{"module":null,"rva":"0x1002"}],"per_sec":240.5,"window_thread":true}]}"#
     );
 }
 
 #[test]
 fn discovery_json_drops_chains_that_do_not_fit() {
     let chains: Vec<Chain> = (0..32).map(chain).collect();
-    let json = discovery_json(&chains, 4096);
+    let json = discovery_json(&chains, 0, 0, 4096);
     assert!(json.len() <= 4096, "{}", json.len());
-    assert!(json.starts_with(r#"[{"frames""#) && json.ends_with("}]"));
+    assert!(
+        json.starts_with(r#"{"dropped_busy":0,"dropped_full":0,"chains":[{"frames""#)
+            && json.ends_with("}]}")
+    );
     let kept = json.matches("per_sec").count();
     assert!((1..32).contains(&kept), "{kept}");
     // The kept ones are the highest-ranked (first) chains.
     assert!(json.contains(r#""rva":"0x1000""#));
-    assert_eq!(discovery_json(&chains, 10), "[]");
+    assert_eq!(
+        discovery_json(&chains, 1, 2, 10),
+        r#"{"dropped_busy":1,"dropped_full":2,"chains":[]}"#
+    );
 }
 
 const IMM_PAT: &str = "ff 15 ?? ?? ?? ?? 48 8b 4c 24 ?? 48 2b c8";

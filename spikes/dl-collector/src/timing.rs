@@ -7,6 +7,8 @@
 //! `kernel32!QueryPerformanceCounter` forwards there, so every caller passes through).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, TryLockError};
 
 /// 20 Hz.
 pub const PASS_INTERVAL_MS: u64 = 50;
@@ -80,8 +82,8 @@ impl TickGate {
     }
 }
 
-/// QPC call chains counted per thread in discovery mode.
-#[derive(Default)]
+/// QPC call chains counted per thread in discovery mode. The map is sized for `MAX_CHAINS` up
+/// front, so `record` never allocates.
 pub struct Discovery {
     counts: HashMap<([u64; DISCOVERY_FRAMES], u32), u64>,
     dropped: u64,
@@ -92,7 +94,15 @@ impl Discovery {
     pub const MAX_CHAINS: usize = 4096;
 
     pub fn new() -> Discovery {
-        Discovery::default()
+        Discovery {
+            counts: HashMap::with_capacity(Discovery::MAX_CHAINS),
+            dropped: 0,
+        }
+    }
+
+    /// Entries the map holds without reallocating.
+    pub fn capacity(&self) -> usize {
+        self.counts.capacity()
     }
 
     pub fn record(&mut self, frames: [u64; DISCOVERY_FRAMES], thread: u32) {
@@ -116,6 +126,71 @@ impl Discovery {
         all.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)).then(a.1.cmp(&b.1)));
         all.truncate(n);
         all
+    }
+}
+
+impl Default for Discovery {
+    fn default() -> Discovery {
+        Discovery::new()
+    }
+}
+
+/// The discovery state shared by every game thread. A recording thread only tries the lock: when
+/// another thread (or the present thread) holds it, the call is counted in `busy` and dropped, so
+/// game threads never wait on each other.
+pub struct SharedDiscovery {
+    chains: Mutex<Option<Discovery>>,
+    busy: AtomicU64,
+}
+
+impl SharedDiscovery {
+    pub const fn new() -> SharedDiscovery {
+        SharedDiscovery {
+            chains: Mutex::new(None),
+            busy: AtomicU64::new(0),
+        }
+    }
+
+    /// Starts a fresh recording.
+    pub fn begin(&self) {
+        *self.lock() = Some(Discovery::new());
+        self.busy.store(0, Ordering::Relaxed);
+    }
+
+    /// Counts one call; `false` if it was not recorded (busy, or not recording).
+    pub fn record(&self, frames: [u64; DISCOVERY_FRAMES], thread: u32) -> bool {
+        let mut guard = match self.chains.try_lock() {
+            Ok(g) => g,
+            Err(TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                self.busy.fetch_add(1, Ordering::Relaxed);
+                return false;
+            }
+        };
+        match guard.as_mut() {
+            Some(d) => {
+                d.record(frames, thread);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Ends the recording: the chains and the number of calls dropped because the lock was busy.
+    pub fn finish(&self) -> Option<(Discovery, u64)> {
+        let d = self.lock().take()?;
+        Some((d, self.busy.load(Ordering::Relaxed)))
+    }
+
+    /// Blocking access, for the present thread only (never from a QPC call).
+    pub fn lock(&self) -> MutexGuard<'_, Option<Discovery>> {
+        self.chains.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+impl Default for SharedDiscovery {
+    fn default() -> SharedDiscovery {
+        SharedDiscovery::new()
     }
 }
 
@@ -175,14 +250,23 @@ fn chain_json(c: &Chain) -> String {
     )
 }
 
-/// `[{frames:[{module,rva}], per_sec, window_thread}]`, keeping the leading chains that fit in
-/// `max` bytes. RVAs are hex strings (a u64 does not fit a JSON number exactly).
-pub fn discovery_json(chains: &[Chain], max: usize) -> String {
-    let mut out = String::from("[");
+/// `{dropped_busy, dropped_full, chains:[{frames:[{module,rva}], per_sec, window_thread}]}`,
+/// keeping the leading chains that fit in `max` bytes. `dropped_busy` counts calls skipped because
+/// the recording lock was held, `dropped_full` calls of new chains after `MAX_CHAINS`. RVAs are hex
+/// strings (a u64 does not fit a JSON number exactly).
+pub fn discovery_json(
+    chains: &[Chain],
+    dropped_busy: u64,
+    dropped_full: u64,
+    max: usize,
+) -> String {
+    let mut out =
+        format!("{{\"dropped_busy\":{dropped_busy},\"dropped_full\":{dropped_full},\"chains\":[");
+    let empty = out.len();
     for c in chains {
         let item = chain_json(c);
-        let sep = usize::from(out.len() > 1);
-        if out.len() + sep + item.len() + 1 > max {
+        let sep = usize::from(out.len() > empty);
+        if out.len() + sep + item.len() + 2 > max {
             break;
         }
         if sep == 1 {
@@ -190,7 +274,7 @@ pub fn discovery_json(chains: &[Chain], max: usize) -> String {
         }
         out.push_str(&item);
     }
-    out.push(']');
+    out.push_str("]}");
     out
 }
 
