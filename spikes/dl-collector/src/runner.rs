@@ -95,6 +95,13 @@ struct Slot {
     keys: BTreeSet<(String, String)>,
 }
 
+/// Stages a clear for every key `slot` has published, once.
+fn clear_keys(slot: &mut Slot, pass: &mut Pass) {
+    for (cat, key) in std::mem::take(&mut slot.keys) {
+        pass.set(&cat, &key, None);
+    }
+}
+
 pub struct Runner {
     slots: Vec<Slot>,
 }
@@ -116,12 +123,13 @@ impl Runner {
 
     /// Runs every enabled task once. `clock` counts ticks of `freq` per second. A task's staged
     /// values and events enter the result only when it returns `Ok`. The pass in which a task
-    /// becomes disabled also clears every key that task ever staged, so no value of an
-    /// untrusted task stays visible.
+    /// becomes disabled (or the first pass after `disable`) also clears every key that task ever
+    /// staged, so no value of an untrusted task stays visible.
     pub fn pass(&mut self, m: &dyn MemRead, clock: &dyn Fn() -> u64, freq: u64) -> Pass {
         let mut pass = Pass::default();
         for slot in &mut self.slots {
             if slot.disabled.is_some() {
+                clear_keys(slot, &mut pass);
                 continue;
             }
             let start = clock();
@@ -147,23 +155,20 @@ impl Runner {
                 }
             }
             if slot.disabled.is_some() {
-                for (cat, key) in &slot.keys {
-                    pass.set(cat, key, None);
-                }
+                clear_keys(slot, &mut pass);
             }
         }
         pass
     }
 
-    /// Switches the task named `task` off before it ever runs, with the reason `why` gives (as if
-    /// a run had returned it). For start-up only: a task that already ran would keep the keys it
-    /// published. False if no enabled task has that name.
-    pub fn disable(&mut self, task: &str, why: &TaskError) -> bool {
+    /// Switches the task named `task` off as if a run had returned `TaskError::Invalid(why)`.
+    /// It never runs again, and the next pass clears every key it published. False if no enabled
+    /// task has that name.
+    pub fn disable(&mut self, task: &str, why: &str) -> bool {
         let mut found = false;
         for slot in &mut self.slots {
             if slot.disabled.is_none() && slot.task.name() == task {
-                debug_assert!(slot.keys.is_empty(), "{task} already published keys");
-                slot.disabled = Some(why.to_string());
+                slot.disabled = Some(TaskError::Invalid(why.into()).to_string());
                 found = true;
             }
         }

@@ -21,8 +21,9 @@ const FIELD_OFFSET_MAX: u32 = 1 << 20;
 const RULES: &str = "C_CitadelGameRules";
 
 /// Every schema field each task reads, as `(task, class, field)`. The layout check
-/// (`crate::layout`) switches a task off when one of its fields moved; a test holds this list to
-/// exactly the fields `build` looks up.
+/// (`crate::layout`) switches a task off when one of its fields moved. Tests hold this list to
+/// exactly the fields `build` looks up, and each row to the tasks whose reads follow that field:
+/// an offset `build` hands to several tasks (like `m_eGameState`) needs a row for each.
 pub const TASK_FIELDS: &[(&str, &str, &str)] = &[
     ("phase", RULES, "m_eGameState"),
     ("match_id", RULES, "m_unMatchID"),

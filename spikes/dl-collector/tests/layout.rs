@@ -5,11 +5,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use uw_spike_dlcollector::layout::{RELATIONS, broken_tasks, holds};
 use uw_spike_dlcollector::roots::{ClockRoots, Roots};
-use uw_spike_dlcollector::runner::TaskError;
 use uw_spike_dlcollector::schema::FieldLookup;
 use uw_spike_dlcollector::tasks::{Built, TASK_FIELDS, build};
 
 type Classes = BTreeMap<String, BTreeMap<String, u32>>;
+
+/// How far `corrupt=` moves a field (`CORRUPT_DELTA` in `src/collector.rs`).
+const MOVE: u32 = 8;
 
 /// The dump as a field source. Records every lookup and answers `None` for `hidden`.
 struct Dump {
@@ -36,11 +38,12 @@ impl Dump {
         }
     }
 
-    fn set(&mut self, class: &str, field: &str, offset: u32) {
-        self.classes
-            .get_mut(class)
-            .unwrap()
-            .insert(field.into(), offset);
+    /// The dump with `class.field` moved by `MOVE`, as `corrupt=` does.
+    fn moved(class: &str, field: &str) -> Dump {
+        let mut d = Dump::new();
+        let at = d.classes.get_mut(class).unwrap().get_mut(field).unwrap();
+        *at += MOVE;
+        d
     }
 }
 
@@ -76,8 +79,8 @@ fn names(b: &Built) -> BTreeSet<&'static str> {
     b.tasks.iter().map(|t| t.name()).collect()
 }
 
-fn invalid(task: &'static str, why: &str) -> (&'static str, TaskError) {
-    (task, TaskError::Invalid(why.into()))
+fn invalid(task: &'static str, why: &str) -> (&'static str, String) {
+    (task, why.into())
 }
 
 #[test]
@@ -161,9 +164,10 @@ fn task_fields_name_every_task_that_needs_the_field() {
 
 #[test]
 fn a_moved_field_breaks_only_the_tasks_that_read_it() {
-    let mut d = Dump::new();
-    // `corrupt=PlayerDataGlobal_t.m_iPlayerKills`: +88 becomes +96, the assists.
-    d.set("PlayerDataGlobal_t", "m_iPlayerKills", 96);
+    // `corrupt=PlayerDataGlobal_t.m_iPlayerKills`: the kills land on the assists.
+    let d = Dump::moved("PlayerDataGlobal_t", "m_iPlayerKills");
+    let data = &d.classes["PlayerDataGlobal_t"];
+    assert_eq!(data["m_iPlayerKills"], data["m_iPlayerAssists"]);
     assert!(!holds(&d, "PlayerDataGlobal_t", "m_iPlayerKills"));
     assert_eq!(
         broken_tasks(&d),
@@ -173,8 +177,7 @@ fn a_moved_field_breaks_only_the_tasks_that_read_it() {
         )]
     );
 
-    let mut d = Dump::new();
-    d.set("C_CitadelGameRules", "m_eGameState", 116 + 8);
+    let d = Dump::moved("C_CitadelGameRules", "m_eGameState");
     assert_eq!(
         broken_tasks(&d),
         [
@@ -187,8 +190,7 @@ fn a_moved_field_breaks_only_the_tasks_that_read_it() {
 #[test]
 fn a_moved_anchor_or_a_missing_one_breaks_the_relation() {
     // m_iPlayerAssists is read by the roster and is also the anchor of m_iDeaths.
-    let mut d = Dump::new();
-    d.set("PlayerDataGlobal_t", "m_iPlayerAssists", 96 + 8);
+    let d = Dump::moved("PlayerDataGlobal_t", "m_iPlayerAssists");
     assert!(!holds(&d, "PlayerDataGlobal_t", "m_iDeaths"));
     assert_eq!(
         broken_tasks(&d),

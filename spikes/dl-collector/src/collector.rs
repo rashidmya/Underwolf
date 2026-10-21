@@ -16,7 +16,7 @@ use crate::layout::broken_tasks;
 use crate::mem::MemRead;
 use crate::module::Module;
 use crate::roots::{resolve_clock_roots, resolve_main_loop, resolve_roots};
-use crate::runner::{Pass, Runner, TaskError};
+use crate::runner::{Pass, Runner};
 use crate::schema::SchemaFields;
 use crate::tasks::{Built, build, json_str};
 use crate::timing::CallerFilter;
@@ -129,8 +129,8 @@ struct Resolved {
     built: Built,
     /// The schema layout name.
     layout: &'static str,
-    /// Tasks the layout check switches off before they ever run.
-    broken: Vec<(&'static str, TaskError)>,
+    /// Tasks the layout check switches off before they ever run, with the invalid reason.
+    broken: Vec<(&'static str, String)>,
 }
 
 fn key_limits(schema: &Schema) -> HashMap<(String, String), u32> {

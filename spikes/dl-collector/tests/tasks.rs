@@ -5,7 +5,8 @@ use common::{Hooked, Synth};
 use uw_spike_dlcollector::keys::deadlock_schema;
 use uw_spike_dlcollector::mem::{FakeMem, MemRead, ReadError};
 use uw_spike_dlcollector::runner::{Pass, Runner, Task, TaskError};
-use uw_spike_dlcollector::tasks::build;
+use uw_spike_dlcollector::schema::SchemaFields;
+use uw_spike_dlcollector::tasks::{TASK_FIELDS, build};
 
 fn fresh() -> (FakeMem, World, Vec<Box<dyn Task>>) {
     let (mem, w) = World::standalone();
@@ -709,4 +710,63 @@ fn build_rejects_missing_zero_or_huge_required_offsets() {
     let f = uw_spike_dlcollector::schema::SchemaFields::load(&mem2, &module).unwrap();
     let err = build(&w.roots, Ok(w.clock.clone()), &f).err().unwrap();
     assert!(err.contains("m_unMatchID"), "{err}");
+}
+
+/// Every `(address, length)` a run reads.
+struct Reads<'a> {
+    mem: &'a FakeMem,
+    log: std::cell::RefCell<Vec<(u64, usize)>>,
+}
+
+impl MemRead for Reads<'_> {
+    fn read(&self, addr: u64, buf: &mut [u8]) -> Result<(), ReadError> {
+        self.log.borrow_mut().push((addr, buf.len()));
+        self.mem.read(addr, buf)
+    }
+}
+
+/// The reads of one run of each task built from `f`, by task name.
+fn reads_per_task(
+    mem: &FakeMem,
+    w: &World,
+    f: &SchemaFields,
+) -> std::collections::BTreeMap<&'static str, Vec<(u64, usize)>> {
+    let built = build(&w.roots, Ok(w.clock.clone()), f).unwrap();
+    built
+        .tasks
+        .into_iter()
+        .map(|mut t| {
+            let r = Reads {
+                mem,
+                log: Default::default(),
+            };
+            let _ = t.run(&r, &mut Pass::default());
+            (t.name(), r.log.into_inner())
+        })
+        .collect()
+}
+
+/// A task whose reads change when a field moves must list that field in `TASK_FIELDS`, even
+/// when `build` hands it an offset resolved once for several tasks (`m_eGameState`).
+#[test]
+fn task_fields_list_exactly_the_tasks_whose_reads_follow_each_field() {
+    let (mut mem, w) = World::standalone();
+    w.set_players(&mut mem, &teams_of(&[2, 2]));
+    let base = reads_per_task(&mem, &w, &world::fields());
+    for &(_, class, field) in TASK_FIELDS {
+        let mut f = world::fields();
+        assert!(f.add_offset(class, field, 8), "{class}.{field}");
+        let moved = reads_per_task(&mem, &w, &f);
+        let readers: std::collections::BTreeSet<_> = base
+            .iter()
+            .filter(|&(task, reads)| &moved[task] != reads)
+            .map(|(task, _)| *task)
+            .collect();
+        let listed: std::collections::BTreeSet<_> = TASK_FIELDS
+            .iter()
+            .filter(|row| (row.1, row.2) == (class, field))
+            .map(|row| row.0)
+            .collect();
+        assert_eq!(readers, listed, "{class}.{field}");
+    }
 }

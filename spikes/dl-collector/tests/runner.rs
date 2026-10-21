@@ -306,8 +306,8 @@ fn a_task_disabled_before_it_runs_never_runs() {
         }),
         setter("b", "roster_1"),
     ]);
-    assert!(r.disable("a", &TaskError::Invalid("layout: C.m_x".into())));
-    assert!(!r.disable("nope", &TaskError::Invalid("x".into())));
+    assert!(r.disable("a", "layout: C.m_x"));
+    assert!(!r.disable("nope", "x"));
     assert_eq!(
         r.disabled(),
         vec![("a", "invalid: layout: C.m_x".to_string())]
@@ -316,4 +316,26 @@ fn a_task_disabled_before_it_runs_never_runs() {
     assert_eq!(ran.get(), 0);
     assert!(p.get("match_info", "roster_0").is_none());
     assert!(p.get("match_info", "roster_1").is_some());
+}
+
+#[test]
+fn a_task_disabled_after_it_published_has_its_keys_cleared_once() {
+    let mem = FakeMem::new();
+    let mut r = Runner::new(vec![setter("a", "roster_0"), setter("b", "roster_1")]);
+    let p = r.pass(&mem, &|| 0, FREQ);
+    assert!(p.get("match_info", "roster_0").unwrap().is_some());
+
+    assert!(r.disable("a", "layout: C.m_x"));
+    // Already disabled: the first reason stays.
+    assert!(!r.disable("a", "other"));
+    assert_eq!(
+        r.disabled(),
+        vec![("a", "invalid: layout: C.m_x".to_string())]
+    );
+    let p = r.pass(&mem, &|| 0, FREQ);
+    assert_eq!(p.get("match_info", "roster_0"), Some(None));
+    assert!(p.get("match_info", "roster_1").unwrap().is_some());
+    // Cleared once; later passes stage nothing for it.
+    let p = r.pass(&mem, &|| 0, FREQ);
+    assert_eq!(p.get("match_info", "roster_0"), None);
 }

@@ -3,7 +3,6 @@
 //! the same class; a field that moved against its neighbour switches off the tasks that read it.
 //! Most fields are plain integers, so no value check could tell a moved field from a real one.
 
-use crate::runner::TaskError;
 use crate::schema::FieldLookup;
 use crate::tasks::TASK_FIELDS;
 
@@ -79,15 +78,16 @@ pub fn holds(fields: &dyn FieldLookup, class: &str, field: &str) -> bool {
     }
 }
 
-/// Every task with a field in `TASK_FIELDS` whose relation fails in `fields`, once, with
-/// `Invalid("layout: <Class>.<field>")` for its first such field.
-pub fn broken_tasks(fields: &dyn FieldLookup) -> Vec<(&'static str, TaskError)> {
-    let mut out: Vec<(&'static str, TaskError)> = Vec::new();
+/// Every task with a field in `TASK_FIELDS` whose relation fails in `fields`, once, with the
+/// reason `layout: <Class>.<field>` for its first such field (for `TaskError::Invalid`, see
+/// `Runner::disable`).
+pub fn broken_tasks(fields: &dyn FieldLookup) -> Vec<(&'static str, String)> {
+    let mut out: Vec<(&'static str, String)> = Vec::new();
     for &(task, class, field) in TASK_FIELDS {
         if out.iter().any(|(t, _)| *t == task) || holds(fields, class, field) {
             continue;
         }
-        out.push((task, TaskError::Invalid(format!("layout: {class}.{field}"))));
+        out.push((task, format!("layout: {class}.{field}")));
     }
     out
 }
