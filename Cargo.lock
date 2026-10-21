@@ -526,6 +526,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "uw-spike-gep-channel"
+version = "0.0.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
 name = "uw-spike-inject"
 version = "0.0.0"
 dependencies = [
