@@ -295,10 +295,17 @@ pub fn resolve_clock_roots(m: &dyn MemRead, client: &Module) -> Result<ClockRoot
 }
 
 // Main-loop QPC call site (spec §6.4 "Loading and timing"). Found with discovery mode
-// (`discover=<s>`) in the Hideout: the chain on the game window's thread, inside a game module,
-// firing at about the frame rate. `ret_offset` turns a pattern hit into the return address.
-// Not yet discovered (Task C4 Step 5, owner session): until then the plugin reports
-// `MAIN_LOOP_NOT_FOUND` and runs no passes.
+// (`discover=10`, owner session, in game) on the installed build of 2026-10-21 (ClientVersion
+// 6807; tier0.dll SHA-256 666c9022…, engine2.dll f7dd5763…): of 1435 QPC chains in 10 s, the only
+// one at the frame rate (392 calls at 39 fps, all on the window's thread) was tier0+0x14222e ->
+// engine2+0x208a73 -> engine2+0x209d06 -> engine2+0x20cadf -> deadlock.exe+0x4be0.
+//
+// Two frames, because that chain reaches QPC through tier0's `Plat_FloatTime` export, whose
+// QPC return site +0x14222e is shared by 172 chains (~18k calls/s). The frame above it, engine2
+// +0x208a73, is the frame function's first `Plat_FloatTime` call (once per frame). Each pattern
+// is the installed bytes with rel32 displacements, rel8 jumps and a struct field displacement
+// masked, and matches exactly once in its module; `ret_offset` turns a hit into the return
+// address. Not found or ambiguous: the plugin reports it and runs no passes.
 
 /// A masked byte pattern in `module` whose hit plus `ret_offset` is a return address.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -308,10 +315,22 @@ pub struct CallerPattern {
     pub ret_offset: u64,
 }
 
-/// The game's QPC call on its main loop (the immediate caller).
-pub const MAIN_LOOP_IMMEDIATE: Option<CallerPattern> = None;
-/// The frame above it, when the game reaches QPC through a tier0 wrapper.
-pub const MAIN_LOOP_OUTER: Option<CallerPattern> = None;
+/// The immediate caller: tier0's whole `Plat_FloatTime` up to its fast-path `ret` (an inlined
+/// copy in a static initializer matches up to `cvtsi2sd` and then differs). The hit is the
+/// function start; `call [QueryPerformanceCounter]` (+0x18) returns to +0x1e.
+pub const MAIN_LOOP_IMMEDIATE: Option<CallerPattern> = Some(CallerPattern {
+    module: "tier0.dll",
+    pattern: "48 83 ec 28 48 83 3d ?? ?? ?? ?? 00 75 ?? e8 ?? ?? ?? ?? 48 8d 4c 24 30 ff 15 ?? ?? ?? ?? 48 8b 4c 24 30 48 8b 05 ?? ?? ?? ?? 48 3b c8 73 ?? 48 8b c8 eb ?? 48 89 0d ?? ?? ?? ?? 48 2b 0d ?? ?? ?? ?? 0f 57 c0 78 ?? f2 48 0f 2a c1 f2 0f 5e 05 ?? ?? ?? ?? 48 83 c4 28 c3",
+    ret_offset: 0x1e,
+});
+/// The frame above it: engine2's frame function calls `Plat_FloatTime` (the hit, `call [rip]`),
+/// keeps the time in xmm7/xmm8, then `ThreadSleep(1000)`s while `Plat_HasEnteredFatalState()`.
+/// Returns to +6.
+pub const MAIN_LOOP_OUTER: Option<CallerPattern> = Some(CallerPattern {
+    module: "engine2.dll",
+    pattern: "ff 15 ?? ?? ?? ?? 44 0f 28 c0 0f 28 f8 f2 45 0f 5c c1 45 38 a7 ?? ?? ?? ?? 75 ?? ff 15 ?? ?? ?? ?? 85 c0 74 ?? b9 e8 03 00 00 ff 15 ?? ?? ?? ?? ff 15 ?? ?? ?? ?? 85 c0 75 ??",
+    ret_offset: 6,
+});
 
 pub const MAIN_LOOP_NOT_FOUND: &str = "main-loop caller not found";
 const MAIN_LOOP_AMBIGUOUS: &str = "main-loop caller is ambiguous";

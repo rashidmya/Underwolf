@@ -514,6 +514,32 @@ fn main_loop_not_found_publishes_error_and_stops_passes() {
 }
 
 #[test]
+fn modules_without_the_main_loop_caller_fail_the_collector() {
+    // The plugin's start path: tier0.dll and engine2.dll are loaded but hold neither pattern.
+    let r = rig(Skip::default());
+    let mut c = r.start("");
+    assert_eq!(c.status(), &Status::Initialized);
+    let named = |name: &str| Module {
+        name: name.into(),
+        ..r.module.clone()
+    };
+    let modules = [r.module.clone(), named("engine2.dll"), named("tier0.dll")];
+    assert_eq!(c.main_loop_filter(&r.mem, &modules), None);
+    assert_eq!(
+        c.status(),
+        &Status::Error("main-loop caller not found".into())
+    );
+    assert_eq!(
+        r.value("gep_internal", "plugin_status"),
+        Some(Some("error".into()))
+    );
+    assert_eq!(
+        r.value("gep_internal", "plugin_error"),
+        Some(Some("main-loop caller not found".into()))
+    );
+}
+
+#[test]
 fn scanning_is_published_once_the_hook_is_armed() {
     let r = rig(Skip::default());
     let mut c = r.start("");

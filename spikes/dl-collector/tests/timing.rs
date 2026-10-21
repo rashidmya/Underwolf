@@ -359,13 +359,18 @@ fn pat(pattern: &'static str, ret_offset: u64) -> CallerPattern {
 }
 
 #[test]
-fn installed_main_loop_patterns_are_not_yet_known() {
-    // Step 5 (owner session) fills MAIN_LOOP_IMMEDIATE/OUTER; until then the plugin must fail.
+fn modules_without_the_main_loop_patterns_are_not_found() {
+    // tier0.dll and engine2.dll are loaded but hold neither pattern (and engine2.dll alone
+    // lacks tier0.dll): the plugin must fail rather than run passes from another call site.
     let (mem, modules) = engine(&Synth::new());
-    assert_eq!(
-        resolve_main_loop(&mem, &modules),
-        Err(MAIN_LOOP_NOT_FOUND.to_string())
-    );
+    let not_found = Err(MAIN_LOOP_NOT_FOUND.to_string());
+    assert_eq!(resolve_main_loop(&mem, &modules), not_found);
+    let tier0 = Module {
+        name: "tier0.dll".into(),
+        ..modules[0].clone()
+    };
+    let both = [tier0, modules[0].clone()];
+    assert_eq!(resolve_main_loop(&mem, &both), not_found);
     assert_eq!(MAIN_LOOP_NOT_FOUND, "main-loop caller not found");
 }
 

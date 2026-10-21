@@ -29,7 +29,6 @@ use crate::collector::{ChannelOut, Collector};
 use crate::keys::{DISCOVERY_MAX, GEP_INTERNAL, PLUGIN_ERROR_MAX, deadlock_schema};
 use crate::mem::SelfProcess;
 use crate::module::Module;
-use crate::roots::resolve_main_loop;
 use crate::timing::{
     self, DISCOVERY_FRAMES, DISCOVERY_TOP, DiscoverArgs, DiscoveryTotals, Frame, QpcSink,
     SharedDiscovery, TickGate, chains_from, discovery_file_json, discovery_json,
@@ -346,12 +345,8 @@ fn start(channel: u32, args: &str) -> i32 {
     if matches!(collector.status(), crate::collector::Status::Error(_)) {
         return 0;
     }
-    let filter = match resolve_main_loop(&SelfProcess, &modules) {
-        Ok(f) => f,
-        Err(why) => {
-            collector.fail(&why);
-            return 0;
-        }
+    let Some(filter) = collector.main_loop_filter(&SelfProcess, &modules) else {
+        return 0;
     };
     let immediate = filter.immediate;
     plugin.mode = Mode::Collecting {

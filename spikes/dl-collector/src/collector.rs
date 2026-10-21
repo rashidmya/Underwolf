@@ -14,10 +14,11 @@ use uw_spike_gep_channel::{Schema, Throttle};
 use crate::keys::{GEP_INTERNAL, PLUGIN_ERROR_MAX, deadlock_schema};
 use crate::mem::MemRead;
 use crate::module::Module;
-use crate::roots::{resolve_clock_roots, resolve_roots};
+use crate::roots::{resolve_clock_roots, resolve_main_loop, resolve_roots};
 use crate::runner::{Pass, Runner};
 use crate::schema::SchemaFields;
 use crate::tasks::{Built, build, json_str};
+use crate::timing::CallerFilter;
 
 /// How far `corrupt=` moves a field offset.
 const CORRUPT_DELTA: u32 = 8;
@@ -283,7 +284,8 @@ impl Collector {
 
     /// Publishes `plugin_status="error"` and the reason, and clears every game value that was
     /// committed before (nothing stays visible that the collector can no longer vouch for).
-    /// Later ticks do nothing. Also used by the plugin when the main-loop caller is not found.
+    /// Later ticks do nothing. Also used when the main-loop caller is not found
+    /// (`main_loop_filter`).
     pub fn fail(&mut self, why: &str) {
         self.status = Status::Error(why.to_string());
         let mut pass = Pass::default();
@@ -300,6 +302,23 @@ impl Collector {
         );
         // The channel itself may be what failed.
         let _ = catch_unwind(AssertUnwindSafe(|| self.publish(&pass)));
+    }
+
+    /// The main-loop caller in the loaded `modules` (the plugin's start path). Not found or
+    /// ambiguous: the collector fails with the reason (see `fail`) and there is no filter, so no
+    /// pass is ever armed.
+    pub fn main_loop_filter(
+        &mut self,
+        m: &dyn MemRead,
+        modules: &[Module],
+    ) -> Option<CallerFilter> {
+        match resolve_main_loop(m, modules) {
+            Ok(filter) => Some(filter),
+            Err(why) => {
+                self.fail(&why);
+                None
+            }
+        }
     }
 
     fn tick_inner(&mut self, m: &dyn MemRead) {

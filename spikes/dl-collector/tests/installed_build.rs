@@ -2,9 +2,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use uw_spike_dlcollector::collector::{ChannelOut, Collector, Status};
-use uw_spike_dlcollector::mem::MemRead;
+use uw_spike_dlcollector::mem::{FakeMem, MemRead};
 use uw_spike_dlcollector::module::{Module, file_image};
-use uw_spike_dlcollector::roots::{CLOCK_RULE_FIELDS, resolve_clock_roots, resolve_roots};
+use uw_spike_dlcollector::roots::{
+    CLOCK_RULE_FIELDS, MAIN_LOOP_IMMEDIATE, MAIN_LOOP_OUTER, resolve_caller, resolve_clock_roots,
+    resolve_roots,
+};
 use uw_spike_dlcollector::schema::SchemaFields;
 
 const DEFAULT_PATH: &str =
@@ -84,6 +87,46 @@ fn installed_build() {
             f.ambiguous()
         );
     }
+}
+
+const DEFAULT_BIN_DIR: &str =
+    "/home/buga/.local/share/Steam/steamapps/common/Deadlock/game/bin/win64";
+
+/// Maps `<UW_DEADLOCK_BIN_DIR>/<name>` (read-only) as its own image.
+fn bin_module(name: &str) -> (FakeMem, Module) {
+    let dir = std::env::var("UW_DEADLOCK_BIN_DIR").unwrap_or_else(|_| DEFAULT_BIN_DIR.to_string());
+    let path = format!("{dir}/{name}");
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    let (mem, base) = file_image(&bytes).unwrap();
+    let module = Module::from_headers(&mem, name, base).unwrap();
+    (mem, module)
+}
+
+/// Each main-loop pattern has exactly one hit in its installed module, at the return address
+/// the discovery run saw. tier0.dll and engine2.dll share a preferred ImageBase, so each is
+/// resolved in its own image.
+#[test]
+#[ignore]
+fn installed_build_main_loop_callers() {
+    let (tier0_mem, tier0) = bin_module("tier0.dll");
+    let f = resolve_caller(
+        &tier0_mem,
+        std::slice::from_ref(&tier0),
+        MAIN_LOOP_IMMEDIATE.as_ref(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(f.immediate, tier0.base + 0x14222e);
+
+    let (engine2_mem, engine2) = bin_module("engine2.dll");
+    let f = resolve_caller(
+        &engine2_mem,
+        std::slice::from_ref(&engine2),
+        MAIN_LOOP_OUTER.as_ref(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(f.immediate, engine2.base + 0x208a73);
 }
 
 struct Recorder(Rc<RefCell<Vec<(String, String, Option<Vec<u8>>)>>>);
