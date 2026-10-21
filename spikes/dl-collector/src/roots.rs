@@ -140,3 +140,141 @@ pub fn resolve_roots(m: &dyn MemRead, client: &Module) -> Result<Roots, RootErro
         serial_offset,
     })
 }
+
+// Match clock roots (spec Task C3 clock). Found on Deadlock ClientVersion 6801 (client.dll
+// SHA-256 a7d0d9e88d11f09a36294569662718394cfa36d99286774ecf8c9fd6ea4f589e). Each pattern is the
+// owner's objdump of the previous build (d61348c5…, where underlock's clock was validated live)
+// with rel32 displacements, jump offsets, stack offsets and game-rules field displacements
+// masked; each matches exactly once on 6801. Kept fixed: the ConVar value offset +0x58, the
+// global game time +0x30 and tick interval +0x54, and the rules vtable slot +0x220, because the
+// clock reader depends on them.
+
+/// The match-clock seconds function (the `%d:%02d` formatter's callee): loads the clock-offset
+/// ConVar, tests the pregame-enabled ConVar and the game mode, loads the pregame-offset ConVar,
+/// then calls the game-time function. Decodes: ConVar object at +8 (data pointer at object +8),
+/// getter call at +18, pregame-enabled data pointer at +25, pregame ConVar object at +53,
+/// getter call at +58, game-time call at +77.
+pub const CLOCK_SECONDS: &str = "0f 29 74 24 30 48 8d 0d ?? ?? ?? ?? 0f 29 7c 24 20 e8 ?? ?? ?? ?? 48 8b 05 ?? ?? ?? ?? 0f 28 f8 0f 57 f6 80 78 58 00 74 ?? 83 bb ?? ?? ?? ?? 01 75 ?? 48 8d 0d ?? ?? ?? ?? e8 ?? ?? ?? ?? 0f 28 f0 45 33 c0 48 8d 54 24 ?? 48 8b cb e8 ?? ?? ?? ?? 48 8d 53 ??";
+/// The game-time function: fetches the rules' vtable slot +0x220 and loads the globals pointer
+/// (rel32 at +0x16) to pass global time +0x30 to it.
+pub const GAME_TIME: &str = "40 53 48 83 ec 20 48 8b 01 48 8b da 4c 8b 90 20 02 00 00 48 8b 05 ?? ?? ?? ?? 45 85 c0 74 ?? 80 78 40 00";
+/// The game-time adjust function (C_CitadelGameRules vtable +0x220): subtracts total paused
+/// ticks times the tick interval at globals +0x54; the globals load is the rel32 at +0x5f.
+pub const ADJUST_TIME: &str = "48 89 5c 24 08 57 48 83 ec 30 0f 29 74 24 20 0f 28 f2 48 8b da 48 8b f9 45 85 c9 75 ?? 44 38 49 ?? 74 ?? 8b 49 ?? 85 c9 7f ?? 8b 0d ?? ?? ?? ?? ba 03 00 00 00 ff 15 ?? ?? ?? ?? 84 c0 74 ?? 8b 0d ?? ?? ?? ?? 4c 8d 05 ?? ?? ?? ?? ba 03 00 00 00 ff 15 ?? ?? ?? ?? 66 0f 6e 47 ?? 48 8b 05 ?? ?? ?? ?? 0f 5b c0 f3 0f 59 40 54 f3 0f 5c f0";
+/// The float ConVar getter called by CLOCK_SECONDS: data pointer at object +8, value at +0x58.
+pub const CONVAR_GETTER: &str = "48 8b 41 08 f3 0f 10 40 58 c3";
+/// The ConVar getter reads the data pointer at this offset of the ConVar object.
+const CONVAR_DATA_PTR: u64 = 8;
+
+/// Game-rules fields of the clock arithmetic, by schema name (role, class, field). On 6801 they
+/// sit at +0x30, +0x34, +0x38, +0x60 and +0xac, the offsets underlock read.
+pub const CLOCK_RULE_FIELDS: [(&str, &str, &str); 5] = [
+    ("total_paused_ticks", "C_GameRules", "m_nTotalPausedTicks"),
+    ("pause_start_tick", "C_GameRules", "m_nPauseStartTick"),
+    ("paused", "C_GameRules", "m_bGamePaused"),
+    ("game_start_time", "C_CitadelGameRules", "m_flGameStartTime"),
+    ("game_mode", "C_CitadelGameRules", "m_eGameMode"),
+];
+
+/// Addresses of the clock's roots: each `*_ptr` is a pointer global in the module (read at poll
+/// time); `adjust_time_fn` is the function the rules vtable slot +0x220 must hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClockRoots {
+    pub globals_ptr: u64,
+    pub adjust_time_fn: u64,
+    pub offset_convar_ptr: u64,
+    pub pregame_convar_ptr: u64,
+    pub pregame_enabled_ptr: u64,
+}
+
+/// Inside a non-executable section of the module.
+fn in_data(module: &Module, addr: u64) -> bool {
+    module.sections.iter().any(|s| {
+        let start = module.base + s.rva as u64;
+        !s.executable && addr >= start && addr - start < s.size as u64
+    })
+}
+
+fn code_matches(m: &dyn MemRead, addr: u64, pattern: &str) -> bool {
+    Pattern::parse(pattern).is_ok_and(|p| p.matches_mem(m, addr).unwrap_or(false))
+}
+
+/// The globals pointer loaded by the game-time function, and every game-time function site
+/// that loads it.
+fn game_time(m: &dyn MemRead, module: &Module) -> Result<(u64, BTreeSet<u64>), RootError> {
+    let what = "game time globals";
+    let mut sites = Vec::new();
+    for site in find_sites(m, module, GAME_TIME, MAX_SITES, what)? {
+        let globals = rip_target(m, site, 0x16, 0x1a)?;
+        if in_data(module, globals) {
+            sites.push((site, globals));
+        }
+    }
+    let globals = only(sites.iter().map(|&(_, g)| g).collect(), what)?;
+    Ok((globals, sites.into_iter().map(|(s, _)| s).collect()))
+}
+
+fn adjust_time(m: &dyn MemRead, module: &Module, globals: u64) -> Result<u64, RootError> {
+    let what = "game-time adjust";
+    let mut found = BTreeSet::new();
+    for site in find_sites(m, module, ADJUST_TIME, MAX_SITES, what)? {
+        if rip_target(m, site, 0x5f, 0x63)? == globals {
+            found.insert(site);
+        }
+    }
+    only(found, what)
+}
+
+/// The three ConVar data-pointer globals, from CLOCK_SECONDS sites that call a game-time function and
+/// the ConVar getter.
+fn convars(
+    m: &dyn MemRead,
+    module: &Module,
+    game_time_fns: &BTreeSet<u64>,
+) -> Result<(u64, u64, u64), RootError> {
+    let names = [
+        "clock offset ConVar",
+        "pregame offset ConVar",
+        "pregame enabled ConVar",
+    ];
+    let mut found: [BTreeSet<u64>; 3] = Default::default();
+    for site in find_sites(m, module, CLOCK_SECONDS, MAX_SITES, names[0])? {
+        if !game_time_fns.contains(&rip_target(m, site, 77, 81)?) {
+            continue;
+        }
+        let getters = [rip_target(m, site, 18, 22)?, rip_target(m, site, 58, 62)?];
+        if !getters.iter().all(|&g| code_matches(m, g, CONVAR_GETTER)) {
+            continue;
+        }
+        let ptrs = [
+            rip_target(m, site, 8, 12)?.wrapping_add(CONVAR_DATA_PTR),
+            rip_target(m, site, 53, 57)?.wrapping_add(CONVAR_DATA_PTR),
+            rip_target(m, site, 25, 29)?,
+        ];
+        for (set, ptr) in found.iter_mut().zip(ptrs) {
+            if in_data(module, ptr) {
+                set.insert(ptr);
+            }
+        }
+    }
+    let [offset, pregame, enabled] = found;
+    Ok((
+        only(offset, names[0])?,
+        only(pregame, names[1])?,
+        only(enabled, names[2])?,
+    ))
+}
+
+pub fn resolve_clock_roots(m: &dyn MemRead, client: &Module) -> Result<ClockRoots, RootError> {
+    let (globals_ptr, game_time_fns) = game_time(m, client)?;
+    let adjust_time_fn = adjust_time(m, client, globals_ptr)?;
+    let (offset_convar_ptr, pregame_convar_ptr, pregame_enabled_ptr) =
+        convars(m, client, &game_time_fns)?;
+    Ok(ClockRoots {
+        globals_ptr,
+        adjust_time_fn,
+        offset_convar_ptr,
+        pregame_convar_ptr,
+        pregame_enabled_ptr,
+    })
+}

@@ -51,6 +51,13 @@ impl Pattern {
         Ok(Pattern(bytes))
     }
 
+    /// Whether the bytes at `addr` match. An unreadable range is an error.
+    pub fn matches_mem(&self, m: &dyn MemRead, addr: u64) -> Result<bool, ReadError> {
+        let mut buf = vec![0u8; self.0.len()];
+        m.read(addr, &mut buf)?;
+        Ok(self.matches_at(&buf))
+    }
+
     fn matches_at(&self, hay: &[u8]) -> bool {
         self.0
             .iter()
