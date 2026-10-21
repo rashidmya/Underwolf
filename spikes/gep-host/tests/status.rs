@@ -106,3 +106,17 @@ fn render_lists_every_row() {
         assert!(text.lines().any(|l| l.contains(name) && l.contains(&value)), "{name}");
     }
 }
+
+#[test]
+fn info_values_never_mark_event_rows_supported() {
+    let mut t = StatusTable::default();
+    t.observe(&info("match_info", "game_paused", Some("false")));
+    t.observe(&info("match_info", "match_clock", Some("01:02")));
+    assert_eq!(t.row("game_paused").as_deref(), Some("unavailable"));
+    assert_eq!(t.row("match_clock").as_deref(), Some("unavailable"));
+    // The events themselves still count, and a key only counts under its own category.
+    t.observe(&event("game_paused"));
+    assert_eq!(t.row("game_paused").as_deref(), Some("supported"));
+    t.observe(&info("game_info", "match_id", Some("1")));
+    assert_eq!(t.row("match_id").as_deref(), Some("unavailable"));
+}

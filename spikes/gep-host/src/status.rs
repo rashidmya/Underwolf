@@ -78,12 +78,14 @@ impl StatusTable {
                     }
                 }
                 let row = row_for_key(key);
-                if value.is_some() && is_row(row) {
+                // Only the spec's info keys, under their own category: info keys that share a
+                // name with an event (`match_info.game_paused`) say nothing about the event.
+                if value.is_some() && KEYS.iter().any(|&(c, k)| c == category && k == row) {
                     self.seen.insert(row.into());
                 }
             }
             Emission::Event { name, .. } => {
-                if is_row(name) {
+                if EVENTS.contains(&name.as_str()) {
                     self.seen.insert(name.clone());
                 }
             }
