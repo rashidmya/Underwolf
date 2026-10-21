@@ -304,9 +304,9 @@ impl Collector {
         let _ = catch_unwind(AssertUnwindSafe(|| self.publish(&pass)));
     }
 
-    /// The main-loop caller in the loaded `modules` (the plugin's start path). Not found or
-    /// ambiguous: the collector fails with the reason (see `fail`) and there is no filter, so no
-    /// pass is ever armed.
+    /// The main-loop caller in the loaded `modules` (the plugin's start path). Not resolved (not
+    /// found, ambiguous or unreadable): the collector fails with the reason (see `fail`) and
+    /// there is no filter, so no pass is ever armed.
     pub fn main_loop_filter(
         &mut self,
         m: &dyn MemRead,

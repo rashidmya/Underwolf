@@ -296,16 +296,18 @@ pub fn resolve_clock_roots(m: &dyn MemRead, client: &Module) -> Result<ClockRoot
 
 // Main-loop QPC call site (spec §6.4 "Loading and timing"). Found with discovery mode
 // (`discover=10`, owner session, in game) on the installed build of 2026-10-21 (ClientVersion
-// 6807; tier0.dll SHA-256 666c9022…, engine2.dll f7dd5763…): of 1435 QPC chains in 10 s, the only
-// one at the frame rate (392 calls at 39 fps, all on the window's thread) was tier0+0x14222e ->
-// engine2+0x208a73 -> engine2+0x209d06 -> engine2+0x20cadf -> deadlock.exe+0x4be0.
+// 6807; tier0.dll SHA-256 666c9022…, engine2.dll f7dd5763…). Of 1435 QPC chains in 10 s, hundreds
+// run at the frame rate (392 calls at 39 fps) on the window's thread. The shallowest of them are
+// the timer calls made by engine2's frame loop itself, the function under engine2+0x209d06 ->
+// engine2+0x20cadf -> deadlock.exe+0x4be0. That loop calls `Plat_FloatTime` three times per
+// iteration (returning to +0x208a73, +0x208c50, +0x208c8a; plus one `Plat_USTime`). The first,
+// at the top of each iteration, is used: tier0+0x14222e -> engine2+0x208a73.
 //
-// Two frames, because that chain reaches QPC through tier0's `Plat_FloatTime` export, whose
-// QPC return site +0x14222e is shared by 172 chains (~18k calls/s). The frame above it, engine2
-// +0x208a73, is the frame function's first `Plat_FloatTime` call (once per frame). Each pattern
-// is the installed bytes with rel32 displacements, rel8 jumps and a struct field displacement
-// masked, and matches exactly once in its module; `ret_offset` turns a hit into the return
-// address. Not found or ambiguous: the plugin reports it and runs no passes.
+// Two frames, because that call reaches QPC through tier0's `Plat_FloatTime` export, whose QPC
+// return site +0x14222e is shared by 172 chains (~18k calls/s); the frame above it picks out the
+// loop's call. Each pattern is the installed bytes with rel32 displacements, rel8 jumps and a
+// struct field displacement masked, and matches exactly once in its module; `ret_offset` turns a
+// hit into the return address. Not resolved: the plugin reports it and runs no passes.
 
 /// A masked byte pattern in `module` whose hit plus `ret_offset` is a return address.
 #[derive(Debug, Clone, PartialEq, Eq)]

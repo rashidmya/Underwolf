@@ -4,8 +4,10 @@ use std::cell::Cell;
 
 use common::Synth;
 use uw_spike_dlcollector::module::Module;
+use uw_spike_dlcollector::pattern::Pattern;
 use uw_spike_dlcollector::roots::{
-    CallerPattern, MAIN_LOOP_NOT_FOUND, resolve_caller, resolve_main_loop,
+    CallerPattern, MAIN_LOOP_IMMEDIATE, MAIN_LOOP_NOT_FOUND, MAIN_LOOP_OUTER, resolve_caller,
+    resolve_main_loop,
 };
 use uw_spike_dlcollector::timing::{
     CallerFilter, Chain, DISCOVERY_FRAMES, DiscoverArgs, Discovery, DiscoveryTotals, Frame,
@@ -372,6 +374,28 @@ fn modules_without_the_main_loop_patterns_are_not_found() {
     let both = [tier0, modules[0].clone()];
     assert_eq!(resolve_main_loop(&mem, &both), not_found);
     assert_eq!(MAIN_LOOP_NOT_FOUND, "main-loop caller not found");
+}
+
+#[test]
+fn main_loop_patterns_parse_and_return_after_an_indirect_call() {
+    // A bad token would resolve as "not found" in game; the game files are not needed here.
+    let expect = [
+        (MAIN_LOOP_IMMEDIATE, "tier0.dll"),
+        (MAIN_LOOP_OUTER, "engine2.dll"),
+    ];
+    for (p, module) in expect {
+        let p = p.unwrap_or_else(|| panic!("{module} pattern not set"));
+        assert_eq!(p.module, module);
+        Pattern::parse(p.pattern).unwrap_or_else(|e| panic!("{module}: {e}"));
+        let tokens: Vec<&str> = p.pattern.split_whitespace().collect();
+        let ret = p.ret_offset as usize;
+        assert!((6..=tokens.len()).contains(&ret), "{module}: {ret:#x}");
+        assert_eq!(
+            tokens[ret - 6..ret],
+            ["ff", "15", "??", "??", "??", "??"],
+            "{module}: `call [rip+disp32]` must end at ret_offset"
+        );
+    }
 }
 
 #[test]
