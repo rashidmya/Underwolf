@@ -195,16 +195,26 @@ log and compare:
 
 ```sh
 grep '"key":"match_id"' ~/uw-match-1.jsonl | tail -1
-~/.local/share/underwolf-spike/uw-gep verify --jsonl ~/uw-match-1.jsonl --match-id <id>
+~/.local/share/underwolf-spike/uw-gep verify --jsonl ~/uw-match-1.jsonl --match-id <id> [--team-map 2=0,3=1]
 ```
 
 `verify` fetches `https://api.deadlock-api.com/v1/matches/<id>/metadata` with `curl` (or reads
-`--metadata file.json`) and prints `OK` / `MISMATCH` / `MISSING` per field: the match id and, per
-player (matched by account id = low 32 bits of the SteamID64), hero, team, kills, deaths and
-assists from each player's last published roster row. Teams are compared through the one-to-one
-game-team → API-team mapping most players agree with (printed under the table), because the game
-numbers teams 2 and 3 and the API 0 and 1. Exit code: 0 all OK, 1 any `MISMATCH`, 3 only
-`MISSING`, 2 usage or fetch error.
+`--metadata file.json`) and prints `OK` / `MISMATCH` / `MISSING` / `UNCONFIRMED` per field: the
+match id and, per player (matched by account id = low 32 bits of the SteamID64), hero, team, kills,
+deaths and assists from each player's last published roster row.
+
+**Teams need a confirmed map.** The game numbers teams (probably 2 and 3) and the API uses 0 and 1.
+A mapping inferred from the data can't prove the team read (a wrong `m_iTeamNum` read would look
+consistent), so without `--team-map` every team row is `UNCONFIRMED` and counts like `MISSING`
+(exit 3); the inferred mapping is printed under the table. Confirm it once by hand in the first
+match: in-game, note which side you and your teammates were on (Amber or Sapphire) and which side
+deadlock-api.com's team 0 / team 1 is for the same players (for example from the match page on a
+stats site). Then pass the confirmed map to every later run, e.g. `--team-map 2=0,3=1`. With it, any
+team value that deviates from the map is a `MISMATCH`. Record the map used in
+`docs/spikes/03-deadlock-memory.md`.
+
+Exit code: 0 all OK, 1 any `MISMATCH`, 3 no `MISMATCH` but some `MISSING` or `UNCONFIRMED`, 2 usage
+or fetch error.
 
 ### Tests
 

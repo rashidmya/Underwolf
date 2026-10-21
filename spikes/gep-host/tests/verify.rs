@@ -1,5 +1,5 @@
 use serde_json::{Value, json};
-use uw_spike_gep_host::verify::{Report, Verdict, compare, exit_code};
+use uw_spike_gep_host::verify::{Report, Verdict, compare, exit_code, parse_team_map};
 
 const FIXTURE: &str = include_str!("fixtures/match-metadata-116950735.json");
 const MATCH_ID: u64 = 116950735;
@@ -65,8 +65,15 @@ fn session(id: &str, ps: &[P]) -> Vec<String> {
     lines
 }
 
+/// The confirmed mapping: game teams 2 and 3 are API teams 0 and 1.
+const MAP: [(u64, u64); 2] = [(2, 0), (3, 1)];
+
 fn run(lines: &[String]) -> Report {
-    compare(&lines.join("\n"), FIXTURE, MATCH_ID).unwrap()
+    run_with(lines, Some(&MAP))
+}
+
+fn run_with(lines: &[String], map: Option<&[(u64, u64)]>) -> Report {
+    compare(&lines.join("\n"), FIXTURE, MATCH_ID, map).unwrap()
 }
 
 fn rows<'a>(r: &'a Report, field: &str, verdict: Verdict) -> Vec<&'a str> {
@@ -202,15 +209,60 @@ fn player_not_in_the_api_match_is_a_mismatch() {
 }
 
 #[test]
-fn team_ids_are_compared_as_a_consistent_mapping() {
-    // 2/3 in game vs 0/1 in the API is fine; so is the reverse assignment.
+fn without_a_team_map_team_rows_are_unconfirmed_and_exit_3() {
+    let r = run_with(&session("116950735", &players()), None);
+    let teams: Vec<_> = r.rows.iter().filter(|x| x.field == "team").collect();
+    assert_eq!(teams.len(), 12);
+    assert!(teams.iter().all(|x| x.verdict == Verdict::Unconfirmed));
+    assert_eq!(r.rows.iter().filter(|x| x.field != "team" && x.verdict != Verdict::Ok).count(), 0);
+    assert_eq!(r.count(Verdict::Mismatch), 0);
+    assert_eq!(exit_code(&r), 3);
+    let text = r.render();
+    assert!(text.contains("UNCONFIRMED"), "{text}");
+    assert!(text.contains("game 2 = api 0") && text.contains("inferred"), "{text}");
+}
+
+#[test]
+fn a_fully_swapped_team_read_is_not_ok_without_a_team_map() {
     let mut ps = players();
     for p in &mut ps {
         p.team = if p.team == 2 { 3 } else { 2 };
     }
-    let r = run(&session("116950735", &ps));
+    let r = run_with(&session("116950735", &ps), None);
+    assert_eq!(exit_code(&r), 3);
+    assert!(r.rows.iter().all(|x| x.field != "team" || x.verdict == Verdict::Unconfirmed));
+}
+
+#[test]
+fn a_given_team_map_that_matches_is_ok() {
+    let r = run_with(&session("116950735", &players()), Some(&MAP));
     assert!(r.rows.iter().all(|x| x.verdict == Verdict::Ok), "{}", r.render());
-    assert_eq!(r.team_map, [(2, 1), (3, 0)]);
+    assert_eq!(r.team_map, MAP);
+    assert_eq!(exit_code(&r), 0);
+    assert!(r.render().contains("given"));
+}
+
+#[test]
+fn a_swapped_given_team_map_makes_every_team_row_a_mismatch() {
+    let r = run_with(&session("116950735", &players()), Some(&[(2, 1), (3, 0)]));
+    assert_eq!(rows(&r, "team", Verdict::Mismatch).len(), 12);
+    assert_eq!(r.count(Verdict::Mismatch), 12);
+    assert_eq!(exit_code(&r), 1);
+}
+
+#[test]
+fn a_game_team_missing_from_the_given_map_is_a_mismatch() {
+    let r = run_with(&session("116950735", &players()), Some(&[(2, 0)]));
+    assert_eq!(rows(&r, "team", Verdict::Mismatch).len(), 6);
+}
+
+#[test]
+fn team_map_parsing() {
+    assert_eq!(parse_team_map("2=0,3=1").unwrap(), [(2, 0), (3, 1)]);
+    assert_eq!(parse_team_map(" 3=1 , 2=0 ").unwrap(), [(2, 0), (3, 1)]);
+    for bad in ["", "2", "2=", "a=0", "2=0,2=1", "2=0,3=0", "2=0,"] {
+        assert!(parse_team_map(bad).is_err(), "{bad:?}");
+    }
 }
 
 #[test]
@@ -239,14 +291,14 @@ fn unrelated_and_garbled_lines_are_ignored() {
 
 #[test]
 fn metadata_for_another_match_is_an_error() {
-    let err = compare("", FIXTURE, 5).unwrap_err();
+    let err = compare("", FIXTURE, 5, None).unwrap_err();
     assert!(err.contains("116950735") && err.contains('5'), "{err}");
 }
 
 #[test]
 fn metadata_without_players_is_an_error() {
-    assert!(compare("", r#"{"match_info":{"match_id":5}}"#, 5).is_err());
-    assert!(compare("", "nope", 5).is_err());
+    assert!(compare("", r#"{"match_info":{"match_id":5}}"#, 5, None).is_err());
+    assert!(compare("", "nope", 5, None).is_err());
 }
 
 #[test]

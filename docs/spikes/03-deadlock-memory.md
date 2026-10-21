@@ -42,14 +42,16 @@ JSONL logs are kept as <paths> (not committed: `*.jsonl` is ignored).
   - `PASS` / `FAIL`: 
   - `gep_internal.pass_stats` median / max pass time: 
 - [ ] **Step 3: Accuracy, collector only (owner decision).** At least 3 real matches with
-  `uw-gep watch` (no Vulkan layer, no Electron host, input hooks off), then `uw-gep verify`.
-  Expected: no `MISMATCH`.
+  `uw-gep watch` (no Vulkan layer, no Electron host, input hooks off), then `uw-gep verify
+  --team-map <game>=<api>,…`. Confirm the team map by hand in the first match (README, "Verify
+  against deadlock-api.com") and use it for all of them. Expected: no `MISMATCH`, no `UNCONFIRMED`.
+  - Team map confirmed by hand (how):
 
-  | Match id | Log | OK | MISMATCH | MISSING | Notes |
-  |---|---|---|---|---|---|
-  |  |  |  |  |  |  |
-  |  |  |  |  |  |  |
-  |  |  |  |  |  |  |
+  | Match id | Log | Team map used | OK | MISMATCH | MISSING | UNCONFIRMED | Notes |
+  |---|---|---|---|---|---|---|---|
+  |  |  |  |  |  |  |  |  |
+  |  |  |  |  |  |  |  |  |
+  |  |  |  |  |  |  |  |  |
 
 - [ ] **Step 4: Latency.** Bot match, screen recording next to `watch`; for 5 kills compare the
   kill-feed time with the `kill` event's `t_ms`. Expected: ≤ 1 s each.

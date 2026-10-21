@@ -5,8 +5,10 @@
 //!
 //! The game's roster rows carry `steam_id` (SteamID64) and the game's team number; the API has
 //! `account_id` (the low 32 bits of the SteamID64) and team 0/1. Players are matched on the
-//! account id. Team numbers differ between the two sources, so teams are compared through the
-//! one-to-one mapping that agrees with most players (printed in the report).
+//! account id. Team numbers differ between the two sources, so teams are compared through a
+//! game-team → API-team map the caller confirms (`--team-map 2=0,3=1`). Without it the team rows
+//! are `UNCONFIRMED` (the mapping the players' data suggests is shown, but it is inferred from the
+//! very values under test, so it can't prove them).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -22,6 +24,8 @@ pub enum Verdict {
     Ok,
     Mismatch,
     Missing,
+    /// No team map was given: the team value can't be judged.
+    Unconfirmed,
 }
 
 impl Verdict {
@@ -30,6 +34,7 @@ impl Verdict {
             Verdict::Ok => "OK",
             Verdict::Mismatch => "MISMATCH",
             Verdict::Missing => "MISSING",
+            Verdict::Unconfirmed => "UNCONFIRMED",
         }
     }
 }
@@ -49,8 +54,10 @@ pub struct Row {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
     pub rows: Vec<Row>,
-    /// `(game team, API team)` pairs used for the team comparison.
+    /// `(game team, API team)` pairs: the given map, or (when `team_map_given` is false) the one
+    /// inferred from the players' data.
     pub team_map: Vec<(u64, u64)>,
+    pub team_map_given: bool,
 }
 
 impl Report {
@@ -73,27 +80,34 @@ impl Report {
             );
         }
         let map: Vec<String> = self.team_map.iter().map(|(g, a)| format!("game {g} = api {a}")).collect();
+        let map = if map.is_empty() { "none".to_string() } else { map.join(", ") };
+        let _ = if self.team_map_given {
+            writeln!(out, "team mapping (given): {map}")
+        } else {
+            writeln!(
+                out,
+                "team mapping (inferred from the data, unconfirmed): {map}\n\
+                 confirm it once by hand in the first match, then pass --team-map <game>=<api>,…"
+            )
+        };
         let _ = writeln!(
             out,
-            "team mapping: {}",
-            if map.is_empty() { "none".to_string() } else { map.join(", ") }
-        );
-        let _ = writeln!(
-            out,
-            "{} OK, {} MISMATCH, {} MISSING",
+            "{} OK, {} MISMATCH, {} MISSING, {} UNCONFIRMED",
             self.count(Verdict::Ok),
             self.count(Verdict::Mismatch),
-            self.count(Verdict::Missing)
+            self.count(Verdict::Missing),
+            self.count(Verdict::Unconfirmed)
         );
         out
     }
 }
 
-/// 0: everything OK. 1: at least one MISMATCH. 3: no MISMATCH, but something was not published.
+/// 0: everything OK. 1: at least one MISMATCH. 3: no MISMATCH, but something was not published
+/// (MISSING) or not judged (UNCONFIRMED).
 pub fn exit_code(r: &Report) -> i32 {
     if r.count(Verdict::Mismatch) > 0 {
         1
-    } else if r.count(Verdict::Missing) > 0 {
+    } else if r.count(Verdict::Missing) + r.count(Verdict::Unconfirmed) > 0 {
         3
     } else {
         0
@@ -175,8 +189,26 @@ fn verdict(game: &Option<String>, api: &Option<String>) -> Verdict {
     }
 }
 
+/// Parses `--team-map`: `<game>=<api>` pairs separated by commas, one-to-one.
+pub fn parse_team_map(s: &str) -> Result<Vec<(u64, u64)>, String> {
+    let bad = || format!("--team-map {s:?}: expected <game>=<api>,<game>=<api> (for example 2=0,3=1)");
+    let mut map: Vec<(u64, u64)> = Vec::new();
+    for pair in s.split(',') {
+        let (g, a) = pair.split_once('=').ok_or_else(bad)?;
+        let (g, a) = (g.trim().parse().map_err(|_| bad())?, a.trim().parse().map_err(|_| bad())?);
+        if map.iter().any(|&(mg, ma)| mg == g || ma == a) {
+            return Err(format!("--team-map {s:?}: each game and API team may appear only once"));
+        }
+        map.push((g, a));
+    }
+    map.sort();
+    Ok(map)
+}
+
 /// Compares a `uw-gep watch` JSONL log with the deadlock-api.com metadata JSON of `match_id`.
-pub fn compare(jsonl: &str, metadata: &str, match_id: u64) -> Result<Report, String> {
+/// With `team_map` (game team → API team), a team value that deviates from it is a MISMATCH;
+/// without it the team rows are UNCONFIRMED.
+pub fn compare(jsonl: &str, metadata: &str, match_id: u64, team_map: Option<&[(u64, u64)]>) -> Result<Report, String> {
     let meta: Value = serde_json::from_str(metadata).map_err(|e| format!("metadata is not JSON: {e}"))?;
     let info = &meta["match_info"];
     let api_id = info["match_id"].as_u64().ok_or("metadata has no match_info.match_id")?;
@@ -207,7 +239,8 @@ pub fn compare(jsonl: &str, metadata: &str, match_id: u64) -> Result<Report, Str
         .iter()
         .filter_map(|p| Some((game.get(&p.account)?.team?, p.team?)))
         .collect();
-    let team_map = team_mapping(&pairs);
+    let team_map_given = team_map.is_some();
+    let team_map = team_map.map_or_else(|| team_mapping(&pairs), <[_]>::to_vec);
 
     let mut rows = vec![Row {
         player: "-".into(),
@@ -222,10 +255,11 @@ pub fn compare(jsonl: &str, metadata: &str, match_id: u64) -> Result<Report, Str
             let (game_value, api_value) = match field {
                 "team" => {
                     let game_team = g.and_then(|g| g.team);
-                    // A game team with no mapping disagrees with every API team.
+                    // A game team missing from the given map disagrees with every API team.
                     let mapped = game_team.and_then(|t| team_map.iter().find(|(g, _)| *g == t)).map(|(_, a)| *a);
                     let verdict = match game_team {
                         None => Verdict::Missing,
+                        Some(_) if !team_map_given => Verdict::Unconfirmed,
                         Some(_) if mapped.is_some() && mapped == p.team => Verdict::Ok,
                         Some(_) => Verdict::Mismatch,
                     };
@@ -264,7 +298,7 @@ pub fn compare(jsonl: &str, metadata: &str, match_id: u64) -> Result<Report, Str
             });
         }
     }
-    Ok(Report { rows, team_map })
+    Ok(Report { rows, team_map, team_map_given })
 }
 
 fn fetch(match_id: u64) -> Result<String, String> {
@@ -280,18 +314,20 @@ fn fetch(match_id: u64) -> Result<String, String> {
 }
 
 fn usage() -> String {
-    "usage: uw-gep verify --jsonl out.jsonl --match-id <id> [--metadata file.json]".into()
+    "usage: uw-gep verify --jsonl out.jsonl --match-id <id> [--team-map 2=0,3=1] [--metadata file.json]".into()
 }
 
 /// `uw-gep verify`; `args` excludes the program name and the subcommand. Returns the exit code.
 pub fn run(args: impl IntoIterator<Item = String>) -> Result<i32, String> {
     let mut args = args.into_iter();
     let (mut jsonl, mut id, mut metadata): (Option<PathBuf>, Option<u64>, Option<PathBuf>) = (None, None, None);
+    let mut team_map = None;
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or(format!("{flag} needs a value"));
         match flag.as_str() {
             "--jsonl" => jsonl = Some(value()?.into()),
             "--match-id" => id = Some(value()?.parse().map_err(|e| format!("--match-id: {e}"))?),
+            "--team-map" => team_map = Some(parse_team_map(&value()?)?),
             "--metadata" => metadata = Some(value()?.into()),
             _ => return Err(format!("unknown argument {flag}\n{}", usage())),
         }
@@ -302,7 +338,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<i32, String> {
         Some(p) => std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?,
         None => fetch(id)?,
     };
-    let report = compare(&log, &meta, id)?;
+    let report = compare(&log, &meta, id, team_map.as_deref())?;
     print!("{}", report.render());
     Ok(exit_code(&report))
 }

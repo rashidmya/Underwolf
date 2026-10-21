@@ -16,11 +16,12 @@
 //! `t_ms` is Unix time in ms when `uw-gep` received it; `ts` is the collector's own clock (ms).
 //! On Ctrl+C it prints the feature-status table.
 //!
-//!   uw-gep verify --jsonl out.jsonl --match-id <id> [--metadata file.json]
+//!   uw-gep verify --jsonl out.jsonl --match-id <id> [--team-map 2=0,3=1] [--metadata file.json]
 //!
 //! compares the final roster in a JSONL log with deadlock-api.com's metadata for that match
-//! (fetched with curl, or read from `--metadata`) and prints OK/MISMATCH/MISSING per field. Exit
-//! code: 0 all OK, 1 a MISMATCH, 3 only MISSING, 2 usage or fetch error. Artifacts come from `--install-dir` (default
+//! (fetched with curl, or read from `--metadata`) and prints OK/MISMATCH/MISSING per field. Team
+//! rows are UNCONFIRMED unless `--team-map <game>=<api>,…` says which game team is which API
+//! team. Exit code: 0 all OK, 1 a MISMATCH, 3 only MISSING/UNCONFIRMED, 2 usage or fetch error. Artifacts come from `--install-dir` (default
 //! `~/.local/share/underwolf-spike`, see `spikes/inject/install.sh`).
 
 #[cfg(unix)]
