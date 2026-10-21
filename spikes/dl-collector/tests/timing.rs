@@ -8,8 +8,8 @@ use uw_spike_dlcollector::roots::{
     CallerPattern, MAIN_LOOP_NOT_FOUND, resolve_caller, resolve_main_loop,
 };
 use uw_spike_dlcollector::timing::{
-    CallerFilter, Chain, Discovery, Frame, PASS_INTERVAL_MS, SharedDiscovery, TickGate,
-    discovery_json,
+    CallerFilter, Chain, DISCOVERY_FRAMES, DiscoverArgs, Discovery, DiscoveryTotals, Frame,
+    PASS_INTERVAL_MS, SharedDiscovery, TickGate, chains_from, discovery_file_json, discovery_json,
 };
 
 const IMM: u64 = 0x1_4000_1234;
@@ -99,31 +99,53 @@ fn outer_frame_is_not_walked_before_the_interval_elapsed() {
     assert!(!walked.get());
 }
 
+fn f5(a: u64) -> [u64; DISCOVERY_FRAMES] {
+    [a, a + 1, a + 2, a + 3, a + 4]
+}
+
 #[test]
-fn discovery_counts_chains_per_thread_and_ranks_them() {
+fn discovery_records_five_frames_and_ranks_chains() {
+    assert_eq!(DISCOVERY_FRAMES, 5);
     let mut d = Discovery::new();
     for _ in 0..5 {
-        d.record([1, 2, 3], 10);
+        d.record(f5(1), 10, false);
     }
     for _ in 0..9 {
-        d.record([4, 5, 6], 11);
+        d.record(f5(4), 11, true);
     }
-    d.record([1, 2, 3], 12);
+    d.record(f5(1), 12, false);
     let top = d.top(2);
-    assert_eq!(top, vec![([4, 5, 6], 11, 9), ([1, 2, 3], 10, 5)]);
-    assert_eq!(d.top(32).len(), 3);
+    assert_eq!(top.len(), 2);
+    assert_eq!((top[0].0, top[0].1.calls), (f5(4), 9));
+    assert_eq!((top[1].0, top[1].1.calls), (f5(1), 6));
+    assert_eq!(d.len(), 2, "one entry per chain, not per thread");
+}
+
+#[test]
+fn discovery_tracks_up_to_four_threads_per_chain() {
+    let mut d = Discovery::new();
+    for (tid, n) in [(10, 3), (11, 1), (12, 2), (13, 1), (14, 5), (15, 1)] {
+        for _ in 0..n {
+            d.record(f5(1), tid, tid == 12);
+        }
+    }
+    let s = d.top(1)[0].1;
+    assert_eq!(s.calls, 13);
+    assert_eq!(s.threads, [(10, 3), (11, 1), (12, 2), (13, 1)]);
+    assert_eq!(s.other_thread_calls, 6);
+    assert_eq!(s.window_calls, 2);
 }
 
 #[test]
 fn discovery_is_bounded() {
     let mut d = Discovery::new();
     for i in 0..(Discovery::MAX_CHAINS as u64 + 100) {
-        d.record([i, 0, 0], 1);
+        d.record(f5(i * 8), 1, false);
     }
-    d.record([0, 0, 0], 1);
+    d.record(f5(0), 1, false);
     assert_eq!(d.top(usize::MAX).len(), Discovery::MAX_CHAINS);
     assert_eq!(d.dropped(), 100);
-    assert_eq!(d.top(1), vec![([0, 0, 0], 1, 2)]);
+    assert_eq!((d.top(1)[0].0, d.top(1)[0].1.calls), (f5(0), 2));
 }
 
 #[test]
@@ -132,7 +154,7 @@ fn discovery_record_never_grows_the_map() {
     let cap = d.capacity();
     assert!(cap >= Discovery::MAX_CHAINS, "{cap}");
     for i in 0..(Discovery::MAX_CHAINS as u64 + 100) {
-        d.record([i, 1, 2], (i % 7) as u32);
+        d.record(f5(i * 8), (i % 7) as u32 + 1, i % 3 == 0);
         assert_eq!(d.capacity(), cap, "reallocated at record {i}");
     }
 }
@@ -140,28 +162,109 @@ fn discovery_record_never_grows_the_map() {
 #[test]
 fn held_discovery_lock_drops_the_call_without_blocking() {
     let s = std::sync::Arc::new(SharedDiscovery::new());
-    assert!(!s.record([1, 2, 3], 1), "not started: nothing recorded");
+    assert!(!s.record(f5(1), 1), "not started: nothing recorded");
     s.begin();
-    assert!(s.record([1, 2, 3], 1));
+    assert!(s.record(f5(1), 1));
     let held = s.lock();
     // Same thread and another thread: both return at once and count the call as busy-dropped.
-    assert!(!s.record([1, 2, 3], 1));
+    assert!(!s.record(f5(1), 1));
     let other = s.clone();
     let t = std::thread::spawn(move || {
         let start = std::time::Instant::now();
-        let recorded = other.record([4, 5, 6], 2);
+        let recorded = other.record(f5(4), 2);
         (recorded, start.elapsed())
     });
     let (recorded, took) = t.join().unwrap();
     assert!(!recorded);
     assert!(took < std::time::Duration::from_millis(100), "{took:?}");
     drop(held);
-    assert!(s.record([1, 2, 3], 1));
+    assert!(s.record(f5(1), 1));
     let (d, busy) = s.finish().unwrap();
     assert_eq!(busy, 2);
-    assert_eq!(d.top(32), vec![([1, 2, 3], 1, 2)]);
+    assert_eq!(d.top(32).len(), 1);
+    assert_eq!(d.top(32)[0].1.calls, 2);
     assert!(s.finish().is_none());
-    assert!(!s.record([1, 2, 3], 1), "finished: nothing recorded");
+    assert!(!s.record(f5(1), 1), "finished: nothing recorded");
+}
+
+#[test]
+fn window_flag_compares_the_recording_thread_with_the_window_thread() {
+    let s = SharedDiscovery::new();
+    s.begin();
+    // Window not known yet: nothing counts as the window thread.
+    s.record(f5(1), 7);
+    s.set_window_thread(7);
+    assert_eq!(s.window_thread(), 7);
+    s.record(f5(1), 7);
+    s.record(f5(1), 8);
+    s.record(f5(9), 8);
+    let (d, _) = s.finish().unwrap();
+    let top = d.top(2);
+    assert_eq!((top[0].1.calls, top[0].1.window_calls), (3, 1));
+    assert_eq!((top[1].1.calls, top[1].1.window_calls), (1, 0));
+    let chains = chains_from(&d, 32, 1.0, |a| Frame {
+        module: None,
+        rva: a,
+    });
+    assert!(chains[0].window_thread);
+    assert!(
+        !chains[1].window_thread,
+        "a chain only on another thread is not the window's"
+    );
+}
+
+#[test]
+fn chains_from_names_frames_rates_and_threads() {
+    let mut d = Discovery::new();
+    for _ in 0..4 {
+        d.record([0x10, 0x20, 0, 0, 0], 5, false);
+    }
+    for _ in 0..6 {
+        d.record([0x10, 0x20, 0, 0, 0], 6, true);
+    }
+    let chains = chains_from(&d, 32, 2.0, |a| Frame {
+        module: Some("m.dll".into()),
+        rva: a + 1,
+    });
+    assert_eq!(
+        chains,
+        vec![Chain {
+            frames: vec![
+                Frame {
+                    module: Some("m.dll".into()),
+                    rva: 0x11
+                },
+                Frame {
+                    module: Some("m.dll".into()),
+                    rva: 0x21
+                },
+            ],
+            calls: 10,
+            per_sec: 5.0,
+            window_thread: true,
+            window_calls: 6,
+            threads: vec![(6, 6), (5, 4)],
+            other_thread_calls: 0,
+        }]
+    );
+}
+
+#[test]
+fn discover_args_parse() {
+    let a = DiscoverArgs::parse(
+        r"corrupt=A.b discover=10 discover_out=Z:\tmp\opencode\s3\discovery.json",
+    );
+    assert_eq!(
+        a,
+        DiscoverArgs {
+            seconds: Some(10),
+            out: Some(r"Z:\tmp\opencode\s3\discovery.json".into())
+        }
+    );
+    assert_eq!(DiscoverArgs::parse("discover=0").seconds, None);
+    assert_eq!(DiscoverArgs::parse("discover=601").seconds, None);
+    assert_eq!(DiscoverArgs::parse("discover=x discover_out=").out, None);
+    assert_eq!(DiscoverArgs::parse(""), DiscoverArgs::default());
 }
 
 fn chain(n: usize) -> Chain {
@@ -176,8 +279,12 @@ fn chain(n: usize) -> Chain {
                 rva: 0x1000 * (n as u64 + 1) + i,
             })
             .collect(),
+        calls: 481,
         per_sec: 240.5,
         window_thread: n == 0,
+        window_calls: if n == 0 { 400 } else { 0 },
+        threads: vec![(1234, 400), (77, 81)],
+        other_thread_calls: 0,
     }
 }
 
@@ -206,6 +313,31 @@ fn discovery_json_drops_chains_that_do_not_fit() {
     assert_eq!(
         discovery_json(&chains, 1, 2, 10),
         r#"{"dropped_busy":1,"dropped_full":2,"chains":[]}"#
+    );
+}
+
+#[test]
+fn discovery_file_has_every_chain_with_threads() {
+    let chains: Vec<Chain> = (0..500).map(chain).collect();
+    let totals = DiscoveryTotals {
+        seconds: 10.0,
+        window_thread_id: 1234,
+        dropped_busy: 5,
+        dropped_full: 0,
+    };
+    let json = discovery_file_json(&chains, &totals);
+    assert!(json.len() > 4096);
+    assert!(json.starts_with(
+        r#"{"seconds":10,"window_thread_id":1234,"dropped_busy":5,"dropped_full":0,"chains":["#
+    ));
+    assert_eq!(json.matches(r#""per_sec""#).count(), 500);
+    assert!(json.contains(
+        r#""calls":481,"per_sec":240.5,"window_thread":true,"window_calls":400,"threads":[{"tid":1234,"calls":400},{"tid":77,"calls":81}],"other_thread_calls":0}"#
+    ));
+    assert!(json.ends_with("]}\n"));
+    assert_eq!(
+        discovery_file_json(&[], &totals),
+        "{\"seconds\":10,\"window_thread_id\":1234,\"dropped_busy\":5,\"dropped_full\":0,\"chains\":[\n\n]}\n"
     );
 }
 

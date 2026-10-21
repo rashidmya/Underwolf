@@ -7,14 +7,16 @@
 //! `kernel32!QueryPerformanceCounter` forwards there, so every caller passes through).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, TryLockError};
 
 /// 20 Hz.
 pub const PASS_INTERVAL_MS: u64 = 50;
 /// Return addresses recorded per QPC call in discovery mode.
-pub const DISCOVERY_FRAMES: usize = 3;
-/// Chains published to `gep_internal.discovery`.
+pub const DISCOVERY_FRAMES: usize = 5;
+/// Threads tracked per chain in discovery mode.
+pub const DISCOVERY_THREADS: usize = 4;
+/// Chains considered for the `gep_internal.discovery` summary (those that fit 4096 bytes).
 pub const DISCOVERY_TOP: usize = 32;
 
 /// Return addresses that identify the main-loop QPC call: `immediate` is the caller's return
@@ -82,15 +84,45 @@ impl TickGate {
     }
 }
 
-/// QPC call chains counted per thread in discovery mode. The map is sized for `MAX_CHAINS` up
-/// front, so `record` never allocates.
+/// Per-chain counts in discovery mode. A thread slot with id 0 is empty (no thread has id 0).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChainStats {
+    pub calls: u64,
+    /// Calls made on the thread that owns the game window.
+    pub window_calls: u64,
+    /// The first `DISCOVERY_THREADS` threads seen, with their call counts.
+    pub threads: [(u32, u64); DISCOVERY_THREADS],
+    /// Calls from further threads.
+    pub other_thread_calls: u64,
+}
+
+impl ChainStats {
+    fn add(&mut self, thread: u32, on_window: bool) {
+        self.calls += 1;
+        self.window_calls += u64::from(on_window);
+        for slot in &mut self.threads {
+            if slot.0 == thread {
+                slot.1 += 1;
+                return;
+            }
+            if slot.0 == 0 {
+                *slot = (thread, 1);
+                return;
+            }
+        }
+        self.other_thread_calls += 1;
+    }
+}
+
+/// QPC call chains counted in discovery mode. The map is sized for `MAX_CHAINS` up front and the
+/// per-chain stats are fixed-size, so `record` never allocates.
 pub struct Discovery {
-    counts: HashMap<([u64; DISCOVERY_FRAMES], u32), u64>,
+    counts: HashMap<[u64; DISCOVERY_FRAMES], ChainStats>,
     dropped: u64,
 }
 
 impl Discovery {
-    /// Distinct (chain, thread) pairs kept; calls from further new pairs are only counted as dropped.
+    /// Distinct chains kept; calls of further new chains are only counted as dropped.
     pub const MAX_CHAINS: usize = 4096;
 
     pub fn new() -> Discovery {
@@ -105,13 +137,15 @@ impl Discovery {
         self.counts.capacity()
     }
 
-    pub fn record(&mut self, frames: [u64; DISCOVERY_FRAMES], thread: u32) {
+    pub fn record(&mut self, frames: [u64; DISCOVERY_FRAMES], thread: u32, on_window: bool) {
         let full = self.counts.len() >= Discovery::MAX_CHAINS;
-        match self.counts.get_mut(&(frames, thread)) {
-            Some(n) => *n += 1,
+        match self.counts.get_mut(&frames) {
+            Some(s) => s.add(thread, on_window),
             None if full => self.dropped += 1,
             None => {
-                self.counts.insert((frames, thread), 1);
+                let mut s = ChainStats::default();
+                s.add(thread, on_window);
+                self.counts.insert(frames, s);
             }
         }
     }
@@ -120,10 +154,18 @@ impl Discovery {
         self.dropped
     }
 
-    /// The `n` most frequent (chain, thread, calls), most frequent first; ties by chain then thread.
-    pub fn top(&self, n: usize) -> Vec<([u64; DISCOVERY_FRAMES], u32, u64)> {
-        let mut all: Vec<_> = self.counts.iter().map(|(&(f, t), &c)| (f, t, c)).collect();
-        all.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)).then(a.1.cmp(&b.1)));
+    pub fn len(&self) -> usize {
+        self.counts.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.counts.is_empty()
+    }
+
+    /// The `n` most called chains, most calls first; ties by chain.
+    pub fn top(&self, n: usize) -> Vec<([u64; DISCOVERY_FRAMES], ChainStats)> {
+        let mut all: Vec<_> = self.counts.iter().map(|(&f, &s)| (f, s)).collect();
+        all.sort_by(|a, b| b.1.calls.cmp(&a.1.calls).then(a.0.cmp(&b.0)));
         all.truncate(n);
         all
     }
@@ -141,6 +183,7 @@ impl Default for Discovery {
 pub struct SharedDiscovery {
     chains: Mutex<Option<Discovery>>,
     busy: AtomicU64,
+    window_thread: AtomicU32,
 }
 
 impl SharedDiscovery {
@@ -148,6 +191,7 @@ impl SharedDiscovery {
         SharedDiscovery {
             chains: Mutex::new(None),
             busy: AtomicU64::new(0),
+            window_thread: AtomicU32::new(0),
         }
     }
 
@@ -157,8 +201,19 @@ impl SharedDiscovery {
         self.busy.store(0, Ordering::Relaxed);
     }
 
-    /// Counts one call; `false` if it was not recorded (busy, or not recording).
+    /// The thread that owns the game window (0: unknown). Calls on it count as `window_calls`.
+    pub fn set_window_thread(&self, thread: u32) {
+        self.window_thread.store(thread, Ordering::Relaxed);
+    }
+
+    pub fn window_thread(&self) -> u32 {
+        self.window_thread.load(Ordering::Relaxed)
+    }
+
+    /// Counts one call made on `thread`; `false` if it was not recorded (busy, or not recording).
     pub fn record(&self, frames: [u64; DISCOVERY_FRAMES], thread: u32) -> bool {
+        let window = self.window_thread.load(Ordering::Relaxed);
+        let on_window = window != 0 && thread == window;
         let mut guard = match self.chains.try_lock() {
             Ok(g) => g,
             Err(TryLockError::Poisoned(p)) => p.into_inner(),
@@ -169,7 +224,7 @@ impl SharedDiscovery {
         };
         match guard.as_mut() {
             Some(d) => {
-                d.record(frames, thread);
+                d.record(frames, thread, on_window);
                 true
             }
             None => false,
@@ -194,6 +249,35 @@ impl Default for SharedDiscovery {
     }
 }
 
+/// `discover=<seconds>` (1..=600) and `discover_out=<windows path>` from the start args. Paths
+/// cannot contain spaces (args are space-separated).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiscoverArgs {
+    pub seconds: Option<u64>,
+    pub out: Option<String>,
+}
+
+impl DiscoverArgs {
+    pub const MAX_SECONDS: u64 = 600;
+
+    pub fn parse(args: &str) -> DiscoverArgs {
+        let mut a = DiscoverArgs::default();
+        for (key, value) in args.split_whitespace().filter_map(|t| t.split_once('=')) {
+            match key {
+                "discover" => {
+                    a.seconds = value
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|s| (1..=DiscoverArgs::MAX_SECONDS).contains(s))
+                }
+                "discover_out" if !value.is_empty() => a.out = Some(value.to_string()),
+                _ => {}
+            }
+        }
+        a
+    }
+}
+
 /// One return address: the module containing it and the offset from its base, or no module and
 /// the absolute address.
 #[derive(Debug, Clone, PartialEq)]
@@ -205,9 +289,57 @@ pub struct Frame {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Chain {
     pub frames: Vec<Frame>,
+    pub calls: u64,
     pub per_sec: f64,
-    /// The calls came from the thread that owns the game window.
+    /// Some calls came from the thread that owns the game window.
     pub window_thread: bool,
+    pub window_calls: u64,
+    /// Thread id and calls, most calls first.
+    pub threads: Vec<(u32, u64)>,
+    pub other_thread_calls: u64,
+}
+
+/// The `n` most called chains as output records. `locate` names a return address; the walk's
+/// trailing zero frames are left out.
+pub fn chains_from(
+    d: &Discovery,
+    n: usize,
+    seconds: f64,
+    locate: impl Fn(u64) -> Frame,
+) -> Vec<Chain> {
+    let seconds = if seconds.is_finite() && seconds > 0.0 {
+        seconds
+    } else {
+        1.0
+    };
+    d.top(n)
+        .into_iter()
+        .map(|(frames, s)| {
+            let used = frames.iter().rposition(|&f| f != 0).map_or(0, |i| i + 1);
+            let mut threads: Vec<(u32, u64)> =
+                s.threads.iter().copied().filter(|t| t.0 != 0).collect();
+            threads.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            Chain {
+                frames: frames[..used].iter().map(|&a| locate(a)).collect(),
+                calls: s.calls,
+                per_sec: s.calls as f64 / seconds,
+                window_thread: s.window_calls > 0,
+                window_calls: s.window_calls,
+                threads,
+                other_thread_calls: s.other_thread_calls,
+            }
+        })
+        .collect()
+}
+
+/// Totals for the discovery file.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DiscoveryTotals {
+    pub seconds: f64,
+    /// 0: the game window was not found.
+    pub window_thread_id: u32,
+    pub dropped_busy: u64,
+    pub dropped_full: u64,
 }
 
 fn json_string(s: &str) -> String {
@@ -225,7 +357,15 @@ fn json_string(s: &str) -> String {
     out
 }
 
-fn chain_json(c: &Chain) -> String {
+fn num(v: f64) -> f64 {
+    if v.is_finite() {
+        (v * 10.0).round() / 10.0
+    } else {
+        0.0
+    }
+}
+
+fn frames_json(c: &Chain) -> String {
     let frames: Vec<String> = c
         .frames
         .iter()
@@ -237,19 +377,37 @@ fn chain_json(c: &Chain) -> String {
             format!("{{\"module\":{module},\"rva\":\"{:#x}\"}}", f.rva)
         })
         .collect();
-    let per_sec = if c.per_sec.is_finite() {
-        c.per_sec
-    } else {
-        0.0
-    };
+    format!("[{}]", frames.join(","))
+}
+
+fn chain_json(c: &Chain) -> String {
     format!(
-        "{{\"frames\":[{}],\"per_sec\":{},\"window_thread\":{}}}",
-        frames.join(","),
-        (per_sec * 10.0).round() / 10.0,
+        "{{\"frames\":{},\"per_sec\":{},\"window_thread\":{}}}",
+        frames_json(c),
+        num(c.per_sec),
         c.window_thread
     )
 }
 
+fn chain_full_json(c: &Chain) -> String {
+    let threads: Vec<String> = c
+        .threads
+        .iter()
+        .map(|(tid, calls)| format!("{{\"tid\":{tid},\"calls\":{calls}}}"))
+        .collect();
+    format!(
+        "{{\"frames\":{},\"calls\":{},\"per_sec\":{},\"window_thread\":{},\"window_calls\":{},\"threads\":[{}],\"other_thread_calls\":{}}}",
+        frames_json(c),
+        c.calls,
+        num(c.per_sec),
+        c.window_thread,
+        c.window_calls,
+        threads.join(","),
+        c.other_thread_calls
+    )
+}
+
+/// The summary for `gep_internal.discovery`:
 /// `{dropped_busy, dropped_full, chains:[{frames:[{module,rva}], per_sec, window_thread}]}`,
 /// keeping the leading chains that fit in `max` bytes. `dropped_busy` counts calls skipped because
 /// the recording lock was held, `dropped_full` calls of new chains after `MAX_CHAINS`. RVAs are hex
@@ -276,6 +434,21 @@ pub fn discovery_json(
     }
     out.push_str("]}");
     out
+}
+
+/// The full chain table for the `discover_out` file, one chain per line:
+/// `{seconds, window_thread_id, dropped_busy, dropped_full, chains:[{frames, calls, per_sec,
+/// window_thread, window_calls, threads:[{tid,calls}], other_thread_calls}]}`.
+pub fn discovery_file_json(chains: &[Chain], t: &DiscoveryTotals) -> String {
+    let items: Vec<String> = chains.iter().map(chain_full_json).collect();
+    format!(
+        "{{\"seconds\":{},\"window_thread_id\":{},\"dropped_busy\":{},\"dropped_full\":{},\"chains\":[\n{}\n]}}\n",
+        num(t.seconds),
+        t.window_thread_id,
+        t.dropped_busy,
+        t.dropped_full,
+        items.join(",\n")
+    )
 }
 
 #[cfg(windows)]
@@ -368,11 +541,11 @@ mod hook {
         BUSY.with(|b| b.set(false));
     }
 
-    fn backtrace() -> ([*mut c_void; 16], usize) {
-        let mut frames = [std::ptr::null_mut(); 16];
+    fn backtrace() -> ([*mut c_void; 32], usize) {
+        let mut frames = [std::ptr::null_mut(); 32];
         // SAFETY: the buffer holds `frames.len()` entries.
         let n = unsafe { RtlCaptureStackBackTrace(0, &mut frames, None) } as usize;
-        (frames, n.min(16))
+        (frames, n.min(32))
     }
 
     /// The return address one frame above `ret` on this thread's stack.

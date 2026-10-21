@@ -31,14 +31,15 @@ use crate::mem::SelfProcess;
 use crate::module::Module;
 use crate::roots::resolve_main_loop;
 use crate::timing::{
-    self, Chain, DISCOVERY_FRAMES, DISCOVERY_TOP, Frame, QpcSink, SharedDiscovery, TickGate,
-    discovery_json,
+    self, DISCOVERY_FRAMES, DISCOVERY_TOP, DiscoverArgs, DiscoveryTotals, Frame, QpcSink,
+    SharedDiscovery, TickGate, chains_from, discovery_file_json, discovery_json,
 };
 
 const MODULES: [&str; 3] = ["client.dll", "engine2.dll", "tier0.dll"];
 const EVENT_BURST: usize = 30;
 const EVENT_WINDOW_DIV: u64 = 5;
-const DISCOVER_MAX_S: u64 = 600;
+/// While discovering, the window's thread is looked up again every this many presents (~1 s).
+const WINDOW_REFRESH_PRESENTS: u32 = 60;
 
 type Sets = BTreeMap<(String, String), Option<Vec<u8>>>;
 
@@ -150,6 +151,9 @@ struct Discovering {
     started: u64,
     deadline: u64,
     done: bool,
+    /// `discover_out=`: where the full chain table goes.
+    out_path: Option<String>,
+    presents: u32,
 }
 
 enum Mode {
@@ -239,14 +243,6 @@ fn selftest(args: &str) -> bool {
     args.split_whitespace().any(|t| t == "selftest=1")
 }
 
-/// `discover=<seconds>` (1..=600), if present.
-fn discover_seconds(args: &str) -> Option<u64> {
-    args.split_whitespace()
-        .filter_map(|t| t.strip_prefix("discover="))
-        .filter_map(|v| v.parse::<u64>().ok())
-        .find(|s| (1..=DISCOVER_MAX_S).contains(s))
-}
-
 fn loaded_modules() -> Vec<Module> {
     MODULES
         .iter()
@@ -287,13 +283,17 @@ fn start(channel: u32, args: &str) -> i32 {
     });
     let modules = loaded_modules();
 
-    if let Some(seconds) = discover_seconds(args) {
+    let discover = DiscoverArgs::parse(args);
+    if let Some(seconds) = discover.seconds {
         CHAINS.begin();
+        CHAINS.set_window_thread(window_thread());
         let now = qpc_now();
         plugin.mode = Mode::Discovering(Discovering {
             started: now,
             deadline: now.saturating_add(seconds.saturating_mul(freq)),
             done: false,
+            out_path: discover.out,
+            presents: 0,
         });
         match timing::install(&SINK, None) {
             Ok(()) => plugin.out.lock().status("discovering", None),
@@ -431,17 +431,23 @@ fn finish_discovery(out: &OutHandle, d: &mut Discovering) {
         return;
     };
     let seconds = (qpc_now().saturating_sub(d.started) as f64 / qpc_freq() as f64).max(1e-3);
-    let window = window_thread();
-    let top: Vec<Chain> = chains
-        .top(DISCOVERY_TOP)
-        .into_iter()
-        .map(|(frames, thread, calls)| Chain {
-            frames: frames.iter().map(|&a| locate(a)).collect(),
-            per_sec: calls as f64 / seconds,
-            window_thread: window != 0 && thread == window,
-        })
-        .collect();
-    let json = discovery_json(&top, busy, chains.dropped(), DISCOVERY_MAX as usize);
+    let all = chains_from(&chains, usize::MAX, seconds, locate);
+    let top = &all[..all.len().min(DISCOVERY_TOP)];
+    let json = discovery_json(top, busy, chains.dropped(), DISCOVERY_MAX as usize);
+    let file_error = d.out_path.as_deref().and_then(|path| {
+        let totals = DiscoveryTotals {
+            seconds,
+            window_thread_id: CHAINS.window_thread(),
+            dropped_busy: busy,
+            dropped_full: chains.dropped(),
+        };
+        let r = std::fs::write(path, discovery_file_json(&all, &totals));
+        eprintln!(
+            "[uw-spike-dlcollector] discovery table ({} chains) -> {path}: {r:?}",
+            all.len()
+        );
+        r.err().map(|e| format!("discover_out {path}: {e}"))
+    });
     let mut out = out.lock();
     out.commit(
         &[(
@@ -451,7 +457,7 @@ fn finish_discovery(out: &OutHandle, d: &mut Discovering) {
         )],
         ms_now(),
     );
-    out.status("discovered", None);
+    out.status("discovered", file_error.as_deref());
 }
 
 fn present() {
@@ -462,6 +468,13 @@ fn present() {
     match mode {
         Mode::Collecting { collector, .. } => collector.check_stall(),
         Mode::Discovering(d) if !d.done && qpc_now() >= d.deadline => finish_discovery(out, d),
+        Mode::Discovering(d) if !d.done => {
+            // The window may appear (or be recreated) after the start.
+            d.presents = d.presents.wrapping_add(1);
+            if CHAINS.window_thread() == 0 || d.presents % WINDOW_REFRESH_PRESENTS == 0 {
+                CHAINS.set_window_thread(window_thread());
+            }
+        }
         // Retries the selftest event if the throttle or a busy channel refused it.
         Mode::Selftest(collector) => collector.tick(&SelfProcess),
         Mode::Discovering(_) | Mode::Idle => {}
