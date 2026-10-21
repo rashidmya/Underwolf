@@ -518,6 +518,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "uw-spike-dlcollector"
+version = "0.0.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
 name = "uw-spike-dmabuf"
 version = "0.0.0"
 dependencies = [
