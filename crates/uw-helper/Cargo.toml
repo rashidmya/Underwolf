@@ -17,6 +17,9 @@ path = "src/lib.rs"
 name = "uw-helper64"
 path = "src/bin/uw-helper64.rs"
 
+[dependencies]
+uw-pipe-proto = { path = "../uw-pipe-proto" }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
