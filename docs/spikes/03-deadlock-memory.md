@@ -15,10 +15,11 @@
 - The collector runs inside Deadlock (Proton 11.0) as a plugin of the Spike 1 in-game module, on
   the game's main-loop thread, and only reads its own process's memory. Its data reaches the
   Linux client through Overwolf-style shared memory and a Wine-side helper.
-- Verified live: `phase`, `match_id`, `steam_id`, `roster`, `items` (count only),
-  `match_clock`, `match_start`/`match_end` and `kill`/`death`/`assist` (bot match plus one real
-  match: 24/24 player rows exact; API verify 49 OK, 0 MISMATCH, 0 MISSING). From the timebox:
-  `game_mode`, the `game_paused` event, `team_score` and `match_outcome`.
+- Verified live: `phase`, `match_id`, `steam_id`, `roster`, `items` (local count, bot match
+  only), `match_clock`, `match_start`/`match_end` and `kill`/`death`/`assist` (bot match plus one
+  real match: 24/24 player rows exact; API verify with `--team-map 2=0,3=1`: 61 OK, 0 MISMATCH,
+  0 MISSING, 0 UNCONFIRMED). From the timebox: `game_mode`, the `game_paused` event,
+  `team_score` and `match_outcome`.
 - `tower_destroyed` is implemented; the owner-observed subset matched, but the full count is
   unverified. `incoming_damage` and `match_history` are unavailable.
 - Cost: +0.38% avg FPS, +0.14% p99 (PASS). Two client.dll patches (6801 to 6807 to 6810) needed
@@ -109,12 +110,14 @@ JSONL logs and watch logs are kept in `~/.local/share/underwolf-spike/runs/c6-*`
   - Team map confirmed by hand: the owner played Archmother (screenshot
     `~/Pictures/Screenshots/Screenshot_20261022_004549.png`), which is game team 3 = API team 1;
     Hidden King = game 2 = API 0 (same sides as in the bot match). The inferred map game 2 = api
-    0, game 3 = api 1 held for all 12 rows, but `verify` was not rerun with `--team-map` (3 API
-    requests/hour), so the team rows stay UNCONFIRMED in the tool's count.
+    0, game 3 = api 1 held for all 12 rows. `verify` was then rerun with `--team-map 2=0,3=1`
+    (2026-10-22 ~16:57, 1 request): 61 OK, 0 MISMATCH, 0 MISSING, 0 UNCONFIRMED (the 12 team rows
+    OK). Log `c6-s3-verify-teammap.log`.
 
   | Match id | Log | Team map used | OK | MISMATCH | MISSING | UNCONFIRMED | Notes |
   |---|---|---|---|---|---|---|---|
   | 121819616 | `c6-s3-real-6810.jsonl`, `c6-s3-verify.log` | none passed (confirmed by hand: 2 = 0, 3 = 1) | 49 | 0 | 0 | 12 (team rows only) | Standard match, 6810, 46:58, owner won as Archmother. All 12 K/D/A equal the scoreboard; items 11-12 each; last `match_clock` 46:57 vs scoreboard 46:58; `match_start`/`match_end` correct; `disabled_tasks` []. API metadata was 503 (not published) and then 429 (3 requests/hour) until the verify at ~15:18 (log mtime) on 2026-10-22. |
+  | 121819616 | `c6-s3-real-6810.jsonl`, `c6-s3-verify-teammap.log` | `2=0,3=1` | 61 | 0 | 0 | 0 | Rerun with the confirmed team map (2026-10-22 ~16:57); the 12 team rows are OK. |
 
 - [x] **Step 4: Latency.** Bot match, screen recording next to `watch`; for 5 kills compare the
   kill-feed time with the `kill` event's `t_ms`. Expected: ≤ 1 s each.
@@ -203,7 +206,7 @@ JSONL logs and watch logs are kept in `~/.local/share/underwolf-spike/runs/c6-*`
   | `game_paused` | `C_GameRules.m_bGamePaused` (0x38, u8 bool; already read by the clock) | Yes: 2 pauses gave exactly true, false, true, false; clock frozen during both (10 s, 5 s). Venue: private lobby, owner host | PASS (source: game memory) |
   | `team_score` | `C_Team.m_iScore` (0x620) per team (`C_BaseEntity.m_iTeamNum` selects Amber/Sapphire); the game's top bar shows it as the team's kills | Yes: mid-match HUD orange 7 / blue 5 = log amber 7 / sapphire 5; final 40/63 = scoreboard; all 12 K/D/A identical. In the Hideout: 0-0, then amber 1 = roster sum after an owner kill | PASS (source: game memory) |
   | `match_outcome` | `C_CitadelGameRules.m_iWinningTeam` (0xc0), published only in PostGame and End | Yes: `{"winning_team":"SAPPHIRE"}` at PostGame, scoreboard "Archmother Victorious"; null when the phase left PostGame for None (no End phase was logged in this match; `match_end` fired at that transition, 10.2 s after PostGame). Value is the winning team (AMBER/SAPPHIRE, as Overwolf documents), not local victory/defeat | PASS (source: game memory) |
-  | `tower_destroyed` | `C_CitadelTeam.m_nBossesAlive` (0x6b8): the event fires when a team's count drops, data = the team that lost it ("Amber"/"Sapphire"); gated to GameInProgress and Normal mode | Partly: 22 events (Amber 14, Sapphire 8) from 08:11 to 22:55; the owner-observed subset matched (2 enemy Guardians gave 2x Amber, own Guardian gave Sapphire, Walker (both sides), shrine). No event in PostGame (the Patron kill) by design. The full 22-event count is **unverified** against an objective list: deadlock-api metadata gave 503 "Steam is busy" at 15:17 and again at 16:21, and private-lobby matches may never be published | Implemented (source: game memory); full count **unverified**, not claimed PASS |
+  | `tower_destroyed` | `C_CitadelTeam.m_nBossesAlive` (0x6b8): the event fires when a team's count drops, data = the team that lost it ("Amber"/"Sapphire"); gated to GameInProgress and Normal mode | Partly: 22 events (Amber 14, Sapphire 8) from 08:11 to 22:55; the owner-observed subset matched (2 enemy Guardians gave 2x Amber, own Guardian gave Sapphire, Walker (both sides), shrine). No event in PostGame (the Patron kill) by design. The full 22-event count is **unverified** against an objective list: deadlock-api metadata gave 503 "Steam is busy" at 15:17, 16:21 and 16:56 (attempts stopped), and private-lobby matches may never be published | Implemented (source: game memory); full count **unverified**, not claimed PASS |
   | `incoming_damage` | none usable: only via the Panorama HUD object `CCitadel_Hud_DamageReport` (non-schema offsets) or a message hook, outside the collector rules (schema fields only; QPC is the only hook) | n/a | `unavailable` (no task; not emitted) |
 
   - Live check: private lobby with bots, match 122217736, owner host, team 3, build 1472875 on
@@ -227,15 +230,15 @@ unavailable.
 
 | Feature/key | Source | Resolution (schema name / pattern) | Accuracy result | Survived patch | Notes |
 |---|---|---|---|---|---|
-| `gep_internal.version_info` | memory (the collector's own text) | Collector name and version, plus the schema record layout it found in the game (`disk-class-v2`) | n/a (no game value) | Yes (the layout resolved on 6807 and 6810) | `{"collector":"uw-spike-dlcollector 0.0.0","schema_layout":"disk-class-v2"}` |
+| `gep_internal.version_info` | memory (the collector's own text) | Collector name and version, plus the schema record layout it found in the game (`disk-class-v2`) | Published live at start in every run; the value is the collector's own (the layout name comes from the game's schema data) | Yes (the layout resolved on 6807 and 6810) | `{"collector":"uw-spike-dlcollector 0.0.0","schema_layout":"disk-class-v2"}` |
 | `game_info.phase` | memory | `RULES` pattern (game rules global) + `C_CitadelGameRules.m_eGameState` | Read live in every run. Bot match: Init, MatchIntro, WaitForMapToLoad, PreGameWait, GameInProgress, PostGame, End. Private lobby: PostGame to None, no End | Yes | GameInProgress in the Hideout/sandbox. Required field: without it the collector publishes only its error status (`plugin_status`, `plugin_error`) |
-| `game_info.game_mode` | memory | `C_CitadelGameRules.m_eMatchMode` + `m_eGameMode`, named from the game's `ECitadelMatchMode` / `ECitadelGameMode` schema enums (prefix stripped) | PASS: private lobby `{"match_mode":"PrivateLobby","game_mode":"Normal"}`, cleared at match end | Not exercised: added on 6810 (its fields are equal in all three dumps) | Not published in the Hideout (neither value has a name there); unnamed values are left out. Field-to-enum pairing proven offline on 6810 from the field records (`m_eMatchMode` 0x18076c3bd / `ECitadelMatchMode` 0x18076c3cd; `m_eGameMode` 0x18076c3f9 / `ECitadelGameMode` 0x18076c409); `installed_build` pins the enum tables |
+| `game_info.game_mode` | memory | `C_CitadelGameRules.m_eMatchMode` + `m_eGameMode`, named by fixed tables copied from the 6810 `ECitadelMatchMode` / `ECitadelGameMode` schema enums (prefix stripped) | PASS: private lobby `{"match_mode":"PrivateLobby","game_mode":"Normal"}`, cleared at match end | Not exercised: added on 6810 (its fields are equal in all three dumps) | Not published in the Hideout (neither value has a name there); unnamed values are left out. Field-to-enum pairing proven offline on 6810 from the field records (`m_eMatchMode` 0x18076c3bd / `ECitadelMatchMode` 0x18076c3cd; `m_eGameMode` 0x18076c3f9 / `ECitadelGameMode` 0x18076c409); `installed_build` pins the enum tables |
 | `game_info.match_history` | unavailable | None: no task or provider reads it | n/a | n/a | Not attempted in Spike 3; the status table reports it `unavailable` |
 | `game_info.steam_id` | memory | The roster's local row: `CBasePlayerController.m_steamID` where `m_bIsLocalPlayerController` is set; `uw-gep`'s provider emits it when it changes | PASS: published in every run with the roster; the roster's steam ids matched all 12 API players of the real match (`verify` keys rows by them: 0 MISSING, 0 MISMATCH) | Yes | Not emitted while the roster is off (Step 5 rerun). Bots have steam id 0 |
 | `match_info.team_score` | memory | `TEAMS` pattern (team list) + `C_Team.m_iScore` per team; `C_BaseEntity.m_iTeamNum` 2 = amber, 3 = sapphire | PASS: mid-match HUD 7 / 5 = log; final 40 / 63 = scoreboard | Not exercised: added on 6810 | The game's top bar shows `m_iScore` as the team's kills (static evidence, 8b). Also published in the Hideout (0-0, then amber 1 after an owner kill). `installed_build` pins the team numbers to the game's parser |
 | `match_info.match_id` | memory | `RULES` + `C_CitadelGameRules.m_unMatchID` (0 is not emitted) | PASS: bot match 121745243 and real match 121819616 equal the scoreboard; `verify` OK | Yes | None in the Hideout/sandbox (no match there; see Decisions). Required field |
-| `match_info.roster` | memory | `TEAMS` + `ENTITIES` patterns (team list, controller handles, entity list); `C_Team.m_aPlayerControllers`, `C_BaseEntity.m_iTeamNum`, `CBasePlayerController.m_iszPlayerName` / `m_steamID` / `m_bIsLocalPlayerController`, `CCitadelPlayerController.m_PlayerDataGlobal`, `PlayerDataGlobal_t.m_nHeroID` / `m_iPlayerKills` / `m_iDeaths` / `m_iPlayerAssists` | PASS: 24/24 player rows exact (bot match by scoreboard; real match by scoreboard and API: 49 OK, 0 MISMATCH, 0 MISSING, hero rows included). The 12 team rows are UNCONFIRMED in the tool; the map was confirmed by hand | Yes | Step 5 first run published a wrong value under deliberate corruption (see Verdict); the layout check now switches the roster off instead. Keys `roster_0`..`roster_11`, one slot per player. Bots are `Bot0`..`Bot10` |
-| `match_info.items` | memory | The roster's walk + `PlayerDataGlobal_t.m_vecUpgrades` (at most 64) | Count only: local 7 = scoreboard 7 (bot match); real match 11-12 per player | Yes | Item ids were not compared with any list (`verify` does not check items). Keys `items_0`..`items_11` |
+| `match_info.roster` | memory | `TEAMS` + `ENTITIES` patterns (team list, controller handles, entity list); `C_Team.m_aPlayerControllers`, `C_BaseEntity.m_iTeamNum`, `CBasePlayerController.m_iszPlayerName` / `m_steamID` / `m_bIsLocalPlayerController`, `CCitadelPlayerController.m_PlayerDataGlobal`, `PlayerDataGlobal_t.m_nHeroID` / `m_iPlayerKills` / `m_iDeaths` / `m_iPlayerAssists` | PASS: 24/24 player rows exact (bot match by scoreboard; real match by scoreboard and API: `verify --team-map 2=0,3=1` gave 61 OK, 0 MISMATCH, 0 MISSING, 0 UNCONFIRMED, hero and team rows included) | Yes | Step 5 first run published a wrong value under deliberate corruption (see Verdict); the layout check now switches the roster off instead. Keys `roster_0`..`roster_11`, one slot per player. Bots are `Bot0`..`Bot10` |
+| `match_info.items` | memory | The roster's walk + `PlayerDataGlobal_t.m_vecUpgrades` (at most 64) | Count only: local 7 = scoreboard 7 (bot match); real match 11-12 per player (not compared) | Yes | Item ids were not compared with any list (`verify` does not check items). Keys `items_0`..`items_11` |
 | `match_info.incoming_damage` | unavailable | None. Overwolf reads the HUD object `CCitadel_Hud_DamageReport` at fixed non-schema offsets (only while the damage panel is open); the HUD's numbers arrive as user messages (`k_EUserMsg_Damage`, `k_EUserMsg_RecentDamageSummary`) | n/a | n/a | Outside the collector rules (schema fields only; QPC is the only hook). No schema field holds incoming damage per source. Post-match only: deadlock-api.com metadata has `player_damage_taken` (a total, no per-source split, no time filter) |
 | `match_info.match_outcome` | memory | `RULES` + `C_CitadelGameRules.m_iWinningTeam` (2 = AMBER, 3 = SAPPHIRE), only in PostGame and End, where the game's match-end panel shows the winner | PASS: `{"winning_team":"SAPPHIRE"}` at PostGame, scoreboard "Archmother Victorious" (1 match) | Not exercised: added on 6810 | The winning team, as Overwolf documents it, not local victory/defeat. Null in other phases; never set when leaving mid-match |
 | event `match_start` | memory (via `uw-gep`'s provider) | Provider: `phase` reaches GameInProgress with a known `match_id`; once per match id | PASS: at GameInProgress in the bot match and the real match | Yes | Never fires in the Hideout/sandbox (no match id). Data `{"match_id":"…"}` (Overwolf: null) |
@@ -244,7 +247,7 @@ unavailable.
 | event `death` | memory (via provider) | Same, `m_iDeaths` | PASS: 6 events = scoreboard 6 (bot match) | Yes | Data `{"deaths":N}` (Overwolf: null) |
 | event `assist` | memory (via provider) | Same, `m_iPlayerAssists` | PASS: 9 events = scoreboard 9 (bot match) | Yes | Data `{"assists":N}` (Overwolf: null) |
 | event `match_clock` | memory | Clock task: `CLOCK_SECONDS`, `GAME_TIME`, `ADJUST_TIME` and `CONVAR_GETTER` patterns (three ConVars, the globals, the time-adjust function, which must equal the rules vtable slot +0x220 on every read) + `C_GameRules.m_nTotalPausedTicks` / `m_nPauseStartTick` / `m_bGamePaused`, `C_CitadelGameRules.m_flGameStartTime` / `m_eGameMode` / `m_eGameState` | PASS: last value = scoreboard in the bot match (23:23) and the private lobby (26:24); real match 46:57 vs 46:58 (the final second was not published before PostGame cleared the clock); frozen during pauses | Yes (`GAME_TIME` moved from RVA 0x1975d70 to 0x1975d00 and still resolved) | The collector's `clock` event, renamed by the provider; once per second, GameInProgress only. Data `{"match_clock":"MM:SS"}` (Overwolf: "01:00"). Also the info key `match_info.match_clock` |
-| event `game_paused` | memory | Clock task: a change of `C_GameRules.m_bGamePaused` between two passes in GameInProgress; data `true` / `false` | PASS: 2 pauses gave exactly true, false, true, false (private lobby, owner host) | Not exercised: event added on 6810 | The info key `match_info.game_paused` ("true"/"false") is older and survived both patches |
+| event `game_paused` | memory | Clock task: a change of `C_GameRules.m_bGamePaused` between two passes in GameInProgress; data `true` / `false` | PASS: 2 pauses gave exactly true, false, true, false (private lobby, owner host) | Not exercised: the true/false event was added on 6810 | The info key `match_info.game_paused` ("true"/"false") is older and survived both patches, as did an older pause-only event (`{"game_paused":true}`, since C3b), which fired on both pauses of the real match (6810, unchanged f528948 build; not compared with the display) |
 | event `tower_destroyed` | memory | `C_CitadelTeam.m_nBossesAlive` (checked against `m_nBossesMax`) for teams 2 and 3 of the `TEAMS` list: one event per unit the count drops, data = the team that lost it; only in GameInProgress and Normal mode; baseline per game rules object and match id | Partly: 22 events (Amber 14, Sapphire 8); the owner-observed subset matched; the full count is unverified (Step 8) | Not exercised: added on 6810 | The field Overwolf's plugin compares (learned from its raw decompile, see Verdict). The Patron's loss falls in PostGame and fires no event. Data `"Amber"` / `"Sapphire"` (a JSON string) |
 
 - "Survived patch": the row's patterns and fields resolved on 6807 and 6810 with the code written
@@ -351,7 +354,8 @@ Data and events:
 - A torn or failed read keeps the task's last published value until the next good pass, and a
   persistent read error never switches the task off.
 - Overwolf's plugin knows fewer enum names (GameMode Normal..ExploreNYC, MatchMode
-  Unranked..Tutorial); ours emits every name the game has, such as `HeroLabs` or `Internal`.
+  Unranked..Tutorial); ours emits every name the 6810 enums have, such as `HeroLabs` or
+  `Internal`. A value added by a later build has no name and is left out.
 - The status table marks a row `supported` on its first value (`team_score` already in the
   Hideout): `supported` means seen, not verified.
 
@@ -393,7 +397,7 @@ Cost:
   (the outer return address at `[rsp+0x30]` at detour entry) was suggested and not benchmarked.
 - `InfoWriter::attach` parses the schema again and allocates on every pass, on the game thread.
 - The overrun count never decays, so 11 passes over 20 ms in a whole session switch a task off.
-  No task was switched off in any run (max pass 1.72 ms).
+  No task was switched off as slow in any run (max pass 1.72 ms).
 
 ## Not tested and why
 
@@ -406,13 +410,13 @@ Cost:
 - The main-loop patterns across a tier0/engine2 patch: no such patch landed in the window.
 - `installed_build` on 6810 with the unchanged f528948 build: not run (later builds pass; their
   changes were not patch fixes).
-- `uw-gep verify --team-map`: not rerun (3 API requests per hour); the team map was confirmed by
-  hand.
-- The `tower_destroyed` full count: the private-lobby match's metadata never came (503 twice),
-  such matches may never be published, and no matchmade match was logged with the task.
+- The `tower_destroyed` full count: the private-lobby match's metadata never came (503 three
+  times; attempts stopped), such matches may never be published, and no matchmade match was
+  logged with the task.
 - `match_outcome` for an Amber win, PostGame_PlayOfTheGame and Abandoned: not seen (one finished
   match with the task).
-- `game_paused` in a matchmade match: tested only in a private lobby as host.
+- The `game_paused` true/false event in a matchmade match: tested only in a private lobby as
+  host (the older pause-only event fired twice in the real match, not compared with the display).
 - Other game modes (StreetBrawl and others): `tower_destroyed` is gated to Normal, and the
   StreetBrawl scores are not read.
 - Item ids: only item counts were compared.
