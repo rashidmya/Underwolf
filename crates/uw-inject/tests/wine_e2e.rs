@@ -13,7 +13,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::channel;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use uw_inject::discovery::find_pids;
 
@@ -87,15 +87,19 @@ fn start_game(tag: &str) -> Fixture {
         .env("WINEDLLOVERRIDES", "mscoree,mshtml=")
         .spawn()
         .unwrap();
+    // The guard owns the game and the prefix before anything can panic: `Child` does not kill on
+    // drop, so a panic in the wait below would otherwise leak the game, its wineserver and the
+    // prefix.
+    let mut fx = Fixture { prefix, game, game_pid: 0 };
     let start = Instant::now();
-    let game_pid = loop {
-        if let Some(p) = game_pid_in(&prefix) {
+    fx.game_pid = loop {
+        if let Some(p) = game_pid_in(&fx.prefix) {
             break p;
         }
         assert!(start.elapsed() < Duration::from_secs(180), "uw-test-game.exe never started");
         std::thread::sleep(Duration::from_millis(500));
     };
-    Fixture { prefix, game, game_pid }
+    fx
 }
 
 /// Files starting with `stem` in the prefix users' `%TEMP%`
@@ -114,11 +118,21 @@ fn markers(prefix: &Path, stem: &str) -> Vec<PathBuf> {
     out
 }
 
+/// The one overlay marker in `prefix` and its mtime. The marker is `uw-test-overlay-<pid>.txt`,
+/// rewritten (`CREATE_ALWAYS`, same text) on every load in the same game, so a second load keeps
+/// the count at 1 but moves the mtime: compare stamps to prove "not loaded again".
+fn marker_stamp(prefix: &Path) -> (PathBuf, SystemTime) {
+    let found = markers(prefix, "uw-test-overlay-");
+    assert_eq!(found.len(), 1, "expected exactly one overlay marker, got {found:?}");
+    let modified = std::fs::metadata(&found[0]).and_then(|m| m.modified()).unwrap();
+    (found[0].clone(), modified)
+}
+
 /// Run `uw-inject --proton <wine-root> --exe uw-test-game.exe …` (it finds the running game by
-/// exe name), collect its printed events until one contains `until` (or `within` passes), then
-/// end it with SIGTERM — which, by design, also ends its helper. Events are read on a thread so
-/// the deadline always holds.
-fn run_inject(fx: &Fixture, until: &str, within: Duration) -> Vec<String> {
+/// exe name), collect its printed events until one contains `until` (or `within` passes), keep
+/// collecting for `linger` after that, then end it with SIGTERM — which, by design, also ends its
+/// helper. Events are read on a thread so the deadline always holds.
+fn run_inject(fx: &Fixture, until: &str, within: Duration, linger: Duration) -> Vec<String> {
     // `--proton <root>` is any Wine install with `bin/wine`; the system Wine's root is /usr.
     let proton_root = Path::new(&wine()).parent().unwrap().parent().unwrap().to_path_buf();
     let mut child = Command::new(env!("CARGO_BIN_EXE_uw-inject"))
@@ -145,16 +159,17 @@ fn run_inject(fx: &Fixture, until: &str, within: Duration) -> Vec<String> {
             }
         }
     });
-    let deadline = Instant::now() + within;
+    let mut deadline = Instant::now() + within;
+    let mut matched = false;
     let mut events = Vec::new();
     while let Some(left) = deadline.checked_duration_since(Instant::now()) {
         match rx.recv_timeout(left) {
             Ok(event) => {
-                let done = event.contains(until);
-                events.push(event);
-                if done {
-                    break;
+                if !matched && event.contains(until) {
+                    matched = true;
+                    deadline = Instant::now() + linger;
                 }
+                events.push(event);
             }
             Err(_) => break,
         }
@@ -169,16 +184,19 @@ fn run_inject(fx: &Fixture, until: &str, within: Duration) -> Vec<String> {
 #[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
 fn uw_inject_connects_and_loads_the_overlay() {
     let fx = start_game("load");
-    let events = run_inject(&fx, r#""code":"ok""#, Duration::from_secs(200));
+    let events = run_inject(&fx, r#""code":"ok""#, Duration::from_secs(200), Duration::ZERO);
     assert!(events.iter().any(|e| e.contains("bootstrap_connected")), "events: {events:?}");
     assert!(events.iter().any(|e| e.contains(r#""code":"ok""#)), "events: {events:?}");
-    assert_eq!(markers(&fx.prefix, "uw-test-overlay-").len(), 1, "the overlay marker should exist in the prefix");
+    let before = marker_stamp(&fx.prefix);
 
-    // A second uw-inject run (client restart) reconnects without reloading the overlay.
-    let events2 = run_inject(&fx, "bootstrap_connected", Duration::from_secs(60));
+    // A second uw-inject run (client restart) reconnects without reloading the overlay. It stays
+    // up for a few seconds after `bootstrap_connected`, so a wrongly sent `load_overlay` would have
+    // time to report its `status` and rewrite the marker.
+    let events2 = run_inject(&fx, "bootstrap_connected", Duration::from_secs(60), Duration::from_secs(3));
     assert!(
         events2.iter().any(|e| e.contains("bootstrap_connected") && e.contains(r#""overlay_loaded":true"#)),
         "events2: {events2:?}"
     );
-    assert_eq!(markers(&fx.prefix, "uw-test-overlay-").len(), 1, "the overlay must not load twice");
+    assert!(!events2.iter().any(|e| e.contains(r#""event":"status""#)), "reloaded after a restart: {events2:?}");
+    assert_eq!(marker_stamp(&fx.prefix), before, "the overlay marker was rewritten (a second load)");
 }

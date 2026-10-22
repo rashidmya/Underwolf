@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 fn wine() -> String {
     std::env::var("UW_WINE").unwrap_or_else(|_| "/usr/bin/wine".into())
@@ -105,6 +105,40 @@ fn markers(pfx: &Prefix, stem: &str) -> Vec<PathBuf> {
     out
 }
 
+/// The one overlay marker in `pfx` and its mtime. The marker is `uw-test-overlay-<pid>.txt`,
+/// rewritten (`CREATE_ALWAYS`, same text) on every load in the same game, so a second load keeps
+/// the count at 1 but moves the mtime: compare stamps to prove "not loaded again".
+fn marker_stamp(pfx: &Prefix) -> (PathBuf, SystemTime) {
+    let found = markers(pfx, "uw-test-overlay-");
+    assert_eq!(found.len(), 1, "expected exactly one overlay marker, got {found:?}");
+    let modified = std::fs::metadata(&found[0]).and_then(|m| m.modified()).unwrap();
+    (found[0].clone(), modified)
+}
+
+/// Wait up to `within` until the game runs in `pfx`: a process whose argv0 basename is
+/// `uw-test-game.exe` (Wine sets argv0 to the Windows path) and whose environment has this
+/// prefix's `WINEPREFIX`. Then the helper's window timeout measures only "found, no window".
+fn wait_game_in(pfx: &Prefix, within: Duration) {
+    let want = format!("WINEPREFIX={}", pfx.dir.display());
+    let running = || {
+        std::fs::read_dir("/proc").into_iter().flatten().flatten().any(|e| {
+            let proc_dir = e.path();
+            let named = std::fs::read(proc_dir.join("cmdline")).is_ok_and(|c| {
+                let argv0 = String::from_utf8_lossy(c.split(|&b| b == 0).next().unwrap_or_default()).into_owned();
+                argv0.rsplit(['\\', '/']).next().is_some_and(|b| b.eq_ignore_ascii_case("uw-test-game.exe"))
+            });
+            named
+                && std::fs::read(proc_dir.join("environ"))
+                    .is_ok_and(|env| env.split(|&b| b == 0).any(|v| v == want.as_bytes()))
+        })
+    };
+    let start = Instant::now();
+    while !running() {
+        assert!(start.elapsed() < within, "uw-test-game.exe never started in {}", pfx.dir.display());
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 /// A running `uw-helper64.exe`: its JSON-lines events arrive on a channel from a reader thread,
 /// its stderr diagnostics accumulate in a shared buffer (so a test can assert which hook fired or
 /// that the hook was skipped), commands go to its stdin. Dropping it kills the helper.
@@ -116,9 +150,25 @@ struct Helper {
 }
 
 impl Helper {
-    /// The next JSON-lines event, or a test failure after `within`.
+    /// The next JSON-lines event, or a test failure (with the helper's stderr) after `within`.
     fn next_event(&self, within: Duration) -> String {
-        self.events.recv_timeout(within).unwrap_or_else(|_| panic!("no helper event within {within:?}"))
+        self.events
+            .recv_timeout(within)
+            .unwrap_or_else(|_| panic!("no helper event within {within:?}; stderr: {:?}", self.stderr_lines()))
+    }
+
+    /// The next event, which must contain `needle`. A mismatch fails with the event and the
+    /// helper's stderr, so a Wine flake can be diagnosed from the test output alone.
+    fn expect_event(&self, needle: &str, within: Duration) -> String {
+        let event = self.next_event(within);
+        assert!(event.contains(needle), "expected {needle} in: {event}; stderr: {:?}", self.stderr_lines());
+        event
+    }
+
+    /// A copy of the stderr lines so far (copied, so a failing assert never panics while holding
+    /// the lock the reader thread needs).
+    fn stderr_lines(&self) -> Vec<String> {
+        self.stderr.lock().unwrap().clone()
     }
 
     fn send(&mut self, line: &str) {
@@ -205,7 +255,15 @@ fn helper_connects_loads_overlay_and_reports_ok() {
     assert!(
         helper.wait_stderr("hooked WH_GETMESSAGE", Duration::from_secs(5)),
         "expected the WH_GETMESSAGE hook; stderr: {:?}",
-        helper.stderr.lock().unwrap()
+        helper.stderr_lines()
+    );
+    // `hooked …` is logged when the hook is set, not when it fires: if WH_GETMESSAGE never fired,
+    // the WH_CALLWNDPROC fallback would connect instead. Both lines precede the event, so 1 s of
+    // grace for the stderr reader is plenty.
+    assert!(
+        !helper.wait_stderr("hooked WH_CALLWNDPROC", Duration::from_secs(1)),
+        "connected only through the WH_CALLWNDPROC fallback; stderr: {:?}",
+        helper.stderr_lines()
     );
 
     helper.send(&load_overlay_line(&overlay));
@@ -225,14 +283,15 @@ fn reloading_the_same_path_is_already_loaded_and_another_is_already_loaded_other
     let other = to_wine_path(&win_artifact("uw_bootstrap64.dll")); // a different, existing DLL
 
     let mut helper = start_helper(&pfx, &[], &[]);
-    assert!(helper.next_event(Duration::from_secs(200)).contains("bootstrap_connected"));
+    helper.expect_event("bootstrap_connected", Duration::from_secs(200));
 
     helper.send(&load_overlay_line(&overlay));
-    assert!(helper.next_event(Duration::from_secs(30)).contains(r#""code":"ok""#));
+    helper.expect_event(r#""code":"ok""#, Duration::from_secs(30));
     helper.send(&load_overlay_line(&overlay));
-    assert!(helper.next_event(Duration::from_secs(30)).contains(r#""code":"already_loaded""#));
+    // The closing quote keeps this from matching `already_loaded_other`.
+    helper.expect_event(r#""code":"already_loaded""#, Duration::from_secs(30));
     helper.send(&load_overlay_line(&other));
-    assert!(helper.next_event(Duration::from_secs(30)).contains(r#""code":"already_loaded_other""#));
+    helper.expect_event(r#""code":"already_loaded_other""#, Duration::from_secs(30));
 }
 
 #[test]
@@ -246,22 +305,26 @@ fn a_new_helper_reuses_the_pinned_bootstrap_without_rehooking() {
     // helper, start a new one"); its pipe and helper mutex go with it.
     {
         let mut first = start_helper(&pfx, &[], &[]);
-        assert!(first.next_event(Duration::from_secs(200)).contains("bootstrap_connected"));
+        first.expect_event("bootstrap_connected", Duration::from_secs(200));
         first.send(&load_overlay_line(&overlay));
-        assert!(first.next_event(Duration::from_secs(30)).contains(r#""code":"ok""#));
+        first.expect_event(r#""code":"ok""#, Duration::from_secs(30));
     }
+    let before = marker_stamp(&pfx);
 
     // Helper 2: the marker mutex exists, so it skips the hook, and the pinned bootstrap reconnects
     // with overlay_loaded: true (design "Reconnect after a client restart").
     let second = start_helper(&pfx, &[], &[]);
-    let connected = second.next_event(Duration::from_secs(60));
-    assert!(connected.contains("bootstrap_connected"), "got: {connected}");
+    let connected = second.expect_event("bootstrap_connected", Duration::from_secs(60));
     assert!(connected.contains(r#""overlay_loaded":true"#), "got: {connected}");
     // It reused the pinned bootstrap without re-hooking (design: "no new hook").
-    assert!(second.wait_stderr("marker present; skipping hook", Duration::from_secs(5)));
+    assert!(
+        second.wait_stderr("marker present; skipping hook", Duration::from_secs(5)),
+        "expected the hook to be skipped; stderr: {:?}",
+        second.stderr_lines()
+    );
 
-    // The overlay was not loaded a second time: still exactly one marker file.
-    assert_eq!(markers(&pfx, "uw-test-overlay-").len(), 1);
+    // The overlay was not loaded a second time: the same single marker, not rewritten.
+    assert_eq!(marker_stamp(&pfx), before, "the overlay marker was rewritten (a second load)");
 }
 
 #[test]
@@ -272,12 +335,24 @@ fn forced_callwndproc_fallback_also_connects_and_loads() {
     let overlay = to_wine_path(&win_artifact("uw_test_overlay.dll"));
 
     let mut helper = start_helper(&pfx, &["--fallback"], &[]);
-    assert!(helper.next_event(Duration::from_secs(200)).contains("bootstrap_connected"));
+    helper.expect_event("bootstrap_connected", Duration::from_secs(200));
     // The connection must have come through WH_CALLWNDPROC, not a WH_GETMESSAGE fallback after a
-    // timeout (design "forced WH_CALLWNDPROC"; the wake-ups make it fire — I1).
-    assert!(helper.wait_stderr("hooked WH_CALLWNDPROC", Duration::from_secs(5)));
+    // timeout (design "forced WH_CALLWNDPROC"; the wake-ups make it fire). `hooked …` is logged
+    // when a hook is set, not when it fires, so also require that WH_GETMESSAGE was never set:
+    // with a WH_CALLWNDPROC that cannot fire, the helper would unhook it after the hello timeout
+    // and connect through WH_GETMESSAGE. Both lines precede the event; 1 s of grace is plenty.
+    assert!(
+        helper.wait_stderr("hooked WH_CALLWNDPROC", Duration::from_secs(5)),
+        "expected the WH_CALLWNDPROC hook; stderr: {:?}",
+        helper.stderr_lines()
+    );
+    assert!(
+        !helper.wait_stderr("hooked WH_GETMESSAGE", Duration::from_secs(1)),
+        "connected only through the WH_GETMESSAGE fallback; stderr: {:?}",
+        helper.stderr_lines()
+    );
     helper.send(&load_overlay_line(&overlay));
-    assert!(helper.next_event(Duration::from_secs(30)).contains(r#""code":"ok""#));
+    helper.expect_event(r#""code":"ok""#, Duration::from_secs(30));
 }
 
 #[test]
@@ -287,11 +362,14 @@ fn a_game_without_a_window_reports_no_window() {
     pfx.game = Some(
         wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).arg("--no-window").spawn().unwrap(),
     );
-    // A short window timeout instead of the 120 s default; the prefix boot still counts against
-    // the overall event deadline below.
+    // `run` also reports `no_window` when it never *finds* the game within the window timeout.
+    // Wait until the game runs in this prefix (the first run boots the prefix) before starting the
+    // helper, so the short timeout below only covers "found, but no window".
+    wait_game_in(&pfx, Duration::from_secs(180));
+    // A short window timeout instead of the 120 s default.
     let helper = start_helper(&pfx, &[], &[("UW_WINDOW_TIMEOUT_MS", "8000")]);
-    let event = helper.next_event(Duration::from_secs(200));
-    assert!(event.contains(r#""event":"error""#) && event.contains(r#""code":"no_window""#), "got: {event}");
+    let event = helper.expect_event(r#""code":"no_window""#, Duration::from_secs(60));
+    assert!(event.contains(r#""event":"error""#), "got: {event}");
 }
 
 #[test]
@@ -303,9 +381,9 @@ fn an_overlay_without_the_export_reports_no_start_export() {
     let no_export = to_wine_path(&win_artifact("uw_bootstrap64.dll"));
 
     let mut helper = start_helper(&pfx, &[], &[]);
-    assert!(helper.next_event(Duration::from_secs(200)).contains("bootstrap_connected"));
+    helper.expect_event("bootstrap_connected", Duration::from_secs(200));
     helper.send(&load_overlay_line(&no_export));
-    assert!(helper.next_event(Duration::from_secs(30)).contains(r#""code":"no_start_export""#));
+    helper.expect_event(r#""code":"no_start_export""#, Duration::from_secs(30));
 }
 
 #[test]
@@ -316,9 +394,9 @@ fn killing_the_game_reports_game_exited() {
     let overlay = to_wine_path(&win_artifact("uw_test_overlay.dll"));
 
     let mut helper = start_helper(&pfx, &[], &[]);
-    assert!(helper.next_event(Duration::from_secs(200)).contains("bootstrap_connected"));
+    helper.expect_event("bootstrap_connected", Duration::from_secs(200));
     helper.send(&load_overlay_line(&overlay));
-    assert!(helper.next_event(Duration::from_secs(30)).contains(r#""code":"ok""#));
+    helper.expect_event(r#""code":"ok""#, Duration::from_secs(30));
 
     // Kill the game while the helper is idle on stdin; the watcher thread must notice and report
     // `game_exited` (design failure table), without waiting for the next stdin command.
