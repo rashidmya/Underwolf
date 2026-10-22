@@ -8,7 +8,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::exe_matches;
+use crate::{exe_matches, to_wine_path};
 
 /// The Proton `files` directory (holding `bin/wine`) from a prefix's `config_info`, whose lines
 /// name paths under it such as `.../Proton 11.0/files/lib/`.
@@ -181,4 +181,23 @@ impl GameSession {
         }
         cmd
     }
+}
+
+/// `wine <helper> <game-exe> --bootstrap <Z:…bootstrap> [--fallback]` in the game's Wine session.
+pub fn helper_command(
+    session: &GameSession,
+    helper: &Path,
+    game_exe: &str,
+    bootstrap: &Path,
+    force_fallback: bool,
+) -> Command {
+    let mut args = vec![
+        OsString::from(game_exe),
+        OsString::from("--bootstrap"),
+        OsString::from(to_wine_path(bootstrap)),
+    ];
+    if force_fallback {
+        args.push(OsString::from("--fallback"));
+    }
+    session.wine(helper, &args)
 }
