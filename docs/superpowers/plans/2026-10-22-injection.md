@@ -22,15 +22,19 @@ New crates in `crates/` (workspace `members` gains `"crates/*"`). `spikes/` is u
 
 | Path | Builds | Responsibility |
 |---|---|---|
-| `crates/uw-pipe-proto/src/lib.rs` | library (Linux + Windows) | `pub mod pipe` (fixed-layout binary header + payloads, limits, encode/decode, every rejection) and `pub mod jsonl` (serde Command/Event line types). |
+| `crates/uw-pipe-proto/src/lib.rs` | library (Linux + Windows) | Declares `pub mod pipe`, `pub mod jsonl`, `pub mod names`. |
+| `crates/uw-pipe-proto/src/pipe.rs` | (same crate) | Fixed-layout binary header + payloads, limits, encode/decode, every rejection. |
+| `crates/uw-pipe-proto/src/jsonl.rs` | (same crate) | serde `Command`/`Event` JSON line types. |
+| `crates/uw-pipe-proto/src/names.rs` | (same crate) | Per-game pipe and mutex names (shared by helper and bootstrap). |
 | `crates/uw-pipe-proto/tests/pipe.rs` | test (Linux) | Round trips and every rejection. |
 | `crates/uw-pipe-proto/tests/jsonl.rs` | test (Linux) | JSON line parse/emit. |
 | `crates/uw-inject/src/lib.rs` | Linux library | Re-exports discovery/path helpers and `pub mod driver` (portable JSON-lines driving). |
 | `crates/uw-inject/src/discovery.rs` | Linux library | Ported `/proc` + `config_info` + `wine_env` + `server_socket` + `to_wine_path` + `exe_matches` + `find_pids` + `GameSession`. |
 | `crates/uw-inject/src/bin/uw-inject.rs` | `uw-inject` CLI (Linux) | Find game, spawn helper in its Wine session, drive JSON lines. |
-| `crates/uw-inject/tests/discovery.rs` | test (Linux) | Path/config/env/exe/`find_pids` parsing. |
+| `crates/uw-inject/tests/discovery.rs` | test (Linux) | Path/config/env/exe/`find_pids` parsing, `GameError` codes, the `Driver`. |
+| `crates/uw-inject/tests/cli.rs` | test (Linux) | `helper_command` construction. |
 | `crates/uw-inject/tests/wine_e2e.rs` | test (Linux, ignored) | Full `uw-inject` → helper → bootstrap → overlay chain under plain Wine. |
-| `crates/uw-helper/src/lib.rs` | library (Linux + Windows) | `pub mod decide` (the portable `Win32` trait + state machine) and shared name helpers. |
+| `crates/uw-helper/src/lib.rs` | library (Linux + Windows) | Declares `pub mod decide` (the portable `Win32` trait + state machine); the shared names live in `uw-pipe-proto::names`. |
 | `crates/uw-helper/src/decide.rs` | library | Wait/hook/fallback/skip-on-marker/timeouts/version decision logic. |
 | `crates/uw-helper/src/bin/uw-helper64.rs` | `uw-helper64.exe` | `cfg(windows)` real `Win32` impl (window/thread lookup, hook, pipe server, mutexes) + JSON lines on stdin/stdout. |
 | `crates/uw-helper/tests/decide.rs` | test (Linux) | Every decision branch against a fake `Win32`. |
@@ -39,7 +43,7 @@ New crates in `crates/` (workspace `members` gains `"crates/*"`). `spikes/` is u
 | `crates/uw-bootstrap/src/win.rs` | (same crate) | `cfg(windows)` hook proc, pin, worker thread, marker mutex, pipe connect, overlay load. |
 | `crates/uw-bootstrap/src/state.rs` | (same crate) | Portable overlay-load decision (`ok`/`already_loaded`/`already_loaded_other`). |
 | `crates/uw-bootstrap/tests/state.rs` | test (Linux) | The overlay-load decision. |
-| `crates/uw-test-overlay/src/lib.rs` | test DLL | `uw_overlay_start` writes `%TEMP%\uw-test-overlay-<pid>.txt`; a `no-export` build variant for `no_start_export`. |
+| `crates/uw-test-overlay/src/lib.rs` | test DLL | `uw_overlay_start` writes `%TEMP%\uw-test-overlay-<pid>.txt` (catching its own panics). The `no_start_export` test loads `uw_bootstrap64.dll` (a real DLL without that export), so no separate no-export build is needed. |
 | `crates/uw-test-game/src/main.rs` | test exe | One visible top-level window + standard message loop; `--no-window` mode. |
 
 **Shared names** (one definition, in `uw-pipe-proto::names`, used by both the helper and the bootstrap): pipe `\\.\pipe\underwolf-<pid>`, helper mutex `Local\underwolf-helper-<pid>`, marker mutex `Local\underwolf-bootstrap-<pid>`, where `<pid>` is the game's **Windows (Wine)** process id. `PROTOCOL_VERSION = 1` (in `uw-pipe-proto::pipe`). Bootstrap hook export name `uw_bootstrap_hook`. Overlay export `uw_overlay_start`. `StartParams { size: u32, version: u32, pid: u32 }`, `START_PARAMS_VERSION = 1`. (`uw-helper` is created minimal in Task 1, before `uw-pipe-proto` exists, and gains its `uw-pipe-proto` dependency in Task 4.)
@@ -273,13 +277,17 @@ pub extern "system" fn DllMain(_inst: HINSTANCE, reason: u32, _reserved: *mut co
 /// Matches the Win32 `HOOKPROC` ABI; called by the OS.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn uw_bootstrap_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if !STARTED.swap(true, Ordering::AcqRel) {
-        pin_self();
-        // One worker thread; nothing else runs on the game's thread.
-        let _ = std::thread::Builder::new()
-            .name("uw-bootstrap".into())
-            .spawn(worker);
-    }
+    // No Rust panic may cross this FFI boundary (since Rust 1.81 it aborts, which would kill the
+    // game). Catch it; the call always ends in `CallNextHookEx`.
+    let _ = std::panic::catch_unwind(|| {
+        if !STARTED.swap(true, Ordering::AcqRel) {
+            pin_self();
+            // One worker thread; nothing else runs on the game's thread.
+            let _ = std::thread::Builder::new()
+                .name("uw-bootstrap".into())
+                .spawn(worker);
+        }
+    });
     // SAFETY: `CallNextHookEx` with a null hook handle forwards to the next hook (design: always).
     unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
 }
@@ -408,6 +416,7 @@ fn main() {
 
 #[cfg(windows)]
 mod win {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::time::{Duration, Instant};
 
     use windows_sys::Win32::Foundation::{HWND, LPARAM, MAX_PATH, RECT};
@@ -420,8 +429,8 @@ mod win {
     use windows_sys::Win32::Storage::FileSystem::GetTempPathW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindow, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible,
-        PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx, GW_OWNER, HHOOK, HOOKPROC,
-        WH_CALLWNDPROC, WH_GETMESSAGE, WM_NULL,
+        PostThreadMessageW, SendNotifyMessageW, SetWindowsHookExW, UnhookWindowsHookEx, GW_OWNER,
+        HHOOK, HOOKPROC, WH_CALLWNDPROC, WH_GETMESSAGE, WINDOWS_HOOK_ID, WM_NULL,
     };
     use windows_sys::Win32::Foundation::{HMODULE, LRESULT, WPARAM};
 
@@ -457,38 +466,43 @@ mod win {
         pid: u32,
         best_area: i64,
         thread: u32,
+        hwnd: HWND,
     }
 
     unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> windows_sys::core::BOOL {
-        // SAFETY: `lparam` points at the caller's `Found`.
-        let f = unsafe { &mut *(lparam as *mut Found) };
-        let mut pid = 0u32;
-        // SAFETY: `hwnd` from EnumWindows; writes one u32.
-        let thread = unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
-        // SAFETY: querying visibility/owner/rect of an enumerated top-level window.
-        unsafe {
-            if pid == f.pid && IsWindowVisible(hwnd) != 0 && GetWindow(hwnd, GW_OWNER).is_null() {
-                let mut r: RECT = std::mem::zeroed();
-                if GetWindowRect(hwnd, &mut r) != 0 {
-                    let area = (r.right - r.left) as i64 * (r.bottom - r.top) as i64;
-                    if area > f.best_area {
-                        f.best_area = area;
-                        f.thread = thread;
+        // No Rust panic may cross this FFI boundary: catch and keep enumerating.
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            // SAFETY: `lparam` points at the caller's `Found`.
+            let f = unsafe { &mut *(lparam as *mut Found) };
+            let mut pid = 0u32;
+            // SAFETY: `hwnd` from EnumWindows; writes one u32.
+            let thread = unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+            // SAFETY: querying visibility/owner/rect of an enumerated top-level window.
+            unsafe {
+                if pid == f.pid && IsWindowVisible(hwnd) != 0 && GetWindow(hwnd, GW_OWNER).is_null() {
+                    let mut r: RECT = std::mem::zeroed();
+                    if GetWindowRect(hwnd, &mut r) != 0 {
+                        let area = (r.right - r.left) as i64 * (r.bottom - r.top) as i64;
+                        if area > f.best_area {
+                            f.best_area = area;
+                            f.thread = thread;
+                            f.hwnd = hwnd;
+                        }
                     }
                 }
             }
-        }
+        }));
         1 // keep enumerating
     }
 
-    /// The thread that owns the game's largest visible top-level window without an owner.
-    fn ui_thread(pid: u32) -> Option<u32> {
-        let mut f = Found { pid, best_area: 0, thread: 0 };
+    /// The thread and window of the game's largest visible top-level window without an owner.
+    fn ui_thread(pid: u32) -> Option<(u32, HWND)> {
+        let mut f = Found { pid, best_area: 0, thread: 0, hwnd: std::ptr::null_mut() };
         // SAFETY: the callback only writes through `&mut f`.
         unsafe {
             EnumWindows(Some(enum_cb), &mut f as *mut Found as LPARAM);
         }
-        (f.thread != 0).then_some(f.thread)
+        (f.thread != 0).then_some((f.thread, f.hwnd))
     }
 
     fn proof_path(pid: u32) -> std::path::PathBuf {
@@ -520,10 +534,10 @@ mod win {
         }
 
         let start = Instant::now();
-        let (pid, thread) = loop {
+        let (pid, thread, hwnd) = loop {
             if let Some(pid) = find_game(&exe) {
-                if let Some(t) = ui_thread(pid) {
-                    break (pid, t);
+                if let Some((t, h)) = ui_thread(pid) {
+                    break (pid, t, h);
                 }
             }
             if start.elapsed() > Duration::from_secs(120) {
@@ -565,16 +579,33 @@ mod win {
                 println!("hook_failed {}", last_error());
                 return 4;
             }
-            return wait_proof(pid, thread, hook2);
+            eprintln!("[uw-helper64] hooked {} thread={thread}", hook_name(other));
+            return wait_proof(pid, thread, hwnd, hook2);
         }
-        wait_proof(pid, thread, hook)
+        eprintln!("[uw-helper64] hooked {} thread={thread}", hook_name(kind));
+        wait_proof(pid, thread, hwnd, hook)
     }
 
-    fn wait_proof(pid: u32, thread: u32, hook: HHOOK) -> i32 {
-        // Wake the UI thread so its next GetMessage/PeekMessage runs the hook.
+    fn hook_name(kind: WINDOWS_HOOK_ID) -> &'static str {
+        if kind == WH_CALLWNDPROC { "WH_CALLWNDPROC" } else { "WH_GETMESSAGE" }
+    }
+
+    /// Wake the UI thread so the next message pump runs the hook: a posted `WM_NULL`
+    /// (`WH_GETMESSAGE`) and a sent `WM_NULL` to the main window (`WH_CALLWNDPROC`, which only
+    /// fires on sent messages).
+    fn wake(thread: u32, hwnd: HWND) {
+        // SAFETY: posts/sends WM_NULL to the UI thread and its window.
+        unsafe {
+            PostThreadMessageW(thread, WM_NULL, 0, 0);
+            if !hwnd.is_null() {
+                SendNotifyMessageW(hwnd, WM_NULL, 0, 0);
+            }
+        }
+    }
+
+    fn wait_proof(pid: u32, thread: u32, hwnd: HWND, hook: HHOOK) -> i32 {
         for _ in 0..5 {
-            // SAFETY: posts WM_NULL to the UI thread.
-            unsafe { PostThreadMessageW(thread, WM_NULL, 0, 0) };
+            wake(thread, hwnd);
         }
         let path = proof_path(pid);
         let start = Instant::now();
@@ -585,8 +616,7 @@ mod win {
             if start.elapsed() > Duration::from_secs(10) {
                 break false;
             }
-            // SAFETY: keep nudging the thread.
-            unsafe { PostThreadMessageW(thread, WM_NULL, 0, 0) };
+            wake(thread, hwnd); // re-wake every 200 ms, as the design's "despite wake-ups" requires
             std::thread::sleep(Duration::from_millis(200));
         };
         // SAFETY: the pin keeps the bootstrap loaded after unhooking.
@@ -607,7 +637,7 @@ mod win {
 }
 ```
 
-- [ ] **Step 5: Write the Wine proof test (red)**
+- [ ] **Step 5: Write the Wine proof test**
 
 `crates/uw-helper/tests/wine_e2e.rs`:
 
@@ -619,7 +649,7 @@ mod win {
 //!
 //! Ignored by default (needs Wine and the Windows artifacts). Build and run:
 //!   cargo build --release --target x86_64-pc-windows-gnu -p uw-test-game -p uw-bootstrap -p uw-helper
-//!   cargo test -p uw-helper --test wine_e2e -- --ignored
+//!   xvfb-run -a cargo test -p uw-helper --test wine_e2e -- --ignored --test-threads=1
 //! `UW_WINE` overrides the `wine` binary (default `/usr/bin/wine`); `UW_WINESERVER` the
 //! `wineserver` (default `/usr/bin/wineserver`). The scratch prefix goes under the system temp.
 
@@ -687,31 +717,32 @@ fn setup(tag: &str) -> Prefix {
 }
 
 /// Runs a Windows program in the game's scratch prefix (same wineserver as the game).
+/// `WINEDLLOVERRIDES=mscoree,mshtml=` disables the Mono/Gecko installer prompts on a fresh prefix.
 fn wine_cmd(pfx: &Prefix, program: &Path) -> Command {
     let mut c = Command::new(wine());
-    c.arg(program).env("WINEPREFIX", &pfx.dir).env("WINEDEBUG", "-all");
+    c.arg(program)
+        .env("WINEPREFIX", &pfx.dir)
+        .env("WINEDEBUG", "-all")
+        .env("WINEDLLOVERRIDES", "mscoree,mshtml=");
     c
 }
 
-/// The marker files the bootstrap/overlay write to `%TEMP%` land in the prefix's own temp
-/// directory (e.g. `drive_c/users/<user>/AppData/Local/Temp/`). Setting `TEMP` to a `Z:` path does
-/// NOT reliably redirect them under Wine, so the test reads them back by walking the prefix
-/// (design: "the test reads it through the prefix"). Returns every file whose name starts `stem`.
+/// Files starting with `stem` in the prefix users' `%TEMP%`
+/// (`drive_c/users/<user>/AppData/Local/Temp`). This is what the design means by "read it through
+/// the prefix". **No recursion:** a Wine prefix has `dosdevices/z: -> /`, so a recursive walk that
+/// follows directory symlinks escapes into the whole filesystem (and into every other prefix's
+/// `z:`) and never finishes — which hangs the test and skips its `Drop` cleanup.
 fn markers(pfx: &Prefix, stem: &str) -> Vec<PathBuf> {
-    fn walk(dir: &Path, stem: &str, out: &mut Vec<PathBuf>) {
-        let Ok(rd) = std::fs::read_dir(dir) else { return };
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                walk(&p, stem, out);
-            } else if e.file_name().to_string_lossy().starts_with(stem) {
-                out.push(p);
+    let mut out = Vec::new();
+    for user in std::fs::read_dir(pfx.dir.join("drive_c/users")).into_iter().flatten().flatten() {
+        let temp = user.path().join("AppData/Local/Temp");
+        for e in std::fs::read_dir(&temp).into_iter().flatten().flatten() {
+            if e.file_name().to_string_lossy().starts_with(stem) {
+                out.push(e.path());
             }
         }
     }
-    let mut v = Vec::new();
-    walk(&pfx.dir, stem, &mut v);
-    v
+    out
 }
 
 #[test]
@@ -761,29 +792,42 @@ impl WaitTimeout for Child {
 
 - [ ] **Step 6: Build the Windows artifacts and run the proof (expect green under Wine)**
 
-Run:
+Run (under Xvfb so no game window reaches the screen, and single-threaded so only one prefix boots):
 ```bash
 cargo build --release --target x86_64-pc-windows-gnu -p uw-test-game -p uw-bootstrap -p uw-helper
-cargo test -p uw-helper --test wine_e2e -- --ignored
+xvfb-run -a cargo test -p uw-helper --test wine_e2e -- --ignored --test-threads=1
 ```
-Expected: `hook_loads_bootstrap_into_the_game ... ok` and `test result: ok. 1 passed`. The helper's stderr shows `pid … ui thread …`; its stdout line begins `proof `.
+Expected: `hook_loads_bootstrap_into_the_game ... ok` and `test result: ok. 1 passed`. The helper's stderr shows `pid … ui thread …` and `hooked WH_GETMESSAGE thread=…`; its stdout line begins `proof `.
 
-**If the test fails with `no_proof`**, edit the helper to force the fallback (`--fallback`, i.e. `WH_CALLWNDPROC`) and rerun. **If neither hook produces the proof file under Wine, STOP: report to the owner that the Wine hook mechanism does not load the DLL into the target, per the design's gate. Do not continue.**
+**If the test fails with `no_proof`**, rerun with `--fallback` (the helper flag that forces `WH_CALLWNDPROC`). **If neither hook produces the proof file under Wine, STOP: report to the owner that the Wine hook mechanism does not load the DLL into the target, per the design's gate. Do not continue.**
 
 - [ ] **Step 7: Owner live check in Deadlock**
 
-Ask the owner to run (Deadlock running under Proton 11.0; build the artifacts first as in Step 6, then copy the three files next to each other so `uw-helper64.exe` can `LoadLibraryW` the bootstrap by the `Z:` path given):
+Ask the owner to run this from the repo root, with Deadlock running under Proton 11.0. It records the game build, joins the game's exact Wine session (prefix **and** every `WINE*SYNC` — Proton 11.0 sets `WINEFSYNC=1`, which must match the running wineserver), and checks the proof file and that the game survives:
 
 ```bash
-# Owner live check (Deadlock must be running):
+# From the repo root, Deadlock running under Proton 11.0:
+grep ClientVersion ~/.local/share/Steam/steamapps/common/Deadlock/game/citadel/steam.inf
+#   expect one line, e.g. ClientVersion=6813 (record it with the result)
+GAME=$(pgrep -x deadlock.exe); echo "$GAME"        # the Wine game process (comm); expect one pid
+export $(tr '\0' '\n' </proc/$GAME/environ | grep -E '^(WINEPREFIX|WINE[A-Z]*SYNC)=')
+echo "$WINEPREFIX $WINEFSYNC"                      # expect …/compatdata/1422450/pfx/ 1
 cargo build --release --target x86_64-pc-windows-gnu -p uw-bootstrap -p uw-helper
-WINE="$HOME/.local/share/Steam/steamapps/common/Proton 11.0/files/bin/wine"
-PFX="$(cat /proc/$(pgrep -f deadlock.exe | head -1)/environ | tr '\0' '\n' | sed -n 's/^WINEPREFIX=//p')"
-WINEPREFIX="$PFX" WINEDEBUG=-all "$WINE" \
+WINEDEBUG=-all "$HOME/.local/share/Steam/steamapps/common/Proton 11.0/files/bin/wine" \
     target/x86_64-pc-windows-gnu/release/uw-helper64.exe deadlock.exe \
     --bootstrap "Z:$(pwd | sed 's#/#\\#g')\\target\\x86_64-pc-windows-gnu\\release\\uw_bootstrap64.dll"
+#   expect stdout: proof C:\users\steamuser\AppData\Local\Temp\uw-bootstrap-proof-<pid>.txt
+#   and stderr: [uw-helper64] hooked WH_GETMESSAGE|WH_CALLWNDPROC thread=…
+ls "$WINEPREFIX"drive_c/users/steamuser/AppData/Local/Temp/uw-bootstrap-proof-*.txt  # expect 1 file
+pgrep -x deadlock.exe                              # expect the same pid: the game still runs
 ```
-Expected: the helper prints `proof <…\uw-bootstrap-proof-<pid>.txt>` and exits 0, the proof file exists in Deadlock's Wine `%TEMP%`, and **Deadlock keeps running normally**. If it prints `no_proof`, retry with `--fallback` appended. **If both fail, STOP and report to the owner.**
+Expected: the helper prints the `proof …` line and exits 0, the proof file exists, the stderr line names which hook fired, and **Deadlock keeps running normally**. If it prints `no_proof`, rerun with `--fallback` appended (its wake-ups — fixed per I1 — make `WH_CALLWNDPROC` fire). **If both fail, STOP and report to the owner.**
+
+> Note on "nothing thrown away": Task 6 rewrites this minimal `uw-helper64` bin into the full
+> `RealWin32` helper and deletes this proof test, since the real helper serves the pipe instead of
+> writing a proof file. That is the one place Task 1 code is replaced rather than grown; the hook
+> logic itself (find game → find UI thread → load bootstrap into self → `SetWindowsHookExW` → wake)
+> moves into `RealWin32` intact.
 
 - [ ] **Step 8: Commit**
 
@@ -868,7 +912,9 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Write the binary-protocol tests first (red)**
+- [ ] **Step 2: Write the binary-protocol tests first**
+
+(Throughout this plan, a "write the tests first" step is the TDD red step: the test is written before the code it calls, so running it now fails to compile — that is the expected red state. The step right after it adds the implementation and runs the tests green.)
 
 `crates/uw-pipe-proto/tests/pipe.rs`:
 
@@ -936,12 +982,11 @@ fn bad_magic_is_rejected() {
 
 #[test]
 fn oversize_payload_is_rejected() {
-    // A header claiming more than MAX_PAYLOAD payload bytes.
     let mut header = Vec::new();
     header.extend_from_slice(b"UWP1");
-    header.extend_from_slice(&3u16.to_le_bytes()); // type = status
+    header.extend_from_slice(&3u16.to_le_bytes());
     header.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
-    header.extend_from_slice(&0u32.to_le_bytes()); // pid
+    header.extend_from_slice(&0u32.to_le_bytes());
     header.extend_from_slice(&((MAX_PAYLOAD + 1) as u32).to_le_bytes());
     assert!(matches!(decode(&header), Err(ProtoError::PayloadTooLarge)));
 }
@@ -949,9 +994,8 @@ fn oversize_payload_is_rejected() {
 #[test]
 fn overlong_path_length_prefix_is_rejected() {
     let long = "A".repeat(MAX_PATH_UNITS + 1);
-    // decode: a load_overlay whose path length prefix exceeds the cap (encode caps by truncating).
     let mut payload = Vec::new();
-    payload.extend_from_slice(&7u32.to_le_bytes()); // request id
+    payload.extend_from_slice(&7u32.to_le_bytes());
     payload.extend_from_slice(&((MAX_PATH_UNITS + 1) as u16).to_le_bytes());
     for u in long.encode_utf16() {
         payload.extend_from_slice(&u.to_le_bytes());
@@ -964,9 +1008,9 @@ fn overlong_path_length_prefix_is_rejected() {
 fn overlong_status_message_is_rejected() {
     let payload_message = "x".repeat(MAX_STATUS_BYTES + 1);
     let mut payload = Vec::new();
-    payload.extend_from_slice(&1u32.to_le_bytes()); // request id
-    payload.extend_from_slice(&0u16.to_le_bytes()); // code = ok
-    payload.extend_from_slice(&0u32.to_le_bytes()); // detail
+    payload.extend_from_slice(&1u32.to_le_bytes());
+    payload.extend_from_slice(&0u16.to_le_bytes());
+    payload.extend_from_slice(&0u32.to_le_bytes());
     payload.extend_from_slice(&((MAX_STATUS_BYTES + 1) as u16).to_le_bytes());
     payload.extend_from_slice(payload_message.as_bytes());
     let bytes = frame(3, &payload);
@@ -979,7 +1023,24 @@ fn unknown_type_is_reported() {
     assert!(matches!(decode(&bytes), Err(ProtoError::UnknownType(999))));
 }
 
-/// Build a frame with a valid magic and the given type over a raw payload.
+#[test]
+fn wrong_header_version_is_rejected() {
+    let mut bytes = encode(&Message::Status { request_id: 1, code: StatusCode::Ok, detail: 0, message: String::new() });
+    bytes[6] = 9; // header version -> 9
+    assert!(matches!(decode(&bytes), Err(ProtoError::BadVersion(9))));
+}
+
+#[test]
+fn unknown_status_code_is_bad_code() {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&1u32.to_le_bytes()); // request id
+    payload.extend_from_slice(&99u16.to_le_bytes()); // code = 99 (unknown)
+    payload.extend_from_slice(&0u32.to_le_bytes()); // detail
+    payload.extend_from_slice(&0u16.to_le_bytes()); // empty message
+    let bytes = frame(3, &payload);
+    assert!(matches!(decode(&bytes), Err(ProtoError::BadCode(99))));
+}
+
 fn frame(ty: u16, payload: &[u8]) -> Vec<u8> {
     let mut v = Vec::new();
     v.extend_from_slice(b"UWP1");
@@ -997,11 +1058,6 @@ fn frame(ty: u16, payload: &[u8]) -> Vec<u8> {
 `crates/uw-pipe-proto/src/pipe.rs`:
 
 ```rust
-//! Fixed-layout, little-endian binary messages (spec 6.3). 16-byte header
-//! (`magic`="UWP1", `type: u16`, `version: u16`, `pid: u32`, `payload_len: u32`) then a payload of
-//! at most `MAX_PAYLOAD` bytes. Paths are UTF-16 with a `u16` code-unit-count prefix (<= 1024);
-//! status messages are UTF-8 with a `u16` byte-count prefix (<= 256).
-
 pub const MAGIC: [u8; 4] = *b"UWP1";
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const HEADER_LEN: usize = 16;
@@ -1048,7 +1104,6 @@ impl StatusCode {
             _ => return None,
         })
     }
-    /// The lowercase wire name used in the JSON-lines `status` event.
     pub fn as_str(self) -> &'static str {
         match self {
             StatusCode::Ok => "ok",
@@ -1064,7 +1119,6 @@ impl StatusCode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
-    /// bootstrap -> helper, always first.
     Hello {
         protocol_version: u16,
         bootstrap_version: u16,
@@ -1072,9 +1126,7 @@ pub enum Message {
         overlay_loaded: bool,
         overlay_path: String,
     },
-    /// helper -> bootstrap.
     LoadOverlay { request_id: u32, path: String },
-    /// bootstrap -> helper.
     Status { request_id: u32, code: StatusCode, detail: u32, message: String },
 }
 
@@ -1082,9 +1134,11 @@ pub enum Message {
 pub enum ProtoError {
     Short,
     BadMagic,
+    BadVersion(u16),
     PayloadTooLarge,
     StringTooLong,
     BadString,
+    BadCode(u16),
     UnknownType(u16),
     Truncated,
 }
@@ -1094,9 +1148,11 @@ impl std::fmt::Display for ProtoError {
         match self {
             ProtoError::Short => write!(f, "message shorter than the header"),
             ProtoError::BadMagic => write!(f, "bad magic"),
+            ProtoError::BadVersion(v) => write!(f, "unsupported header version {v}"),
             ProtoError::PayloadTooLarge => write!(f, "payload over {MAX_PAYLOAD} bytes"),
             ProtoError::StringTooLong => write!(f, "string over its limit"),
             ProtoError::BadString => write!(f, "invalid string bytes"),
+            ProtoError::BadCode(c) => write!(f, "unknown status code {c}"),
             ProtoError::UnknownType(t) => write!(f, "unknown message type {t}"),
             ProtoError::Truncated => write!(f, "payload shorter than its fields"),
         }
@@ -1104,6 +1160,9 @@ impl std::fmt::Display for ProtoError {
 }
 impl std::error::Error for ProtoError {}
 
+/// A path is capped at `MAX_PATH_UNITS` code units as a last-resort floor. Callers that could
+/// supply a longer path (the helper's `load_overlay`) must reject it first and report an error, so
+/// a path is never silently truncated into a different, loadable path.
 fn put_path(out: &mut Vec<u8>, s: &str) {
     let units: Vec<u16> = s.encode_utf16().collect();
     let n = units.len().min(MAX_PATH_UNITS);
@@ -1116,7 +1175,6 @@ fn put_path(out: &mut Vec<u8>, s: &str) {
 fn put_status_msg(out: &mut Vec<u8>, s: &str) {
     let bytes = s.as_bytes();
     let n = bytes.len().min(MAX_STATUS_BYTES);
-    // Do not split a UTF-8 code point at the cap.
     let mut end = n;
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
@@ -1125,7 +1183,6 @@ fn put_status_msg(out: &mut Vec<u8>, s: &str) {
     out.extend_from_slice(&bytes[..end]);
 }
 
-/// Encode a message into a framed buffer (header + payload).
 pub fn encode(m: &Message) -> Vec<u8> {
     let (ty, payload) = match m {
         Message::Hello { protocol_version, bootstrap_version, bitness, overlay_loaded, overlay_path } => {
@@ -1156,7 +1213,7 @@ pub fn encode(m: &Message) -> Vec<u8> {
     out.extend_from_slice(&MAGIC);
     out.extend_from_slice(&ty.to_le_bytes());
     out.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes()); // pid (informational; filled by the sender if used)
+    out.extend_from_slice(&0u32.to_le_bytes());
     out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     out.extend_from_slice(&payload);
     out
@@ -1207,7 +1264,6 @@ impl<'a> Cur<'a> {
     }
 }
 
-/// Decode one framed message. A string-length field over its cap fails before any allocation.
 pub fn decode(bytes: &[u8]) -> Result<Message, ProtoError> {
     if bytes.len() < HEADER_LEN {
         return Err(ProtoError::Short);
@@ -1216,7 +1272,11 @@ pub fn decode(bytes: &[u8]) -> Result<Message, ProtoError> {
         return Err(ProtoError::BadMagic);
     }
     let ty = u16::from_le_bytes([bytes[4], bytes[5]]);
-    // bytes[6..8] version, bytes[8..12] pid — not needed to decode the body here.
+    let version = u16::from_le_bytes([bytes[6], bytes[7]]);
+    if version != PROTOCOL_VERSION {
+        return Err(ProtoError::BadVersion(version));
+    }
+    // bytes[8..12] pid — reserved, not needed to decode the body here.
     let payload_len = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
     if payload_len > MAX_PAYLOAD {
         return Err(ProtoError::PayloadTooLarge);
@@ -1234,7 +1294,8 @@ pub fn decode(bytes: &[u8]) -> Result<Message, ProtoError> {
         TYPE_LOAD_OVERLAY => Ok(Message::LoadOverlay { request_id: c.u32()?, path: c.path()? }),
         TYPE_STATUS => {
             let request_id = c.u32()?;
-            let code = StatusCode::from_u16(c.u16()?).ok_or(ProtoError::BadString)?;
+            let raw = c.u16()?;
+            let code = StatusCode::from_u16(raw).ok_or(ProtoError::BadCode(raw))?;
             let detail = c.u32()?;
             let message = c.status_msg()?;
             Ok(Message::Status { request_id, code, detail, message })
@@ -1247,9 +1308,9 @@ pub fn decode(bytes: &[u8]) -> Result<Message, ProtoError> {
 - [ ] **Step 4: Run the binary-protocol tests (green)**
 
 Run: `cargo test -p uw-pipe-proto --test pipe`
-Expected: `test result: ok. 8 passed`.
+Expected: `test result: ok. 10 passed`.
 
-- [ ] **Step 5: Write the JSON-lines tests first (red)**
+- [ ] **Step 5: Write the JSON-lines tests first**
 
 `crates/uw-pipe-proto/tests/jsonl.rs`:
 
@@ -1269,11 +1330,24 @@ fn events_round_trip() {
     for e in [
         Event::BootstrapConnected { overlay_loaded: false },
         Event::BootstrapConnected { overlay_loaded: true },
-        Event::Status { code: "ok".into() },
-        Event::Error { code: "no_window".into() },
+        Event::Status { code: "ok".into(), detail: 0, message: "overlay started".into() },
+        Event::Status { code: "load_failed".into(), detail: 126, message: "LoadLibraryW failed".into() },
+        Event::error("no_window"),
+        Event::Error { code: "hook_failed".into(), detail: Some(1455) },
     ] {
         assert_eq!(Event::parse(&e.to_line()).unwrap(), e);
     }
+}
+
+#[test]
+fn error_without_detail_omits_the_field() {
+    assert_eq!(Event::error("no_window").to_line(), r#"{"event":"error","code":"no_window"}"#);
+}
+
+#[test]
+fn status_carries_detail_and_message() {
+    let line = Event::Status { code: "start_failed".into(), detail: 7, message: "nonzero".into() }.to_line();
+    assert_eq!(line, r#"{"event":"status","code":"start_failed","detail":7,"message":"nonzero"}"#);
 }
 
 #[test]
@@ -1308,10 +1382,23 @@ pub enum Command {
 pub enum Event {
     /// The bootstrap connected and sent `hello` (design step 7).
     BootstrapConnected { overlay_loaded: bool },
-    /// A `status` reply from the bootstrap (design step 8), by its lowercase code.
-    Status { code: String },
-    /// A helper-side failure (e.g. `no_window`, `hook_failed`, `already_running`, `game_exited`).
-    Error { code: String },
+    /// A `status` reply from the bootstrap (design step 8): the lowercase code, a numeric `detail`
+    /// (a Windows error or the start function's code, 0 if none) and a human message.
+    Status { code: String, detail: u32, message: String },
+    /// A helper- or host-side failure (e.g. `no_window`, `hook_failed`, `game_not_found`). `detail`
+    /// carries a `GetLastError` where there is one (absent otherwise).
+    Error {
+        code: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<u32>,
+    },
+}
+
+impl Event {
+    /// An error event with no numeric detail.
+    pub fn error(code: &str) -> Event {
+        Event::Error { code: code.to_string(), detail: None }
+    }
 }
 
 impl Command {
@@ -1336,7 +1423,7 @@ impl Event {
 - [ ] **Step 7: Run the whole crate's tests (green)**
 
 Run: `cargo test -p uw-pipe-proto`
-Expected: the `names` unit test (`test result: ok. 1 passed`), the `pipe` file (`8 passed`) and the `jsonl` file (`3 passed`) all pass.
+Expected: the `names` unit test (`test result: ok. 1 passed`), the `pipe` file (`10 passed`) and the `jsonl` file (`5 passed`) all pass.
 
 - [ ] **Step 8: Commit**
 
@@ -1404,7 +1491,7 @@ pub fn exe_matches(name: &str, target: &str) -> bool {
 }
 ```
 
-- [ ] **Step 2: Write the discovery/driver tests first (red)**
+- [ ] **Step 2: Write the discovery/driver tests first**
 
 `crates/uw-inject/tests/discovery.rs`:
 
@@ -1418,7 +1505,7 @@ use uw_pipe_proto::jsonl::{Command, Event};
 #[cfg(unix)]
 use uw_inject::discovery::{
     config_info_for_prefix, find_pids, proton_files_from_config_info, server_socket, wine_env,
-    GameSession,
+    GameError, GameSession,
 };
 
 // First lines of a real `compatdata/1422450/config_info` (Proton 11.0).
@@ -1477,7 +1564,16 @@ fn server_socket_matches_wine_layout() {
 #[test]
 fn game_session_find_reports_a_missing_process() {
     let err = GameSession::find("uw-no-such-game.exe", None).unwrap_err();
-    assert!(err.contains("uw-no-such-game.exe is not running"), "{err}");
+    assert_eq!(err.code(), "game_not_found");
+    assert!(matches!(err, GameError::NotRunning(_)));
+    assert!(err.to_string().contains("uw-no-such-game.exe is not running"), "{err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn game_error_codes_match_the_design() {
+    assert_eq!(GameError::NotRunning("x".into()).code(), "game_not_found");
+    assert_eq!(GameError::NoWineSession("x".into()).code(), "no_wine_session");
 }
 
 #[cfg(unix)]
@@ -1512,7 +1608,7 @@ fn driver_loads_overlay_once_when_bootstrap_connects_fresh() {
         vec![Command::LoadOverlay { path: r"Z:\games\overlay.dll".into() }]
     );
     // A later status does not re-send.
-    assert_eq!(d.on_event(&Event::Status { code: "ok".into() }), vec![]);
+    assert_eq!(d.on_event(&Event::Status { code: "ok".into(), detail: 0, message: String::new() }), vec![]);
     assert!(d.is_done());
 }
 
@@ -1613,6 +1709,36 @@ pub fn check_wine_session(prefix: &Path) -> Result<PathBuf, String> {
 }
 
 /// A running Proton game and its Wine session.
+/// A typed discovery failure, so `uw-inject` can emit the design's `game_not_found` /
+/// `no_wine_session` error codes instead of free text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GameError {
+    /// The game exe is not running.
+    NotRunning(String),
+    /// The game runs but its Wine session could not be joined (no prefix, no wineserver, no
+    /// Proton path, missing `wine`).
+    NoWineSession(String),
+}
+
+impl GameError {
+    /// The JSON-lines error code (design failure table, Linux side).
+    pub fn code(&self) -> &'static str {
+        match self {
+            GameError::NotRunning(_) => "game_not_found",
+            GameError::NoWineSession(_) => "no_wine_session",
+        }
+    }
+}
+
+impl std::fmt::Display for GameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GameError::NotRunning(m) | GameError::NoWineSession(m) => f.write_str(m),
+        }
+    }
+}
+impl std::error::Error for GameError {}
+
 #[derive(Debug, Clone)]
 pub struct GameSession {
     pub pid: i32,
@@ -1623,35 +1749,38 @@ pub struct GameSession {
 }
 
 impl GameSession {
-    pub fn find(exe: &str, pid: Option<i32>) -> Result<GameSession, String> {
+    pub fn find(exe: &str, pid: Option<i32>) -> Result<GameSession, GameError> {
         GameSession::find_with_proton(exe, pid, None)
     }
 
     /// Like `find`, with an explicit Proton `files` directory instead of the one in `config_info`.
-    pub fn find_with_proton(exe: &str, pid: Option<i32>, proton: Option<PathBuf>) -> Result<GameSession, String> {
+    pub fn find_with_proton(exe: &str, pid: Option<i32>, proton: Option<PathBuf>) -> Result<GameSession, GameError> {
         let pid = match pid {
             Some(p) => p,
-            None => *find_pids(exe).first().ok_or(format!("{exe} is not running"))?,
+            None => *find_pids(exe).first().ok_or_else(|| GameError::NotRunning(format!("{exe} is not running")))?,
         };
-        let environ = std::fs::read(format!("/proc/{pid}/environ")).map_err(|e| format!("environ of {pid}: {e}"))?;
+        let environ = std::fs::read(format!("/proc/{pid}/environ"))
+            .map_err(|e| GameError::NoWineSession(format!("environ of {pid}: {e}")))?;
         let env = wine_env(&environ);
         let prefix = env
             .iter()
             .find(|(k, _)| k == "WINEPREFIX")
             .map(|(_, v)| PathBuf::from(v))
-            .ok_or(format!("pid {pid} has no WINEPREFIX (not a Wine process?)"))?;
-        check_wine_session(&prefix)?;
+            .ok_or_else(|| GameError::NoWineSession(format!("pid {pid} has no WINEPREFIX (not a Wine process?)")))?;
+        check_wine_session(&prefix).map_err(GameError::NoWineSession)?;
         let proton = match proton {
             Some(p) => p,
             None => {
                 let info_path = config_info_for_prefix(&prefix);
-                let info = std::fs::read_to_string(&info_path).map_err(|e| format!("{}: {e}", info_path.display()))?;
-                proton_files_from_config_info(&info).ok_or(format!("no Proton path in {}", info_path.display()))?
+                let info = std::fs::read_to_string(&info_path)
+                    .map_err(|e| GameError::NoWineSession(format!("{}: {e}", info_path.display())))?;
+                proton_files_from_config_info(&info)
+                    .ok_or_else(|| GameError::NoWineSession(format!("no Proton path in {}", info_path.display())))?
             }
         };
         let wine = proton.join("bin/wine");
         if !wine.exists() {
-            return Err(format!("missing {}", wine.display()));
+            return Err(GameError::NoWineSession(format!("missing {}", wine.display())));
         }
         Ok(GameSession { pid, env, prefix, proton })
     }
@@ -1726,7 +1855,7 @@ impl Driver {
 - [ ] **Step 5: Run the tests (green)**
 
 Run: `cargo test -p uw-inject`
-Expected: `test result: ok. 11 passed` (the discovery test file; the binary has no tests yet).
+Expected: `test result: ok. 12 passed` (the discovery test file; the binary has no tests yet).
 
 - [ ] **Step 6: Commit**
 
@@ -1762,7 +1891,7 @@ Append to `crates/uw-helper/src/lib.rs`:
 pub mod decide;
 ```
 
-- [ ] **Step 2: Write the decision tests first (red)**
+- [ ] **Step 2: Write the decision tests first**
 
 `crates/uw-helper/tests/decide.rs`:
 
@@ -1972,12 +2101,12 @@ fn outcomes_map_to_json_events() {
         Outcome::Connected { overlay_loaded: true, overlay_path: None }.to_event(),
         Event::BootstrapConnected { overlay_loaded: true }
     );
-    assert_eq!(Outcome::NoWindow.to_event(), Event::Error { code: "no_window".into() });
-    assert_eq!(Outcome::AlreadyRunning.to_event(), Event::Error { code: "already_running".into() });
-    assert_eq!(Outcome::HookFailed(5).to_event(), Event::Error { code: "hook_failed".into() });
-    assert_eq!(Outcome::BootstrapTimeout.to_event(), Event::Error { code: "bootstrap_timeout".into() });
-    assert_eq!(Outcome::VersionMismatch.to_event(), Event::Error { code: "version_mismatch".into() });
-    assert_eq!(Outcome::PipeError("x".into()).to_event(), Event::Error { code: "pipe_error".into() });
+    assert_eq!(Outcome::NoWindow.to_event(), Event::error("no_window"));
+    assert_eq!(Outcome::AlreadyRunning.to_event(), Event::error("already_running"));
+    assert_eq!(Outcome::HookFailed(5).to_event(), Event::Error { code: "hook_failed".into(), detail: Some(5) });
+    assert_eq!(Outcome::BootstrapTimeout.to_event(), Event::error("bootstrap_timeout"));
+    assert_eq!(Outcome::VersionMismatch.to_event(), Event::error("version_mismatch"));
+    assert_eq!(Outcome::PipeError("x".into()).to_event(), Event::error("pipe_error"));
 }
 ```
 
@@ -2035,12 +2164,15 @@ impl Outcome {
             Outcome::Connected { overlay_loaded, .. } => {
                 Event::BootstrapConnected { overlay_loaded: *overlay_loaded }
             }
-            Outcome::AlreadyRunning => Event::Error { code: "already_running".into() },
-            Outcome::NoWindow => Event::Error { code: "no_window".into() },
-            Outcome::HookFailed(_) => Event::Error { code: "hook_failed".into() },
-            Outcome::BootstrapTimeout => Event::Error { code: "bootstrap_timeout".into() },
-            Outcome::VersionMismatch => Event::Error { code: "version_mismatch".into() },
-            Outcome::PipeError(_) => Event::Error { code: "pipe_error".into() },
+            // `hook_failed` keeps its GetLastError as the event's `detail` (design failure table).
+            Outcome::HookFailed(e) => Event::Error { code: "hook_failed".into(), detail: Some(*e) },
+            Outcome::AlreadyRunning => Event::error("already_running"),
+            Outcome::NoWindow => Event::error("no_window"),
+            Outcome::BootstrapTimeout => Event::error("bootstrap_timeout"),
+            Outcome::VersionMismatch => Event::error("version_mismatch"),
+            // `pipe_error` is a helper-local I/O failure not in the design's failure table; it maps
+            // here so the host still sees a structured error rather than a silent exit.
+            Outcome::PipeError(_) => Event::error("pipe_error"),
         }
     }
 }
@@ -2087,6 +2219,8 @@ pub trait Win32 {
     fn wait_hello(&mut self, timeout_ms: u64) -> HelloWait;
     /// Remove the current hook (the pin keeps the bootstrap loaded). A no-op if none is set.
     fn unhook(&mut self);
+    /// Emit a diagnostic line (stderr in the real helper; a no-op in the fake).
+    fn log(&self, _msg: &str) {}
 }
 
 fn outcome_from_hello(hw: HelloWait) -> Result<Outcome, ()> {
@@ -2126,6 +2260,7 @@ pub fn run(w: &mut dyn Win32, cfg: &Config) -> Outcome {
     // 3. Already there? The pinned bootstrap from an earlier helper will reconnect: create the
     //    pipe, skip the hook, and wait for its hello.
     if w.marker_exists(pid) {
+        w.log("marker present; skipping hook");
         if let Err(e) = w.create_pipe(pid) {
             return Outcome::PipeError(e);
         }
@@ -2204,7 +2339,7 @@ Grow the bootstrap's worker from "write a proof file" into the real worker: crea
 - Create: `crates/uw-bootstrap/src/state.rs`, `crates/uw-bootstrap/tests/state.rs`
 - Create: `crates/uw-test-overlay/Cargo.toml`, `crates/uw-test-overlay/src/lib.rs`
 
-- [ ] **Step 1: Write the overlay-state tests first (red)**
+- [ ] **Step 1: Write the overlay-state tests first**
 
 `crates/uw-bootstrap/tests/state.rs`:
 
@@ -2366,10 +2501,13 @@ pub extern "system" fn DllMain(_inst: HINSTANCE, reason: u32, _reserved: *mut co
 /// Matches the Win32 `HOOKPROC` ABI; called by the OS.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn uw_bootstrap_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if !STARTED.swap(true, Ordering::AcqRel) {
-        pin_self();
-        let _ = std::thread::Builder::new().name("uw-bootstrap".into()).spawn(worker);
-    }
+    // No Rust panic may cross this FFI boundary (since Rust 1.81 it aborts, killing the game).
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if !STARTED.swap(true, Ordering::AcqRel) {
+            pin_self();
+            let _ = std::thread::Builder::new().name("uw-bootstrap".into()).spawn(worker);
+        }
+    }));
     // SAFETY: a null hook handle forwards to the next hook (design: always).
     unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
 }
@@ -2388,7 +2526,9 @@ fn pin_self() {
 }
 
 /// The overlay entry ABI (design "Overlay entry point"). Extra fields may be appended later; the
-/// test overlay ignores the pointer entirely.
+/// test overlay ignores the pointer entirely. `uw_overlay_start` MUST catch its own panics: a
+/// panic unwinding out of an `extern "system"` callee aborts at its own boundary (Rust >= 1.81),
+/// which the caller's `catch_unwind` below cannot intercept.
 #[repr(C)]
 struct StartParams {
     size: u32,
@@ -2406,19 +2546,22 @@ fn wide(s: &str) -> Vec<u16> {
 /// mutex, then connects and serves the pipe; on a lost connection it reconnects and starts over
 /// with a fresh `hello`.
 fn worker() {
-    let _ = catch_unwind(|| {
-        // SAFETY: no arguments.
-        let pid = unsafe { GetCurrentProcessId() };
-        // Keep the marker mutex handle for the life of the process: a new helper that sees it
-        // skips the hook and waits for our reconnect `hello` (design step 3).
-        let _marker = create_marker(pid);
-        let mut state = OverlayState::new();
-        loop {
-            serve_once(pid, &mut state);
-            // SAFETY: a plain sleep.
-            unsafe { Sleep(RETRY_MS) };
+    // SAFETY: no arguments.
+    let pid = unsafe { GetCurrentProcessId() };
+    // Keep the marker mutex handle for the life of the process: a new helper that sees it skips
+    // the hook and waits for our reconnect `hello` (design step 3).
+    let _marker = create_marker(pid);
+    let mut state = OverlayState::new();
+    loop {
+        // Catch per connection, not around the whole loop: a panic in `serve_once` ends only that
+        // connection, so the worker keeps the marker alive and reconnects (otherwise every later
+        // helper would see the marker, skip the hook and time out until the game restarts).
+        if catch_unwind(AssertUnwindSafe(|| serve_once(pid, &mut state))).is_err() {
+            eprintln!("[uw-bootstrap] serve panicked; reconnecting");
         }
-    });
+        // SAFETY: a plain sleep.
+        unsafe { Sleep(RETRY_MS) };
+    }
 }
 
 fn create_marker(pid: u32) -> HANDLE {
@@ -2547,7 +2690,9 @@ fn load_overlay(request_id: u32, path: &str, pid: u32, state: &mut OverlayState)
     // SAFETY: transmute to the overlay ABI and call it with StartParams.
     let start: OverlayStart = unsafe { std::mem::transmute::<_, OverlayStart>(proc) };
     let params = StartParams { size: std::mem::size_of::<StartParams>() as u32, version: START_PARAMS_VERSION, pid };
-    // No Rust panic may cross the FFI boundary (design "Failures").
+    // This catch guards our own glue around the call; it can NOT catch a panic inside the overlay
+    // (that aborts at the overlay's `extern "system"` boundary), so `uw_overlay_start` must catch
+    // its own panics (design "Failures"; noted on `StartParams`).
     let r = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: the overlay owns `*params` only for the call.
         unsafe { start(&params) }
@@ -2640,6 +2785,12 @@ mod win {
     /// Called across the overlay FFI boundary; the pointer is ignored.
     #[unsafe(no_mangle)]
     pub unsafe extern "system" fn uw_overlay_start(_params: *const core::ffi::c_void) -> u32 {
+        // The overlay catches its own panics: a panic must not cross this `extern "system"`
+        // boundary (it would abort; the bootstrap caller cannot catch it). 2 = panicked.
+        std::panic::catch_unwind(run).unwrap_or(2)
+    }
+
+    fn run() -> u32 {
         // SAFETY: no arguments.
         let pid = unsafe { GetCurrentProcessId() };
         let mut buf = [0u16; 32768];
@@ -2717,24 +2868,27 @@ windows-sys = { version = "0.61.2", features = [
 ] }
 ```
 
-- [ ] **Step 2: Write the happy-path Wine test first (red)**
+- [ ] **Step 2: Write the happy-path Wine test first**
 
 Append to `crates/uw-helper/tests/wine_e2e.rs`. It reuses `setup`, `wine_cmd`, `to_wine_path`, `win_artifact` and `markers` from Task 1, and adds a `Helper` handle that Task 8 reuses. Two rules learned by running these tests under Wine:
 
 - Read the helper's stdout on a **separate thread** and wait with `recv_timeout`. A blocking `lines.next()` cannot honour a deadline: if the helper is alive but silent, the test hangs forever instead of failing.
-- End a helper by **killing** it (the design says "kill the helper, start a new one"). Closing its stdin does not reliably end a process under Wine.
+- End a helper by **killing** it (the design says "kill the helper, start a new one"). Closing its stdin also ends it (its relay loop sees EOF), but killing is unconditional and is what the reconnect scenario needs.
 
 ```rust
 use std::io::{BufRead, BufReader, Write};
 use std::process::ChildStdin;
 use std::sync::mpsc::{channel, Receiver};
+use std::sync::{Arc, Mutex};
 
 /// A running `uw-helper64.exe`: its JSON-lines events arrive on a channel from a reader thread,
-/// commands go to its stdin. Dropping it kills the helper.
+/// its stderr diagnostics accumulate in a shared buffer (so a test can assert which hook fired or
+/// that the hook was skipped), commands go to its stdin. Dropping it kills the helper.
 struct Helper {
     child: Child,
     stdin: Option<ChildStdin>,
     events: Receiver<String>,
+    stderr: Arc<Mutex<Vec<String>>>,
 }
 
 impl Helper {
@@ -2747,6 +2901,20 @@ impl Helper {
         let stdin = self.stdin.as_mut().expect("helper stdin is open");
         writeln!(stdin, "{line}").unwrap();
         stdin.flush().unwrap();
+    }
+
+    /// Wait up to `within` for a stderr diagnostic line containing `needle`.
+    fn wait_stderr(&self, needle: &str, within: Duration) -> bool {
+        let start = Instant::now();
+        loop {
+            if self.stderr.lock().unwrap().iter().any(|l| l.contains(needle)) {
+                return true;
+            }
+            if start.elapsed() >= within {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 }
 
@@ -2767,10 +2935,12 @@ fn start_helper(pfx: &Prefix, extra: &[&str], envs: &[(&str, &str)]) -> Helper {
         .args(extra)
         .envs(envs.iter().copied())
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped());
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = cmd.spawn().unwrap();
     let stdin = child.stdin.take();
     let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
     let (tx, rx) = channel();
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
@@ -2780,7 +2950,15 @@ fn start_helper(pfx: &Prefix, extra: &[&str], envs: &[(&str, &str)]) -> Helper {
             }
         }
     });
-    Helper { child, stdin, events: rx }
+    let diag = Arc::new(Mutex::new(Vec::new()));
+    let diag2 = Arc::clone(&diag);
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines() {
+            let Ok(line) = line else { break };
+            diag2.lock().unwrap().push(line);
+        }
+    });
+    Helper { child, stdin, events: rx, stderr: diag }
 }
 
 fn load_overlay_line(path_wine: &str) -> String {
@@ -2837,11 +3015,12 @@ fn main() {
 #[cfg(windows)]
 mod win {
     use std::io::{BufRead, Write};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
 
     use uw_helper::decide::{run, Config, HelloWait, HookKind, Outcome, Win32};
     use uw_pipe_proto::jsonl::{Command, Event};
     use uw_pipe_proto::names::{helper_mutex_name, marker_mutex_name, pipe_name};
-    use uw_pipe_proto::pipe::{decode, encode, Message, StatusCode, HEADER_LEN, MAX_PAYLOAD};
+    use uw_pipe_proto::pipe::{decode, encode, Message, HEADER_LEN, MAX_PATH_UNITS, MAX_PAYLOAD};
 
     use windows_sys::Win32::Foundation::{
         CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED,
@@ -2856,18 +3035,18 @@ mod win {
     };
     use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
     use windows_sys::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe,
-        PIPE_READMODE_MESSAGE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE, PIPE_WAIT,
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_MESSAGE,
+        PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE, PIPE_WAIT,
     };
     use windows_sys::Win32::System::Threading::{
-        CreateEventW, CreateMutexW, GetCurrentProcessId, OpenMutexW, ResetEvent, WaitForSingleObject,
-        SYNCHRONIZATION_SYNCHRONIZE,
+        CreateEventW, CreateMutexW, GetCurrentProcessId, OpenMutexW, OpenProcess, ResetEvent,
+        WaitForSingleObject, INFINITE, PROCESS_SYNCHRONIZE, SYNCHRONIZATION_SYNCHRONIZE,
     };
     use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindow, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible,
-        PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx, GW_OWNER, HHOOK, HOOKPROC,
-        WH_CALLWNDPROC, WH_GETMESSAGE, WM_NULL,
+        PostThreadMessageW, SendNotifyMessageW, SetWindowsHookExW, UnhookWindowsHookEx, GW_OWNER,
+        HHOOK, HOOKPROC, WH_CALLWNDPROC, WH_GETMESSAGE, WM_NULL,
     };
     use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 
@@ -2892,35 +3071,42 @@ mod win {
         pid: u32,
         best_area: i64,
         thread: u32,
+        hwnd: HWND,
     }
 
     unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> windows_sys::core::BOOL {
-        // SAFETY: `lparam` points at the caller's `Found`.
-        let f = unsafe { &mut *(lparam as *mut Found) };
-        let mut pid = 0u32;
-        // SAFETY: `hwnd` from EnumWindows; writes one u32.
-        let thread = unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
-        // SAFETY: querying an enumerated top-level window.
-        unsafe {
-            if pid == f.pid && IsWindowVisible(hwnd) != 0 && GetWindow(hwnd, GW_OWNER).is_null() {
-                let mut r: RECT = std::mem::zeroed();
-                if GetWindowRect(hwnd, &mut r) != 0 {
-                    let area = (r.right - r.left) as i64 * (r.bottom - r.top) as i64;
-                    if area > f.best_area {
-                        f.best_area = area;
-                        f.thread = thread;
+        // No Rust panic may cross this FFI boundary: catch and keep enumerating.
+        let keep = catch_unwind(AssertUnwindSafe(|| {
+            // SAFETY: `lparam` points at the caller's `Found`.
+            let f = unsafe { &mut *(lparam as *mut Found) };
+            let mut pid = 0u32;
+            // SAFETY: `hwnd` from EnumWindows; writes one u32.
+            let thread = unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+            // SAFETY: querying an enumerated top-level window.
+            unsafe {
+                if pid == f.pid && IsWindowVisible(hwnd) != 0 && GetWindow(hwnd, GW_OWNER).is_null() {
+                    let mut r: RECT = std::mem::zeroed();
+                    if GetWindowRect(hwnd, &mut r) != 0 {
+                        let area = (r.right - r.left) as i64 * (r.bottom - r.top) as i64;
+                        if area > f.best_area {
+                            f.best_area = area;
+                            f.thread = thread;
+                            f.hwnd = hwnd;
+                        }
                     }
                 }
             }
-        }
+        }));
+        let _ = keep;
         1
     }
 
-    /// The real side effects behind `decide::Win32`, plus the post-connect pipe relay.
     struct RealWin32 {
         exe: String,
         bootstrap: String,
         pid: u32,
+        ui_thread: u32,
+        hwnd: HWND,
         pipe: HANDLE,
         hook: HHOOK,
         module: HMODULE,
@@ -2935,6 +3121,8 @@ mod win {
                 exe,
                 bootstrap,
                 pid: 0,
+                ui_thread: 0,
+                hwnd: std::ptr::null_mut(),
                 pipe: INVALID_HANDLE_VALUE,
                 hook: std::ptr::null_mut(),
                 module: std::ptr::null_mut(),
@@ -2961,7 +3149,51 @@ mod win {
             }))
         }
 
-        /// Overlapped ConnectNamedPipe + ReadFile of the first message, bounded by `timeout_ms`.
+        /// Wake the UI thread so the next message pump runs the hook. Both a posted message
+        /// (`WH_GETMESSAGE`) and a sent message (`WH_CALLWNDPROC`, which only fires on sent ones).
+        fn rewake(&self) {
+            // SAFETY: both post/send WM_NULL to the UI thread / its main window.
+            unsafe {
+                PostThreadMessageW(self.ui_thread, WM_NULL, 0, 0);
+                if !self.hwnd.is_null() {
+                    SendNotifyMessageW(self.hwnd, WM_NULL, 0, 0);
+                }
+            }
+        }
+
+        /// Wait on the overlapped event up to `timeout_ms`, re-waking every 500 ms (so an idle
+        /// `WH_CALLWNDPROC` hook still fires). `true` once the operation completes.
+        fn wait_rewake(&self, ov: *mut OVERLAPPED, timeout_ms: u64) -> bool {
+            let mut left = timeout_ms;
+            loop {
+                let slice = left.min(500);
+                // SAFETY: waits on our event; then collects the overlapped result.
+                let r = unsafe { WaitForSingleObject(self.event, slice as u32) };
+                if r == WAIT_OBJECT_0 {
+                    let mut n = 0u32;
+                    return unsafe { GetOverlappedResult(self.pipe, ov, &mut n, 0) } != 0;
+                }
+                left = left.saturating_sub(slice);
+                if left == 0 {
+                    return false;
+                }
+                self.rewake();
+            }
+        }
+
+        /// Cancel a pending overlapped op and wait for the cancel to finish, so its `OVERLAPPED`
+        /// is safe to drop.
+        fn cancel(&self, ov: *mut OVERLAPPED) {
+            // SAFETY: cancels I/O on our pipe and blocks until the cancel completes.
+            unsafe {
+                CancelIoEx(self.pipe, ov);
+                let mut n = 0u32;
+                GetOverlappedResult(self.pipe, ov, &mut n, 1);
+            }
+        }
+
+        /// Overlapped `ConnectNamedPipe` + read of the first message, bounded by `timeout_ms`,
+        /// re-waking the UI thread throughout.
         fn connect_and_read_hello(&mut self, timeout_ms: u64) -> HelloWait {
             // SAFETY: start an overlapped connect on our event.
             unsafe {
@@ -2974,8 +3206,8 @@ mod win {
                     if e != ERROR_IO_PENDING && e != ERROR_PIPE_CONNECTED {
                         return HelloWait::PipeError(format!("ConnectNamedPipe: {e}"));
                     }
-                    if e == ERROR_IO_PENDING && !self.wait_overlapped(&mut ov, timeout_ms) {
-                        CancelIoEx(self.pipe, &ov);
+                    if e == ERROR_IO_PENDING && !self.wait_rewake(&mut ov, timeout_ms) {
+                        self.cancel(&mut ov);
                         DisconnectNamedPipe(self.pipe);
                         return HelloWait::Timeout;
                     }
@@ -2997,18 +3229,6 @@ mod win {
             }
         }
 
-        /// Wait on the overlapped event; `true` if it completed within `timeout_ms`.
-        fn wait_overlapped(&self, ov: *mut OVERLAPPED, timeout_ms: u64) -> bool {
-            // SAFETY: waits on our event, then collects the result.
-            unsafe {
-                if WaitForSingleObject(self.event, timeout_ms as u32) != WAIT_OBJECT_0 {
-                    return false;
-                }
-                let mut n = 0u32;
-                GetOverlappedResult(self.pipe, ov, &mut n, 0) != 0
-            }
-        }
-
         /// Read one message (message mode, overlapped) within `timeout_ms`.
         fn read_message(&self, timeout_ms: u64) -> Option<Vec<u8>> {
             let mut buf = vec![0u8; HEADER_LEN + MAX_PAYLOAD];
@@ -3024,7 +3244,7 @@ mod win {
                         return None;
                     }
                     if WaitForSingleObject(self.event, timeout_ms as u32) != WAIT_OBJECT_0 {
-                        CancelIoEx(self.pipe, &ov);
+                        self.cancel(&mut ov);
                         return None;
                     }
                     if GetOverlappedResult(self.pipe, &ov, &mut n, 0) == 0 {
@@ -3039,7 +3259,7 @@ mod win {
 
         fn write_message(&self, m: &Message) -> bool {
             let bytes = encode(m);
-            // SAFETY: overlapped write; wait for completion.
+            // SAFETY: overlapped write; wait for completion, cancelling on timeout.
             unsafe {
                 ResetEvent(self.event);
                 let mut ov: OVERLAPPED = std::mem::zeroed();
@@ -3048,15 +3268,19 @@ mod win {
                 if ok == 0 && GetLastError() != ERROR_IO_PENDING {
                     return false;
                 }
+                if WaitForSingleObject(self.event, 15_000) != WAIT_OBJECT_0 {
+                    self.cancel(&mut ov);
+                    return false;
+                }
                 let mut n = 0u32;
-                WaitForSingleObject(self.event, 15_000);
                 GetOverlappedResult(self.pipe, &ov, &mut n, 0) != 0 && n as usize == bytes.len()
             }
         }
 
-        /// Relay host commands to the bootstrap and status replies back, until stdin closes or the
-        /// pipe breaks.
+        /// Relay host commands to the bootstrap and status replies back. A watcher thread reports
+        /// `game_exited` the moment the game process ends, even while this blocks on stdin.
         fn relay(&mut self) {
+            spawn_game_watcher(self.pid);
             let stdin = std::io::stdin();
             for line in stdin.lock().lines() {
                 let Ok(line) = line else { break };
@@ -3065,19 +3289,22 @@ mod win {
                 }
                 match Command::parse(&line) {
                     Ok(Command::LoadOverlay { path }) => {
+                        if path.encode_utf16().count() > MAX_PATH_UNITS {
+                            emit(&Event::error("path_too_long"));
+                            continue;
+                        }
                         let request_id = self.next_request;
                         self.next_request += 1;
                         if !self.write_message(&Message::LoadOverlay { request_id, path }) {
-                            emit(&Event::Error { code: "game_exited".into() });
+                            emit(&Event::error("game_exited"));
                             return;
                         }
                         match self.read_message(15_000).and_then(|b| decode(&b).ok()) {
-                            Some(Message::Status { code, .. }) => {
-                                emit(&Event::Status { code: status_code_str(code).into() });
+                            Some(Message::Status { code, detail, message, .. }) => {
+                                emit(&Event::Status { code: code.as_str().into(), detail, message });
                             }
                             _ => {
-                                emit(&Event::Error { code: "game_exited".into() });
-                                return;
+                                emit(&Event::error("status_timeout"));
                             }
                         }
                     }
@@ -3087,8 +3314,21 @@ mod win {
         }
     }
 
-    fn status_code_str(code: StatusCode) -> &'static str {
-        code.as_str()
+    /// Watch the game process; when it ends, report `game_exited` and exit (design failure table).
+    fn spawn_game_watcher(pid: u32) {
+        std::thread::spawn(move || {
+            // SAFETY: opens the game for SYNCHRONIZE and waits for it to exit.
+            unsafe {
+                let h = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+                if h.is_null() {
+                    return;
+                }
+                WaitForSingleObject(h, INFINITE);
+                CloseHandle(h);
+            }
+            emit(&Event::error("game_exited"));
+            std::process::exit(0);
+        });
     }
 
     impl Win32 for RealWin32 {
@@ -3120,10 +3360,16 @@ mod win {
             None
         }
         fn find_ui_thread(&mut self, pid: u32) -> Option<u32> {
-            let mut f = Found { pid, best_area: 0, thread: 0 };
+            let mut f = Found { pid, best_area: 0, thread: 0, hwnd: std::ptr::null_mut() };
             // SAFETY: the callback only writes through `&mut f`.
             unsafe { EnumWindows(Some(enum_cb), &mut f as *mut Found as LPARAM) };
-            (f.thread != 0).then_some(f.thread)
+            if f.thread != 0 {
+                self.ui_thread = f.thread;
+                self.hwnd = f.hwnd;
+                Some(f.thread)
+            } else {
+                None
+            }
         }
         fn marker_exists(&mut self, pid: u32) -> bool {
             let name = wide(&marker_mutex_name(pid));
@@ -3186,6 +3432,11 @@ mod win {
                 Err(unsafe { GetLastError() })
             } else {
                 self.hook = hook;
+                let name = match kind {
+                    HookKind::GetMessage => "WH_GETMESSAGE",
+                    HookKind::CallWndProc => "WH_CALLWNDPROC",
+                };
+                eprintln!("[uw-helper64] hooked {name} thread={thread}");
                 Ok(())
             }
         }
@@ -3194,6 +3445,7 @@ mod win {
                 // SAFETY: posts WM_NULL to the UI thread.
                 unsafe { PostThreadMessageW(thread, WM_NULL, 0, 0) };
             }
+            self.rewake();
         }
         fn wait_hello(&mut self, timeout_ms: u64) -> HelloWait {
             self.connect_and_read_hello(timeout_ms)
@@ -3204,6 +3456,9 @@ mod win {
                 unsafe { UnhookWindowsHookEx(self.hook) };
                 self.hook = std::ptr::null_mut();
             }
+        }
+        fn log(&self, msg: &str) {
+            eprintln!("[uw-helper64] {msg}");
         }
     }
 
@@ -3261,7 +3516,7 @@ Expected: `Finished`; `target/x86_64-pc-windows-gnu/release/uw-helper64.exe` exi
 Run:
 ```bash
 cargo build --release --target x86_64-pc-windows-gnu -p uw-test-game -p uw-bootstrap -p uw-test-overlay -p uw-helper
-cargo test -p uw-helper --test wine_e2e helper_connects_loads_overlay_and_reports_ok -- --ignored
+xvfb-run -a cargo test -p uw-helper --test wine_e2e helper_connects_loads_overlay_and_reports_ok -- --ignored --test-threads=1
 ```
 Expected: `helper_connects_loads_overlay_and_reports_ok ... ok`, `test result: ok. 1 passed`. The helper's stdout carries `{"event":"bootstrap_connected",…}` then `{"event":"status","code":"ok"}`, and one `uw-test-overlay-<pid>.txt` appears under the prefix TEMP.
 
@@ -3283,7 +3538,7 @@ The operator entry point: find the game and its Wine session, start `uw-helper64
 - Create: `crates/uw-inject/src/bin/uw-inject.rs`
 - Test: `crates/uw-inject/tests/cli.rs`
 
-- [ ] **Step 1: Write the command-construction test first (red)**
+- [ ] **Step 1: Write the command-construction test first**
 
 `crates/uw-inject/tests/cli.rs`:
 
@@ -3468,7 +3723,15 @@ fn run() -> Result<i32, String> {
         }
     }
 
-    let session = GameSession::find_with_proton(&exe, pid, proton)?;
+    let session = match GameSession::find_with_proton(&exe, pid, proton) {
+        Ok(s) => s,
+        Err(e) => {
+            // Report the design's Linux-side code on stdout; the detail goes to stderr.
+            println!("{}", Event::error(e.code()).to_line());
+            eprintln!("[uw-inject] {e}");
+            return Ok(1);
+        }
+    };
     for p in [&helper, &bootstrap] {
         if !p.exists() {
             return Err(format!("missing {}", p.display()));
@@ -3508,6 +3771,9 @@ fn run() -> Result<i32, String> {
             continue;
         };
         println!("{line}");
+        if matches!(&event, Event::Error { code, .. } if code == "version_mismatch") {
+            eprintln!("[uw-inject] restart the game to load the new bootstrap");
+        }
         for cmd in driver.on_event(&event) {
             writeln!(stdin, "{}", cmd.to_line()).map_err(|e| format!("writing to the helper: {e}"))?;
             stdin.flush().ok();
@@ -3586,6 +3852,8 @@ fn a_new_helper_reuses_the_pinned_bootstrap_without_rehooking() {
     let connected = second.next_event(Duration::from_secs(60));
     assert!(connected.contains("bootstrap_connected"), "got: {connected}");
     assert!(connected.contains(r#""overlay_loaded":true"#), "got: {connected}");
+    // It reused the pinned bootstrap without re-hooking (design: "no new hook").
+    assert!(second.wait_stderr("marker present; skipping hook", Duration::from_secs(5)));
 
     // The overlay was not loaded a second time: still exactly one marker file.
     assert_eq!(markers(&pfx, "uw-test-overlay-").len(), 1);
@@ -3600,6 +3868,9 @@ fn forced_callwndproc_fallback_also_connects_and_loads() {
 
     let mut helper = start_helper(&pfx, &["--fallback"], &[]);
     assert!(helper.next_event(Duration::from_secs(200)).contains("bootstrap_connected"));
+    // The connection must have come through WH_CALLWNDPROC, not a WH_GETMESSAGE fallback after a
+    // timeout (design "forced WH_CALLWNDPROC"; the wake-ups make it fire — I1).
+    assert!(helper.wait_stderr("hooked WH_CALLWNDPROC", Duration::from_secs(5)));
     helper.send(&load_overlay_line(&overlay));
     assert!(helper.next_event(Duration::from_secs(30)).contains(r#""code":"ok""#));
 }
@@ -3631,6 +3902,28 @@ fn an_overlay_without_the_export_reports_no_start_export() {
     helper.send(&load_overlay_line(&no_export));
     assert!(helper.next_event(Duration::from_secs(30)).contains(r#""code":"no_start_export""#));
 }
+
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn killing_the_game_reports_game_exited() {
+    let mut pfx = setup("gameexit");
+    pfx.game = Some(wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).spawn().unwrap());
+    let overlay = to_wine_path(&win_artifact("uw_test_overlay.dll"));
+
+    let mut helper = start_helper(&pfx, &[], &[]);
+    assert!(helper.next_event(Duration::from_secs(200)).contains("bootstrap_connected"));
+    helper.send(&load_overlay_line(&overlay));
+    assert!(helper.next_event(Duration::from_secs(30)).contains(r#""code":"ok""#));
+
+    // Kill the game while the helper is idle on stdin; the watcher thread must notice and report
+    // `game_exited` (design failure table), without waiting for the next stdin command.
+    if let Some(mut g) = pfx.game.take() {
+        let _ = g.kill();
+        wait_bounded(&mut g, Duration::from_secs(10));
+    }
+    let event = helper.next_event(Duration::from_secs(20));
+    assert!(event.contains(r#""event":"error""#) && event.contains(r#""code":"game_exited""#), "got: {event}");
+}
 ```
 
 - [ ] **Step 2: Add the full-chain `uw-inject` test**
@@ -3646,7 +3939,7 @@ fn an_overlay_without_the_export_reports_no_start_export() {
 //!
 //!   cargo build --release --target x86_64-pc-windows-gnu -p uw-test-game -p uw-bootstrap \
 //!       -p uw-test-overlay -p uw-helper
-//!   cargo test -p uw-inject --test wine_e2e -- --ignored
+//!   xvfb-run -a cargo test -p uw-inject --test wine_e2e -- --ignored --test-threads=1
 //! `UW_WINE`/`UW_WINESERVER` override the Wine binaries (defaults `/usr/bin/wine[server]`).
 
 use std::io::{BufRead, BufReader};
@@ -3674,6 +3967,9 @@ fn win_artifact(name: &str) -> PathBuf {
 struct Fixture {
     prefix: PathBuf,
     game: Child,
+    /// The game's Linux pid in THIS prefix, passed to `uw-inject --pid` so it never picks a stray
+    /// `uw-test-game.exe` from another prefix (the review's leftover-process hazard).
+    game_pid: i32,
 }
 /// Wait up to `d` for `child` to exit, then kill it (bounded teardown, as in the helper tests).
 fn wait_bounded(child: &mut Child, d: Duration) {
@@ -3699,8 +3995,19 @@ impl Drop for Fixture {
     }
 }
 
-/// Start the test game in a fresh prefix and wait until `/proc` shows it under its exe name
-/// (the first run boots the prefix, which takes a while), as `uw-inject` finds it that way.
+/// The game's Linux pid running in `prefix`: a `uw-test-game.exe` pid whose `/proc/<pid>/environ`
+/// has this prefix's `WINEPREFIX`. `None` until Wine has booted the game.
+fn game_pid_in(prefix: &Path) -> Option<i32> {
+    let want = format!("WINEPREFIX={}", prefix.display());
+    find_pids("uw-test-game.exe").into_iter().find(|pid| {
+        std::fs::read(format!("/proc/{pid}/environ"))
+            .map(|e| e.split(|&b| b == 0).any(|v| v == want.as_bytes()))
+            .unwrap_or(false)
+    })
+}
+
+/// Start the test game in a fresh prefix and wait until it shows up in `/proc` for this prefix
+/// (the first run boots the prefix, which takes a while).
 fn start_game(tag: &str) -> Fixture {
     let prefix = std::env::temp_dir()
         .join(format!("uw-inject-chain-{tag}-{}", std::process::id()))
@@ -3710,44 +4017,47 @@ fn start_game(tag: &str) -> Fixture {
         .arg(win_artifact("uw-test-game.exe"))
         .env("WINEPREFIX", &prefix)
         .env("WINEDEBUG", "-all")
+        .env("WINEDLLOVERRIDES", "mscoree,mshtml=")
         .spawn()
         .unwrap();
-    let fx = Fixture { prefix, game };
     let start = Instant::now();
-    while find_pids("uw-test-game.exe").is_empty() {
+    let game_pid = loop {
+        if let Some(p) = game_pid_in(&prefix) {
+            break p;
+        }
         assert!(start.elapsed() < Duration::from_secs(180), "uw-test-game.exe never started");
         std::thread::sleep(Duration::from_millis(500));
-    }
-    fx
+    };
+    Fixture { prefix, game, game_pid }
 }
 
-/// Overlay marker files written to `%TEMP%` land in the prefix; find them by walking it.
+/// Files starting with `stem` in the prefix users' `%TEMP%`
+/// (`drive_c/users/<user>/AppData/Local/Temp`). **No recursion:** `dosdevices/z: -> /` means a
+/// recursive walk would follow that symlink out into the whole filesystem and never finish.
 fn markers(prefix: &Path, stem: &str) -> Vec<PathBuf> {
-    fn walk(dir: &Path, stem: &str, out: &mut Vec<PathBuf>) {
-        let Ok(rd) = std::fs::read_dir(dir) else { return };
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                walk(&p, stem, out);
-            } else if e.file_name().to_string_lossy().starts_with(stem) {
-                out.push(p);
+    let mut out = Vec::new();
+    for user in std::fs::read_dir(prefix.join("drive_c/users")).into_iter().flatten().flatten() {
+        let temp = user.path().join("AppData/Local/Temp");
+        for e in std::fs::read_dir(&temp).into_iter().flatten().flatten() {
+            if e.file_name().to_string_lossy().starts_with(stem) {
+                out.push(e.path());
             }
         }
     }
-    let mut v = Vec::new();
-    walk(prefix, stem, &mut v);
-    v
+    out
 }
 
 /// Run `uw-inject --proton <wine-root> --exe uw-test-game.exe …` (it finds the running game by
 /// exe name), collect its printed events until one contains `until` (or `within` passes), then
 /// end it with SIGTERM — which, by design, also ends its helper. Events are read on a thread so
 /// the deadline always holds.
-fn run_inject(until: &str, within: Duration) -> Vec<String> {
+fn run_inject(fx: &Fixture, until: &str, within: Duration) -> Vec<String> {
     // `--proton <root>` is any Wine install with `bin/wine`; the system Wine's root is /usr.
     let proton_root = Path::new(&wine()).parent().unwrap().parent().unwrap().to_path_buf();
     let mut child = Command::new(env!("CARGO_BIN_EXE_uw-inject"))
-        .args(["--exe", "uw-test-game.exe", "--proton"])
+        .args(["--exe", "uw-test-game.exe", "--pid"])
+        .arg(fx.game_pid.to_string())
+        .arg("--proton")
         .arg(&proton_root)
         .arg("--helper")
         .arg(win_artifact("uw-helper64.exe"))
@@ -3792,13 +4102,13 @@ fn run_inject(until: &str, within: Duration) -> Vec<String> {
 #[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
 fn uw_inject_connects_and_loads_the_overlay() {
     let fx = start_game("load");
-    let events = run_inject(r#""code":"ok""#, Duration::from_secs(200));
+    let events = run_inject(&fx, r#""code":"ok""#, Duration::from_secs(200));
     assert!(events.iter().any(|e| e.contains("bootstrap_connected")), "events: {events:?}");
     assert!(events.iter().any(|e| e.contains(r#""code":"ok""#)), "events: {events:?}");
     assert_eq!(markers(&fx.prefix, "uw-test-overlay-").len(), 1, "the overlay marker should exist in the prefix");
 
     // A second uw-inject run (client restart) reconnects without reloading the overlay.
-    let events2 = run_inject("bootstrap_connected", Duration::from_secs(60));
+    let events2 = run_inject(&fx, "bootstrap_connected", Duration::from_secs(60));
     assert!(
         events2.iter().any(|e| e.contains("bootstrap_connected") && e.contains(r#""overlay_loaded":true"#)),
         "events2: {events2:?}"
@@ -3813,12 +4123,12 @@ Run:
 ```bash
 cargo build --release --target x86_64-pc-windows-gnu -p uw-test-game -p uw-bootstrap -p uw-test-overlay -p uw-helper
 cargo build -p uw-inject --bin uw-inject
-cargo test -p uw-helper --test wine_e2e -- --ignored
-cargo test -p uw-inject --test wine_e2e -- --ignored
+xvfb-run -a cargo test -p uw-helper --test wine_e2e -- --ignored --test-threads=1
+xvfb-run -a cargo test -p uw-inject --test wine_e2e -- --ignored --test-threads=1
 ```
-Expected: the helper suite reports `6 passed` (the happy path from Task 6 plus the five scenarios here), the inject suite `1 passed`. Each test cleans up its scratch prefix and kills its wineserver on drop. Run the scenarios one at a time (`cargo test -p uw-helper --test wine_e2e <name> -- --ignored`) when debugging; each boots its own prefix, so a full run takes several minutes.
+Expected: the helper suite reports `7 passed` (the happy path from Task 6 plus the six scenarios here), the inject suite `1 passed`. Each test cleans up its scratch prefix and kills its wineserver on drop. Run the scenarios one at a time (`cargo test -p uw-helper --test wine_e2e <name> -- --ignored`) when debugging; each boots its own prefix, so a full run takes several minutes.
 
-**Status when this plan was written:** the happy path (hook → `hello` → `load_overlay` → `ok` → marker in the prefix) was run by hand under Wine 11.20 with these artifacts and passed. The reconnect scenario was run once with an earlier version of this harness and stalled past every event deadline, so the stall was in teardown or in the helper's exit under Wine; the cause was not isolated. Every teardown wait is now bounded (`wait_bounded`), so a repeat fails with a message instead of hanging. If `a_new_helper_reuses_the_pinned_bootstrap_without_rehooking` fails, first check that killing helper 1 actually ends the `uw-helper64.exe` process, and that helper 2 can create the pipe (`FILE_FLAG_FIRST_PIPE_INSTANCE`) and the helper mutex once helper 1 is gone. Fix the cause in the helper or bootstrap, not by loosening the test.
+**Status when this plan was written:** the happy path (hook → `hello` → `load_overlay` → `ok` → marker in the prefix) and the reconnect sequence (kill helper 1, helper 2 gets `overlay_loaded:true` in ~1 s) were both run by hand under Wine 11.20 with these artifacts and passed. An earlier version of this harness hung at the final `markers()` assert — not in teardown — because the old recursive `markers` followed the prefix's `dosdevices/z: -> /` symlink and walked the whole filesystem forever; the non-recursive `markers` above fixes that, and every teardown wait is bounded (`wait_bounded`). Run the suite under `xvfb-run -a` with `--test-threads=1` so no game window reaches the screen and only one prefix boots at a time. If `a_new_helper_reuses_the_pinned_bootstrap_without_rehooking` fails, check that killing helper 1 ends its `uw-helper64.exe` and that helper 2 can retake the pipe (`FILE_FLAG_FIRST_PIPE_INSTANCE`) and the helper mutex; fix the cause in the helper or bootstrap, not by loosening the test.
 
 - [ ] **Step 4: Commit**
 
@@ -3906,7 +4216,7 @@ Run:
 ```bash
 cargo test -p uw-pipe-proto -p uw-inject -p uw-helper -p uw-bootstrap
 ```
-Expected: every crate's tests pass (`uw-pipe-proto`: names + `pipe` (8) + `jsonl` (3); `uw-inject`: discovery/driver (11) + `cli` (2); `uw-helper`: `decide` (13); `uw-bootstrap`: `state` (3)). No failures.
+Expected: every crate's tests pass (`uw-pipe-proto`: names (1) + `pipe` (10) + `jsonl` (5); `uw-inject`: discovery/driver (12) + `cli` (2); `uw-helper`: `decide` (13); `uw-bootstrap`: `state` (3)). No failures.
 
 - [ ] **Step 3: All Windows artifacts build**
 
@@ -3922,10 +4232,10 @@ Expected: `Finished`, and `target/x86_64-pc-windows-gnu/release/` holds `uw-test
 Run:
 ```bash
 cargo build -p uw-inject --bin uw-inject
-cargo test -p uw-helper --test wine_e2e -- --ignored
-cargo test -p uw-inject --test wine_e2e -- --ignored
+xvfb-run -a cargo test -p uw-helper --test wine_e2e -- --ignored --test-threads=1
+xvfb-run -a cargo test -p uw-inject --test wine_e2e -- --ignored --test-threads=1
 ```
-Expected: `uw-helper` Wine suite `6 passed`, `uw-inject` Wine suite `1 passed`.
+Expected: `uw-helper` Wine suite `7 passed`, `uw-inject` Wine suite `1 passed`.
 
 - [ ] **Step 5: Confirm the owner live check passed**
 
@@ -3963,4 +4273,13 @@ There is no code change in this task, so there is nothing to commit.
 
 **3. Type consistency** — names match across tasks: `Message`/`StatusCode`/`decode`/`encode` (`uw-pipe-proto::pipe`); `Command`/`Event` (`jsonl`); `pipe_name`/`helper_mutex_name`/`marker_mutex_name` (`names`); `Win32`/`HookKind`/`HelloWait`/`Outcome`/`Config`/`run` (`uw-helper::decide`); `OverlayState`/`Decision` (`uw-bootstrap::state`); `GameSession`/`helper_command`/`find_pids` (`uw-inject::discovery`); `Driver` (`uw-inject::driver`); exports `uw_bootstrap_hook`, `uw_overlay_start`; artifacts `uw_bootstrap64.dll`, `uw-helper64.exe`, `uw_test_overlay.dll`, `uw-test-game.exe`.
 
-**Items from the design with no task:** none. Everything in the design is scheduled; nothing beyond it was added.
+**Additions beyond the design (all test/operability aids, not new features):**
+- `pipe_error` and `status_timeout` / `path_too_long` / `game_exited` are helper-local JSON error
+  codes. `game_exited` is in the design's failure table; the others are structured reports for
+  conditions the design leaves as free behaviour, so the host never sees a silent exit.
+- `UW_WINDOW_TIMEOUT_MS` / `UW_HELLO_TIMEOUT_MS` let the Wine tests shorten the 120 s / 10 s
+  defaults; unset in production, the design's timeouts stand.
+- `uw-inject --fallback` and `uw-helper64 --fallback` force `WH_CALLWNDPROC` so the design's
+  fallback hook can be exercised on demand (Task 8) and retried in the gate/live check.
+
+**Items from the design with no task:** none. Everything in the design is scheduled.
