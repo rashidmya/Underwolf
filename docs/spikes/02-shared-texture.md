@@ -168,8 +168,10 @@ benchmark (Task 5) also runs a GPU-bound scenario.
 
 ## Decisions needed from owner
 
-- None open for Linux. For milestone 1: whether the ~3% budget applies to the layer alone or to
-  the whole overlay including Chromium, and which optimisations come first.
+- None open for Linux. Decided 2026-10-22 (owner, Task 17 handover): the ~3% budget applies to
+  the whole overlay (Chromium + copy + layer), not the layer alone. Optimisation order for
+  milestone 1: changed-region frames, then per-widget frame rates, then GPU shared textures
+  (needs the AMD check first).
 
 ## Not tested and why
 

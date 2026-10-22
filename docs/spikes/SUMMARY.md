@@ -15,19 +15,19 @@ Linux only (plan Amendment C). For the owner's review before any milestone plan 
 From the findings docs:
 - **01:** none open (DLL load method and C3's input surface are decided there; transport,
   localhost TCP, was the assistant's call, and milestone item 2 would replace it).
-- **02:** whether the ~3% budget applies to the layer alone or to the whole overlay including
-  Chromium, and which optimisations come first.
-- **03, 1. Hideout/sandbox match id:** the game gives none there, so no `match_start`/`match_end`.
-  Keep emitting nothing, or have the provider generate a local id (as Overwolf's handler does)?
-- **03, 2. Unavailable features:** accept `incoming_damage` and `match_history` as unavailable, or
-  choose another source?
-- **03, 3. `tower_destroyed` accuracy:** accept it on the owner-observed subset, or verify it on a
-  matchmade match first?
-- **03, Verdict wording** (ledger, Task C7): "GO, with owner-accepted deviations" is the
-  implementer's reading (template: `GO` / `NO-GO` / `PARTIAL`). Deviations (owner rulings): 1 real
-  match instead of ≥ 3; latency by eye; bench not alternated, with nothing injected in A. Not an
-  owner ruling: `installed_build` not run on 6810 with f528948. Keep the wording, use `GO` plus
-  this list, or `PARTIAL`?
+- **02:** ~~budget scope and optimisation order~~ — decided 2026-10-22: the ~3% budget applies to
+  the whole overlay (Chromium + copy + layer). Order: changed-region frames, per-widget frame
+  rates, GPU shared textures (needs the AMD check).
+- **03, 1. Hideout/sandbox match id:** ~~decided 2026-10-22~~ — keep emitting nothing. Overwolf's
+  Deadlock handler has no local match id either (it forwards the plugin's `match_start` once and
+  fires `match_end` when the map becomes the Hideout).
+- **03, 2. Unavailable features:** ~~decided 2026-10-22~~ — `match_history`: milestone 1 looks for
+  it in game memory, with deadlock-api.com's match history as the fallback. `incoming_damage`
+  stays unavailable (no HUD reads).
+- **03, 3. `tower_destroyed` accuracy:** ~~decided 2026-10-22~~ — accepted on the owner-observed
+  subset.
+- **03, Verdict wording:** ~~decided 2026-10-22~~ — keep "GO, with owner-accepted deviations".
+  The `installed_build`-on-6810-with-f528948 deviation is now owner-accepted too.
 
 Plan's minimum list:
 - **AMD verification:** not done. Spikes 1 and 2 ran on NVIDIA only (no AMD hardware). 02: AMD is

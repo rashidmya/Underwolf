@@ -21,12 +21,13 @@
   0 MISSING, 0 UNCONFIRMED). From the timebox: `game_mode`, the `game_paused` event,
   `team_score` and `match_outcome`.
 - `tower_destroyed` is implemented; the owner-observed subset matched, but the full count is
-  unverified. `incoming_damage` and `match_history` are unavailable.
+  unverified (accepted 2026-10-22). `incoming_damage` and `match_history` are unavailable.
 - Cost: +0.38% avg FPS, +0.14% p99 (PASS). client.dll went from 6801 to 6807, 6810 and 6813
   (Step 8 ran live on 6813) with no code change. The main-loop patterns (tier0/engine2) have not
   been through a patch.
 - Deviations (owner rulings): 1 real match instead of at least 3; latency checked by eye; the
-  bench was not alternated and had nothing injected in A.
+  bench was not alternated and had nothing injected in A; `installed_build` was not run on 6810
+  with f528948 (accepted 2026-10-22).
 - Fail-safe: the first Step 5 run published a wrong value (local kills stayed 0) under
   deliberate corruption. It was stopped and reported; the owner ruled a layout check (Task C6L),
   and the rerun switched the roster off instead (PASS).
@@ -79,8 +80,8 @@ JSONL logs and watch logs are kept in `~/.local/share/underwolf-spike/runs/c6-*`
     - Notes: bots are `Bot0`..`Bot10` with `steam_id` 0; team ids 2 = Hidden King, 3 = Archmother;
       `match_clock` is cleared at `PostGame`; `game_paused` never true there (tested in Step 8).
     - No `match_id`/`match_start` in the Hideout/sandbox (no match there); `game_mode` had no
-      task yet at Step 1 (see Step 8). Overwolf's handler generates a local match id in that
-      case; ours does not (no invented data). Owner decision pending.
+      task yet at Step 1 (see Step 8). Overwolf's Deadlock handler has no local match id either
+      (decided 2026-10-22: ours emits nothing in the Hideout).
 - [x] **Step 2: Cost.** `uw-spike-bench compare`, Hideout, collector off vs on (module injected,
   input hooks off both times). Expected: `PASS` (avg FPS loss ≤ 3.0% and p99 increase ≤ 3.0%).
   - Deviations (owner ruling 2026-10-21): one game launch, Hideout, layer in passthrough every
@@ -451,14 +452,22 @@ Cost:
 
 ## Decisions needed from owner
 
-1. **Hideout/sandbox match id.** The game gives no `match_id` there, so there is no
-   `match_start`/`match_end`. Overwolf's handler generates a local match id in that case; ours
-   emits nothing (no invented data). Keep that, or have the provider generate a local id?
-   (Pending since Step 1.)
-2. **Unavailable features.** `incoming_damage`: Overwolf reads it from a HUD object at fixed
-   non-schema offsets, and the game's own numbers arrive as user messages; both are outside the
-   collector rules. `match_history`: not attempted. Accept both as unavailable, or choose another
-   source?
-3. **`tower_destroyed` accuracy.** The full count is unverified: the private-lobby match's
-   metadata never came, and such matches may never be published. Accept it on the
-   owner-observed subset, or verify it on a matchmade match first?
+All decided (owner rulings, 2026-10-22, Task 17 handover).
+
+1. ~~Hideout/sandbox match id~~ — decided 2026-10-22: **keep emitting nothing in the Hideout.**
+   The game gives no `match_id` there, so there is no `match_start`/`match_end`. This matches
+   Overwolf: its Deadlock handler has no local or pseudo match id (that is its CS2 handler's
+   `pseudo_match_id`); it forwards the plugin's `match_start` once and fires `match_end` when the
+   map becomes the Hideout (`maps/dl_hideout.vpk`). Sources: the owner's research
+   `underwolf-research` (`js_valve.txt`, `DeadlockGameHandler`) and the public Deadlock GEP page
+   on dev.overwolf.com (documents only the game's `match_id`). (An earlier version of this doc
+   wrongly said Overwolf generates a local id.)
+2. ~~Unavailable features~~ — decided 2026-10-22: `match_history`: milestone 1 looks for it in
+   game memory, with deadlock-api.com's match history as the fallback. `incoming_damage`: stays
+   unavailable, with no HUD reads (the game's own numbers arrive as user messages, and Overwolf
+   reads a HUD object at fixed non-schema offsets; both are outside the collector rules).
+3. ~~`tower_destroyed` accuracy~~ — decided 2026-10-22: **accepted on the owner-observed
+   subset.** The full count stays unverified (the private-lobby match's metadata never came).
+4. ~~Verdict wording~~ — decided 2026-10-22: **keep "GO, with owner-accepted deviations"** (same
+   form as Spike 2). The deviation "`installed_build` not run on 6810 with f528948" is now
+   owner-accepted too.
