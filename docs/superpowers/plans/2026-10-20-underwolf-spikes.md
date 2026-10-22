@@ -445,6 +445,8 @@ external `/proc` reader, so they are replaced by Tasks C1–C7 below. Tasks 14�
 **Inputs:** `~/Dev/underwolf-research/docs` (README and "Behavior-level summary" sections only);
 `~/Dev/underlock/src/games/native/{source2,deadlock-roster,deadlock-clock}.js` for field lists
 and read rules (phase, match_id, roster, items and clock were checked live there).
+Owner ruling (2026-10-22): `~/Dev/underwolf-research/evidence/*.evidence.json` may also be
+read. Underwolf still runs no reverse engineering of Overwolf itself and copies no Overwolf code.
 
 **Evidence before planning (2026-10-21, offline, read-only):** Deadlock updated to ClientVersion
 6801 (`client.dll` SHA-256 `a7d0d9e8…589e`). underlock's `inspectDeadlockModule` still resolves
