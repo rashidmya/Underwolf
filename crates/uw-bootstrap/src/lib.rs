@@ -8,5 +8,7 @@
 //! with the game's pid. Task 5 adds `pub mod state` (portable) and grows `win` into the pipe
 //! connect + overlay load.
 
+pub mod state;
+
 #[cfg(windows)]
 mod win;

@@ -603,6 +603,7 @@ checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 name = "uw-bootstrap"
 version = "0.0.0"
 dependencies = [
+ "uw-pipe-proto",
  "windows-sys",
 ]
 
@@ -739,6 +740,13 @@ dependencies = [
 
 [[package]]
 name = "uw-test-game"
+version = "0.0.0"
+dependencies = [
+ "windows-sys",
+]
+
+[[package]]
+name = "uw-test-overlay"
 version = "0.0.0"
 dependencies = [
  "windows-sys",
