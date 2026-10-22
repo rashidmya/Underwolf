@@ -21,8 +21,6 @@ fn main() {
 
 #[cfg(windows)]
 mod win {
-    use std::ffi::c_void;
-
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -75,7 +73,6 @@ mod win {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
-            let _ = (msg.pt, LPARAM::default(), std::ptr::null::<c_void>());
         }
     }
 }

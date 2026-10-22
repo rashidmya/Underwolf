@@ -22,7 +22,7 @@ mod win {
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::time::{Duration, Instant};
 
-    use windows_sys::Win32::Foundation::{HWND, LPARAM, MAX_PATH, RECT};
+    use windows_sys::Win32::Foundation::{CloseHandle, HWND, INVALID_HANDLE_VALUE, LPARAM, RECT};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
@@ -49,20 +49,27 @@ mod win {
     }
 
     fn find_game(exe: &str) -> Option<u32> {
-        // SAFETY: a process snapshot walked with correctly sized PROCESSENTRY32W.
+        // SAFETY: a process snapshot walked with correctly sized PROCESSENTRY32W, closed on
+        // every path (the caller polls, so a leak would grow every 500 ms).
         unsafe {
             let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap == INVALID_HANDLE_VALUE {
+                return None;
+            }
+            let mut found = None;
             let mut e: PROCESSENTRY32W = std::mem::zeroed();
             e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
             let mut ok = Process32FirstW(snap, &mut e) != 0;
             while ok {
                 if e.th32ProcessID != GetCurrentProcessId() && basename_eq(&e.szExeFile, exe) {
-                    return Some(e.th32ProcessID);
+                    found = Some(e.th32ProcessID);
+                    break;
                 }
                 ok = Process32NextW(snap, &mut e) != 0;
             }
+            CloseHandle(snap);
+            found
         }
-        None
     }
 
     struct Found {
@@ -109,7 +116,9 @@ mod win {
     }
 
     fn proof_path(pid: u32) -> std::path::PathBuf {
-        let mut buf = [0u16; MAX_PATH as usize];
+        // 32768 like the bootstrap: `GetTempPathW` never needs more, so it never returns the
+        // "required size" (with nothing written) that a MAX_PATH buffer could get.
+        let mut buf = [0u16; 32768];
         // SAFETY: `buf` writable for its length.
         let n = unsafe { GetTempPathW(buf.len() as u32, buf.as_mut_ptr()) } as usize;
         let dir = String::from_utf16_lossy(&buf[..n.min(buf.len())]);
@@ -138,10 +147,10 @@ mod win {
 
         let start = Instant::now();
         let (pid, thread, hwnd) = loop {
-            if let Some(pid) = find_game(&exe) {
-                if let Some((t, h)) = ui_thread(pid) {
-                    break (pid, t, h);
-                }
+            if let Some(pid) = find_game(&exe)
+                && let Some((t, h)) = ui_thread(pid)
+            {
+                break (pid, t, h);
             }
             if start.elapsed() > Duration::from_secs(120) {
                 println!("no_window");
@@ -166,9 +175,14 @@ mod win {
             println!("hook_failed no_export");
             return 4;
         };
-        // SAFETY: transmute the resolved export to the hook procedure type.
-        let hookproc: HOOKPROC =
-            Some(unsafe { std::mem::transmute::<_, unsafe extern "system" fn(i32, WPARAM, LPARAM) -> LRESULT>(proc_addr) });
+        // SAFETY: transmute the resolved export (`FARPROC`'s inner fn type, named so the source
+        // type is pinned) to the hook procedure type it really has.
+        let hookproc: HOOKPROC = Some(unsafe {
+            std::mem::transmute::<
+                unsafe extern "system" fn() -> isize,
+                unsafe extern "system" fn(i32, WPARAM, LPARAM) -> LRESULT,
+            >(proc_addr)
+        });
 
         let kind = if fallback { WH_CALLWNDPROC } else { WH_GETMESSAGE };
         // SAFETY: a thread-scoped hook with a DLL-resident procedure and that DLL's module handle.

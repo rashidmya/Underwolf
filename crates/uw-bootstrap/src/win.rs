@@ -10,7 +10,6 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::LibraryLoader::{
     GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_PIN,
 };
-use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 use windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx;
 use windows_sys::Win32::Foundation::{GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE};
@@ -20,9 +19,7 @@ static STARTED: AtomicBool = AtomicBool::new(false);
 /// Does nothing on purpose. The bootstrap is also mapped into the helper, so `DllMain` must not
 /// touch the loader lock or start work (design: loader-lock rule). Returns TRUE.
 #[unsafe(no_mangle)]
-pub extern "system" fn DllMain(_inst: HINSTANCE, reason: u32, _reserved: *mut core::ffi::c_void) -> i32 {
-    let _ = reason;
-    let _ = DLL_PROCESS_ATTACH;
+pub extern "system" fn DllMain(_inst: HINSTANCE, _reason: u32, _reserved: *mut core::ffi::c_void) -> i32 {
     1
 }
 
@@ -33,10 +30,12 @@ pub extern "system" fn DllMain(_inst: HINSTANCE, reason: u32, _reserved: *mut co
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn uw_bootstrap_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     // No Rust panic may cross this FFI boundary (since Rust 1.81 it aborts, which would kill the
-    // game). Catch it; the call always ends in `CallNextHookEx`.
+    // game). Catch it; the call always ends in `CallNextHookEx`. `code < 0` must go straight to
+    // `CallNextHookEx` (HOOKPROC contract), so only `code >= 0` may start the worker.
     let _ = std::panic::catch_unwind(|| {
-        if !STARTED.swap(true, Ordering::AcqRel) {
-            pin_self();
+        // The worker starts only once the pin holds: unpinned, the helper's unhook could unload
+        // code the worker is still running.
+        if code >= 0 && !STARTED.swap(true, Ordering::AcqRel) && pin_self() {
             // One worker thread; nothing else runs on the game's thread.
             let _ = std::thread::Builder::new()
                 .name("uw-bootstrap".into())
@@ -48,15 +47,16 @@ pub unsafe extern "system" fn uw_bootstrap_hook(code: i32, wparam: WPARAM, lpara
 }
 
 /// Pins this module so unhooking in the helper cannot unload it (design: `FROM_ADDRESS | PIN`).
-fn pin_self() {
+/// Returns whether the pin took.
+fn pin_self() -> bool {
     let mut module: HMODULE = std::ptr::null_mut();
     // SAFETY: FROM_ADDRESS passes an address in this module as the "name"; PIN keeps it loaded.
     unsafe {
         GetModuleHandleExW(
             GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-            pin_self as fn() as usize as *const u16,
+            pin_self as fn() -> bool as usize as *const u16,
             &mut module,
-        );
+        ) != 0
     }
 }
 
