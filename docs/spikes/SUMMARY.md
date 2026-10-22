@@ -24,8 +24,10 @@ From the findings docs:
 - **03, 2. Unavailable features:** ~~decided 2026-10-22~~ — `match_history`: milestone 1 looks for
   it in game memory, with deadlock-api.com's match history as the fallback. `incoming_damage`
   stays unavailable (no HUD reads).
-- **03, 3. `tower_destroyed` accuracy:** ~~decided 2026-10-22~~ — accepted on the owner-observed
-  subset.
+- **03, 3. `tower_destroyed` accuracy:** ~~decided 2026-10-22~~ — marked **failed**, fix in
+  milestone 1 (Deadlock provider: per-objective source checked against the API objective list).
+  The full check (match 122304230) found 20 events vs 18 API objectives, 1 missed, 4 extra.
+  Supersedes "accepted on the owner-observed subset".
 - **03, Verdict wording:** ~~decided 2026-10-22~~ — keep "GO, with owner-accepted deviations".
   The `installed_build`-on-6810-with-f528948 deviation is now owner-accepted too.
 
@@ -41,9 +43,10 @@ Plan's minimum list:
   - The injection itself (standard Win32): low risk.
   - The hook (`WndProc` subclassing, `WM_KEY*` delivery, SDL3's statically imported
     `GetRawInputBuffer`): low risk from Proton, moderate from game updates.
-- **Spike 3 features unavailable or unverified (03):**
+- **Spike 3 features unavailable or failed (03):**
   - Unavailable: `incoming_damage`, `match_history`.
-  - Unverified: the full `tower_destroyed` count (22 events; the deadlock-api metadata never came).
+  - Failed: `tower_destroyed` (second real match 122304230: 20 events vs 18 API objectives, 16 of
+    17 matched 7-10 s late, 1 missed, 4 extra). Owner ruling 2026-10-22: fix in milestone 1.
   - Not yet through a patch: only the `tier0`/`engine2` main-loop patterns. The rows added in
     Step 8 (`game_mode`, `team_score`, `match_outcome`, the `game_paused` true/false event,
     `tower_destroyed`) were written and tested offline on 6810 and ran live only on 6813, so they
@@ -109,6 +112,8 @@ dropped (Amendment C), so Spike 2 (Windows Vulkan, DX11) and Spike 3 (Windows) h
      and 6813 (the Step 8 live checks ran on 6813) with no code change. Under deliberate
      corruption the first run published a wrong value; with the layout check added, the rerun
      switched the roster off instead (PASS).
+   - Fix `tower_destroyed` (03, failed): per-objective source checked against the API objective
+     list (owner lead: the extras may come from Shrines and Patron phases).
    - Provider requirement (03): turn the collector's raw event data into Overwolf's documented
      shapes (`match_clock` as "01:00", null for kill/death/assist/match_start/match_end, the plain
      team name for `tower_destroyed`).
