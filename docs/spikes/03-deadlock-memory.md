@@ -27,11 +27,11 @@ The schema dump of this build is `spikes/dl-collector/dumps/schema-6801.json`.
 
 ### Live runs (Task C6)
 
-Setup: runs on 2026-10-21 and 2026-10-22, Deadlock ClientVersion 6807 (Steps 1, 2, 4, 6) and 6810
+Setup: runs on 2026-10-21 and 2026-10-22, Deadlock ClientVersion 6807 (Steps 1, 2, 4, 5 first run, 6) and 6810
 (Steps 3, 5 rerun, 8; patched mid-window, see Step 7), Proton 11.0, Linux 7.2.11-1-cachyos,
 Intel Core i9-13900K.
 JSONL logs and watch logs are kept in `~/.local/share/underwolf-spike/runs/c6-*` (not committed:
-`*.jsonl` is ignored).
+`*.jsonl` is ignored). Bare file names below are in that directory.
 
 - [x] **Step 1: Hideout and bot match, everything on.** `osr-host --capture win32 --gep ""` +
   `uw-gep watch --no-inject`. Expected: `plugin_status="scanning"`, phase, roster (12 in the bot
@@ -53,7 +53,7 @@ JSONL logs and watch logs are kept in `~/.local/share/underwolf-spike/runs/c6-*`
       overlay widget visible throughout.
     - Notes: bots are `Bot0`..`Bot10` with `steam_id` 0; team ids 2 = Hidden King, 3 = Archmother;
       `match_clock` is cleared at `PostGame`; `game_paused` never true there (tested in Step 8).
-    - No `match_id`/`match_start`/`game_mode` in the Hideout/sandbox (no match there). Overwolf's
+    - No `match_id`/`match_start` in the Hideout/sandbox (no match there); `game_mode` had no task yet at Step 1 (see Step 8). Overwolf's
       handler generates a local match id in that case; ours does not (no invented data). Owner
       decision pending.
 - [x] **Step 2: Cost.** `uw-spike-bench compare`, Hideout, collector off vs on (module injected,
@@ -91,7 +91,7 @@ JSONL logs and watch logs are kept in `~/.local/share/underwolf-spike/runs/c6-*`
 
   | Match id | Log | Team map used | OK | MISMATCH | MISSING | UNCONFIRMED | Notes |
   |---|---|---|---|---|---|---|---|
-  | 121819616 | `c6-s3-real-6810.jsonl`, `c6-s3-verify.log` | none passed (confirmed by hand: 2 = 0, 3 = 1) | 49 | 0 | 0 | 12 (team rows only) | Standard match, 6810, 46:58, owner won as Archmother. All 12 K/D/A equal the scoreboard; items 11-12 each; last `match_clock` 46:57 vs scoreboard 46:58; `match_start`/`match_end` correct; `disabled_tasks` []. API metadata was 503 (not published) and then 429 (3 requests/hour) until the verify at ~15:25 on 2026-10-22. |
+  | 121819616 | `c6-s3-real-6810.jsonl`, `c6-s3-verify.log` | none passed (confirmed by hand: 2 = 0, 3 = 1) | 49 | 0 | 0 | 12 (team rows only) | Standard match, 6810, 46:58, owner won as Archmother. All 12 K/D/A equal the scoreboard; items 11-12 each; last `match_clock` 46:57 vs scoreboard 46:58; `match_start`/`match_end` correct; `disabled_tasks` []. API metadata was 503 (not published) and then 429 (3 requests/hour) until the verify at ~15:18 (log mtime) on 2026-10-22. |
 
 - [x] **Step 4: Latency.** Bot match, screen recording next to `watch`; for 5 kills compare the
   kill-feed time with the `kill` event's `t_ms`. Expected: ≤ 1 s each.
@@ -107,7 +107,7 @@ JSONL logs and watch logs are kept in `~/.local/share/underwolf-spike/runs/c6-*`
   (`invalid: …`) or publishes no wrong value, compared against Step 1. Any wrong value published
   is a Spike 3 failure: stop and report.
   - Result: **first live run FAILED, fixed, rerun PASS.**
-  - First run (2026-10-21 23:37, collector-only, sandbox with 3 bots), case 1
+  - First run (2026-10-21 23:37, build 6807, collector-only, sandbox with 3 bots), case 1
     `corrupt=PlayerDataGlobal_t.m_iPlayerKills` (delta +8): the offset moved onto
     `m_iPlayerAssists` (+88 to +96). The owner killed a bot with no assist: Bot6 deaths 0 to 1 was
     published correctly, but the local kills stayed 0 (a wrong value published), no kill event,
@@ -115,7 +115,7 @@ JSONL logs and watch logs are kept in `~/.local/share/underwolf-spike/runs/c6-*`
     semantic or layout check, and a shift onto a same-type neighbour is invisible to the pointer,
     count, string and flag validation. Stopped and reported; case 2 not run. Log
     `c6-s5-kills.jsonl`.
-  - Fix (owner ruling, Task C6L, commits b35af06..b4df974): per required field a relation (anchor
+  - Fix (owner ruling, Task C6L, commits f528948..b4df974): per required field a relation (anchor
     field, delta) taken from the 6801 dump, checked in `Collector::start` after `corrupt=`. A
     failure disables only the dependent tasks with `invalid: layout: Class.field`. It catches
     same-type neighbour shifts and real reorders. Cost accepted by the owner: a legal Valve
@@ -139,8 +139,8 @@ JSONL logs and watch logs are kept in `~/.local/share/underwolf-spike/runs/c6-*`
     3. `uw-gep` `kill -9`: the helper is orphaned; the next `uw-gep` stops it and starts a new one.
     - Each time all 33 keys were back within ~1 s, cleared keys were null, and the game kept
       running. The owner closed the game afterwards (22:22), not a crash.
-    - Finding: on every reattach the helper reports `lost` (1949, 2005 = ring sequence since
-      collector start) and replays the ring's last ~30 events (`match_clock` ~30 s old). This is
+    - Finding: on every reattach the helper reports `lost` (1949, 1979, 2005 = ring sequence
+      since collector start) and replays the ring's last ~30 events (`match_clock` ~30 s old). This is
       the known C5 minor: a production consumer should start at the write head or mark replays.
     - Logs `c6-s6-restart.jsonl`, `c6-s6-restart2.jsonl`, `c6-s6-watch.log`, `c6-s6-watch2.log`.
 - [x] **Step 7: Robustness across updates.** After the next Deadlock patch, rerun the ignored
@@ -156,10 +156,11 @@ JSONL logs and watch logs are kept in `~/.local/share/underwolf-spike/runs/c6-*`
     (GAME_TIME hit RVA 0x1975d70 to 0x1975d00). On 6810 the collector loaded from the unchanged
     installed DLL (commit f528948): `plugin_status` `scanning`, `disabled_tasks` [], phase, clock,
     roster and items sane in the Hideout. Later builds (b4df974, 1472875) also pass
-    `installed_build` 3/3 on 6810 (layout relations hold).
+    `installed_build` 3/3 on 6810 (layout relations hold). `installed_build` was not run on 6810
+    with f528948 itself; the later builds' changes were the layout check and the Step 8 tasks, not
+    patch fixes.
   - Schema dump diff: 6801 vs 6807 empty (3963 classes, 13832 fields, 0 added/removed/moved);
-    6801 vs 6810 empty (same counts). Dumps are in the scratchpad, not committed (identical to
-    `schema-6801.json`).
+    6801 vs 6810 empty (same counts). Dumps `schema-6807.json` and `schema-6810.json` are in the session scratchpad (not committed).
   - Step 1 rerun: Steps 1, 2, 4 and 6 all ran on 6807, and Steps 3, 5 rerun and 8 on 6810, with
     no code changes caused by the patches.
   - Caveat: `tier0`/`engine2` were not patched, so the main-loop patterns have not been through a
@@ -173,12 +174,12 @@ JSONL logs and watch logs are kept in `~/.local/share/underwolf-spike/runs/c6-*`
 
   | Feature | Candidate class.field | Matches the game's display? | Outcome |
   |---|---|---|---|
-  | `game_mode` | `C_CitadelGameRules.m_eMatchMode` (0xa8, enum `ECitadelMatchMode`) + `m_eGameMode` (0xac, enum `ECitadelGameMode`); enum names paired by name from the game's own schema enum records | Yes: private lobby gave `{"match_mode":"PrivateLobby","game_mode":"Normal"}`; cleared at match end; not published in the Hideout (both enums unnamed there) | PASS, from memory |
-  | `game_paused` | `C_GameRules.m_bGamePaused` (0x38, u8 bool; already read by the clock) | Yes: 2 pauses gave exactly true, false, true, false; clock frozen during both (10 s, 5 s). Venue: private lobby, owner host | PASS, from memory |
-  | `team_score` | `C_Team.m_iScore` (0x620) per team (`C_BaseEntity.m_iTeamNum` selects Amber/Sapphire); the game's top bar shows it as the team's kills | Yes: mid-match HUD orange 7 / blue 5 = log amber 7 / sapphire 5; final 40/63 = scoreboard; all 12 K/D/A identical. In the Hideout: 0-0, then amber 1 = roster sum after an owner kill | PASS, from memory |
-  | `match_outcome` | `C_CitadelGameRules.m_iWinningTeam` (0xc0), published only in PostGame and End | Yes: `{"winning_team":"SAPPHIRE"}` at PostGame, scoreboard "Archmother Victorious"; null at End to None. Value is the winning team (AMBER/SAPPHIRE, as Overwolf documents), not local victory/defeat | PASS, from memory |
-  | `tower_destroyed` | `C_CitadelTeam.m_nBossesAlive` (0x6b8): the event fires when a team's count drops, data = the team that lost it ("Amber"/"Sapphire"); gated to GameInProgress and Normal mode | Partly: 22 events (Amber 14, Sapphire 8) from 08:11 to 22:55; the owner-observed subset matched (2 enemy Guardians gave 2x Amber, own Guardian gave Sapphire, shrine). No event in PostGame (the Patron kill) by design. The full 22-event count is **not yet checked** against an objective list (deadlock-api metadata gave 503 "Steam is busy" at 15:17); pending | Implemented from memory; accuracy **pending**, not claimed PASS |
-  | `incoming_damage` | none usable: only via the Panorama HUD object `CCitadel_Hud_DamageReport` (non-schema offsets) or a message hook, both outside the read-only rules | n/a | `unavailable` (no task; not emitted) |
+  | `game_mode` | `C_CitadelGameRules.m_eMatchMode` (0xa8, enum `ECitadelMatchMode`) + `m_eGameMode` (0xac, enum `ECitadelGameMode`); enum names paired by name from the game's own schema enum records | Yes: private lobby gave `{"match_mode":"PrivateLobby","game_mode":"Normal"}`; cleared at match end; not published in the Hideout (both enums unnamed there) | PASS (source: game memory) |
+  | `game_paused` | `C_GameRules.m_bGamePaused` (0x38, u8 bool; already read by the clock) | Yes: 2 pauses gave exactly true, false, true, false; clock frozen during both (10 s, 5 s). Venue: private lobby, owner host | PASS (source: game memory) |
+  | `team_score` | `C_Team.m_iScore` (0x620) per team (`C_BaseEntity.m_iTeamNum` selects Amber/Sapphire); the game's top bar shows it as the team's kills | Yes: mid-match HUD orange 7 / blue 5 = log amber 7 / sapphire 5; final 40/63 = scoreboard; all 12 K/D/A identical. In the Hideout: 0-0, then amber 1 = roster sum after an owner kill | PASS (source: game memory) |
+  | `match_outcome` | `C_CitadelGameRules.m_iWinningTeam` (0xc0), published only in PostGame and End | Yes: `{"winning_team":"SAPPHIRE"}` at PostGame, scoreboard "Archmother Victorious"; null when the phase left PostGame for None (no End phase was logged in this match; `match_end` fired at that transition, 10.2 s after PostGame). Value is the winning team (AMBER/SAPPHIRE, as Overwolf documents), not local victory/defeat | PASS (source: game memory) |
+  | `tower_destroyed` | `C_CitadelTeam.m_nBossesAlive` (0x6b8): the event fires when a team's count drops, data = the team that lost it ("Amber"/"Sapphire"); gated to GameInProgress and Normal mode | Partly: 22 events (Amber 14, Sapphire 8) from 08:11 to 22:55; the owner-observed subset matched (2 enemy Guardians gave 2x Amber, own Guardian gave Sapphire, shrine). No event in PostGame (the Patron kill) by design. The full 22-event count is **not yet checked** against an objective list (deadlock-api metadata gave 503 "Steam is busy" at 15:17); pending | Implemented (source: game memory); accuracy **pending**, not claimed PASS |
+  | `incoming_damage` | none usable: only via the Panorama HUD object `CCitadel_Hud_DamageReport` (non-schema offsets) or a message hook, outside the collector rules (schema fields only; QPC is the only hook) | n/a | `unavailable` (no task; not emitted) |
 
   - Live check: private lobby with bots, match 122217736, owner host, team 3, build 1472875 on
     6810, log `c6-s8-live.jsonl` (watch log `c6-s8-live-watch.log`). In the Hideout: no
