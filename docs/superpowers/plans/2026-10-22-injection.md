@@ -877,10 +877,11 @@ serde_json = "1"
 //! channel between the Linux host and the helper (plan 2 replaces it with a binary relay);
 //! `names` is the per-game pipe and mutex names both sides must agree on.
 
-pub mod jsonl;
 pub mod names;
 pub mod pipe;
 ```
+
+(`pub mod jsonl;` is added in Step 6, together with `jsonl.rs`, so Step 4 compiles.)
 
 `crates/uw-pipe-proto/src/names.rs`:
 
@@ -982,11 +983,12 @@ fn bad_magic_is_rejected() {
 
 #[test]
 fn oversize_payload_is_rejected() {
+    // A header claiming more than MAX_PAYLOAD payload bytes.
     let mut header = Vec::new();
     header.extend_from_slice(b"UWP1");
-    header.extend_from_slice(&3u16.to_le_bytes());
+    header.extend_from_slice(&3u16.to_le_bytes()); // type = status
     header.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
-    header.extend_from_slice(&0u32.to_le_bytes());
+    header.extend_from_slice(&0u32.to_le_bytes()); // pid
     header.extend_from_slice(&((MAX_PAYLOAD + 1) as u32).to_le_bytes());
     assert!(matches!(decode(&header), Err(ProtoError::PayloadTooLarge)));
 }
@@ -994,8 +996,9 @@ fn oversize_payload_is_rejected() {
 #[test]
 fn overlong_path_length_prefix_is_rejected() {
     let long = "A".repeat(MAX_PATH_UNITS + 1);
+    // decode: a load_overlay whose path length prefix exceeds the cap (encode caps by truncating).
     let mut payload = Vec::new();
-    payload.extend_from_slice(&7u32.to_le_bytes());
+    payload.extend_from_slice(&7u32.to_le_bytes()); // request id
     payload.extend_from_slice(&((MAX_PATH_UNITS + 1) as u16).to_le_bytes());
     for u in long.encode_utf16() {
         payload.extend_from_slice(&u.to_le_bytes());
@@ -1008,9 +1011,9 @@ fn overlong_path_length_prefix_is_rejected() {
 fn overlong_status_message_is_rejected() {
     let payload_message = "x".repeat(MAX_STATUS_BYTES + 1);
     let mut payload = Vec::new();
-    payload.extend_from_slice(&1u32.to_le_bytes());
-    payload.extend_from_slice(&0u16.to_le_bytes());
-    payload.extend_from_slice(&0u32.to_le_bytes());
+    payload.extend_from_slice(&1u32.to_le_bytes()); // request id
+    payload.extend_from_slice(&0u16.to_le_bytes()); // code = ok
+    payload.extend_from_slice(&0u32.to_le_bytes()); // detail
     payload.extend_from_slice(&((MAX_STATUS_BYTES + 1) as u16).to_le_bytes());
     payload.extend_from_slice(payload_message.as_bytes());
     let bytes = frame(3, &payload);
@@ -1025,8 +1028,13 @@ fn unknown_type_is_reported() {
 
 #[test]
 fn wrong_header_version_is_rejected() {
-    let mut bytes = encode(&Message::Status { request_id: 1, code: StatusCode::Ok, detail: 0, message: String::new() });
-    bytes[6] = 9; // header version -> 9
+    let mut bytes = encode(&Message::Status {
+        request_id: 1,
+        code: StatusCode::Ok,
+        detail: 0,
+        message: String::new(),
+    });
+    bytes[6] = 9; // header version (bytes 6..8) -> 9
     assert!(matches!(decode(&bytes), Err(ProtoError::BadVersion(9))));
 }
 
@@ -1034,13 +1042,14 @@ fn wrong_header_version_is_rejected() {
 fn unknown_status_code_is_bad_code() {
     let mut payload = Vec::new();
     payload.extend_from_slice(&1u32.to_le_bytes()); // request id
-    payload.extend_from_slice(&99u16.to_le_bytes()); // code = 99 (unknown)
+    payload.extend_from_slice(&99u16.to_le_bytes()); // code = 99 (not a StatusCode)
     payload.extend_from_slice(&0u32.to_le_bytes()); // detail
     payload.extend_from_slice(&0u16.to_le_bytes()); // empty message
     let bytes = frame(3, &payload);
     assert!(matches!(decode(&bytes), Err(ProtoError::BadCode(99))));
 }
 
+/// Build a frame with a valid magic and the given type over a raw payload.
 fn frame(ty: u16, payload: &[u8]) -> Vec<u8> {
     let mut v = Vec::new();
     v.extend_from_slice(b"UWP1");
@@ -1058,6 +1067,11 @@ fn frame(ty: u16, payload: &[u8]) -> Vec<u8> {
 `crates/uw-pipe-proto/src/pipe.rs`:
 
 ```rust
+//! Fixed-layout, little-endian binary messages (spec 6.3). 16-byte header
+//! (`magic`="UWP1", `type: u16`, `version: u16`, `pid: u32`, `payload_len: u32`) then a payload of
+//! at most `MAX_PAYLOAD` bytes. Paths are UTF-16 with a `u16` code-unit-count prefix (<= 1024);
+//! status messages are UTF-8 with a `u16` byte-count prefix (<= 256).
+
 pub const MAGIC: [u8; 4] = *b"UWP1";
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const HEADER_LEN: usize = 16;
@@ -1104,6 +1118,7 @@ impl StatusCode {
             _ => return None,
         })
     }
+    /// The lowercase wire name used in the JSON-lines `status` event.
     pub fn as_str(self) -> &'static str {
         match self {
             StatusCode::Ok => "ok",
@@ -1119,6 +1134,7 @@ impl StatusCode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
+    /// bootstrap -> helper, always first.
     Hello {
         protocol_version: u16,
         bootstrap_version: u16,
@@ -1126,7 +1142,9 @@ pub enum Message {
         overlay_loaded: bool,
         overlay_path: String,
     },
+    /// helper -> bootstrap.
     LoadOverlay { request_id: u32, path: String },
+    /// bootstrap -> helper.
     Status { request_id: u32, code: StatusCode, detail: u32, message: String },
 }
 
@@ -1134,10 +1152,12 @@ pub enum Message {
 pub enum ProtoError {
     Short,
     BadMagic,
+    /// The header's `version` is not `PROTOCOL_VERSION` (carries the version seen).
     BadVersion(u16),
     PayloadTooLarge,
     StringTooLong,
     BadString,
+    /// A `status` with a code outside `StatusCode` (carries the raw code).
     BadCode(u16),
     UnknownType(u16),
     Truncated,
@@ -1160,9 +1180,9 @@ impl std::fmt::Display for ProtoError {
 }
 impl std::error::Error for ProtoError {}
 
-/// A path is capped at `MAX_PATH_UNITS` code units as a last-resort floor. Callers that could
-/// supply a longer path (the helper's `load_overlay`) must reject it first and report an error, so
-/// a path is never silently truncated into a different, loadable path.
+/// A path is capped at `MAX_PATH_UNITS` code units only as a last-resort floor. Callers that could
+/// supply a longer path (the helper's `load_overlay`) must reject it first and report an error
+/// (`path_too_long`), so a path is never silently truncated into a different, loadable path.
 fn put_path(out: &mut Vec<u8>, s: &str) {
     let units: Vec<u16> = s.encode_utf16().collect();
     let n = units.len().min(MAX_PATH_UNITS);
@@ -1175,6 +1195,7 @@ fn put_path(out: &mut Vec<u8>, s: &str) {
 fn put_status_msg(out: &mut Vec<u8>, s: &str) {
     let bytes = s.as_bytes();
     let n = bytes.len().min(MAX_STATUS_BYTES);
+    // Do not split a UTF-8 code point at the cap.
     let mut end = n;
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
@@ -1183,6 +1204,7 @@ fn put_status_msg(out: &mut Vec<u8>, s: &str) {
     out.extend_from_slice(&bytes[..end]);
 }
 
+/// Encode a message into a framed buffer (header + payload).
 pub fn encode(m: &Message) -> Vec<u8> {
     let (ty, payload) = match m {
         Message::Hello { protocol_version, bootstrap_version, bitness, overlay_loaded, overlay_path } => {
@@ -1213,6 +1235,7 @@ pub fn encode(m: &Message) -> Vec<u8> {
     out.extend_from_slice(&MAGIC);
     out.extend_from_slice(&ty.to_le_bytes());
     out.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
+    // `pid` is reserved (the sender's Windows pid); 0 here, filled and checked by plan 2.
     out.extend_from_slice(&0u32.to_le_bytes());
     out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     out.extend_from_slice(&payload);
@@ -1264,6 +1287,7 @@ impl<'a> Cur<'a> {
     }
 }
 
+/// Decode one framed message. A string-length field over its cap fails before any allocation.
 pub fn decode(bytes: &[u8]) -> Result<Message, ProtoError> {
     if bytes.len() < HEADER_LEN {
         return Err(ProtoError::Short);
@@ -1272,6 +1296,8 @@ pub fn decode(bytes: &[u8]) -> Result<Message, ProtoError> {
         return Err(ProtoError::BadMagic);
     }
     let ty = u16::from_le_bytes([bytes[4], bytes[5]]);
+    // A different header version means a different wire format: reject it before reading the
+    // body. The helper maps `BadVersion` on a hello to `version_mismatch` (see `decide`).
     let version = u16::from_le_bytes([bytes[6], bytes[7]]);
     if version != PROTOCOL_VERSION {
         return Err(ProtoError::BadVersion(version));
@@ -1358,6 +1384,8 @@ fn unknown_command_is_an_error() {
 ```
 
 - [ ] **Step 6: Implement the JSON-lines types**
+
+Append `pub mod jsonl;` to `crates/uw-pipe-proto/src/lib.rs` (after `pub mod names;`), then create the module:
 
 `crates/uw-pipe-proto/src/jsonl.rs`:
 
@@ -1708,7 +1736,6 @@ pub fn check_wine_session(prefix: &Path) -> Result<PathBuf, String> {
     }
 }
 
-/// A running Proton game and its Wine session.
 /// A typed discovery failure, so `uw-inject` can emit the design's `game_not_found` /
 /// `no_wine_session` error codes instead of free text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1739,6 +1766,7 @@ impl std::fmt::Display for GameError {
 }
 impl std::error::Error for GameError {}
 
+/// A running Proton game and its Wine session.
 #[derive(Debug, Clone)]
 pub struct GameSession {
     pub pid: i32,
@@ -1898,9 +1926,9 @@ pub mod decide;
 ```rust
 use std::collections::VecDeque;
 
-use uw_helper::decide::{run, Config, HelloWait, HookKind, Outcome, Win32};
+use uw_helper::decide::{hello_wait_from_bytes, run, Config, HelloWait, HookKind, Outcome, Win32};
 use uw_pipe_proto::jsonl::Event;
-use uw_pipe_proto::pipe::PROTOCOL_VERSION;
+use uw_pipe_proto::pipe::{encode, Message, StatusCode, PROTOCOL_VERSION};
 
 struct Fake {
     now: u64,
@@ -2095,6 +2123,41 @@ fn pipe_creation_failure_is_reported() {
     assert_eq!(run(&mut f, &cfg()), Outcome::PipeError("busy".into()));
 }
 
+/// A real hello frame, with the payload's protocol version and the header version set apart.
+fn hello_bytes(protocol_version: u16, header_version: u16) -> Vec<u8> {
+    let mut b = encode(&Message::Hello {
+        protocol_version,
+        bootstrap_version: 1,
+        bitness: 64,
+        overlay_loaded: false,
+        overlay_path: String::new(),
+    });
+    b[6..8].copy_from_slice(&header_version.to_le_bytes()); // header `version` field
+    b
+}
+
+#[test]
+fn a_hello_from_another_protocol_version_is_version_mismatch() {
+    // A newer bootstrap writes its own version into the header too; decode rejects the header,
+    // and the helper must still report version_mismatch, not pipe_error.
+    let mut f = Fake::happy();
+    f.hellos.push_back(hello_wait_from_bytes(&hello_bytes(PROTOCOL_VERSION + 1, PROTOCOL_VERSION + 1)));
+    assert_eq!(run(&mut f, &cfg()), Outcome::VersionMismatch);
+}
+
+#[test]
+fn a_current_hello_frame_connects() {
+    let mut f = Fake::happy();
+    f.hellos.push_back(hello_wait_from_bytes(&hello_bytes(PROTOCOL_VERSION, PROTOCOL_VERSION)));
+    assert_eq!(run(&mut f, &cfg()), Outcome::Connected { overlay_loaded: false, overlay_path: None });
+}
+
+#[test]
+fn a_non_hello_first_message_is_a_pipe_error() {
+    let b = encode(&Message::Status { request_id: 1, code: StatusCode::Ok, detail: 0, message: String::new() });
+    assert!(matches!(hello_wait_from_bytes(&b), HelloWait::PipeError(_)));
+}
+
 #[test]
 fn outcomes_map_to_json_events() {
     assert_eq!(
@@ -2123,7 +2186,7 @@ fn outcomes_map_to_json_events() {
 //! bin.
 
 use uw_pipe_proto::jsonl::Event;
-use uw_pipe_proto::pipe::PROTOCOL_VERSION;
+use uw_pipe_proto::pipe::{decode, Message, ProtoError, PROTOCOL_VERSION};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookKind {
@@ -2223,6 +2286,26 @@ pub trait Win32 {
     fn log(&self, _msg: &str) {}
 }
 
+/// Classify the first pipe message exactly as the helper reads it. A frame whose *header* version
+/// differs (`BadVersion`) comes from a bootstrap of another protocol version, so it is reported as
+/// a hello with that version: `run` then returns `VersionMismatch` (design failure table, "tells
+/// the user to restart the game") instead of `PipeError`. Without this, `decode`'s header check
+/// would make `version_mismatch` unreachable.
+pub fn hello_wait_from_bytes(bytes: &[u8]) -> HelloWait {
+    match decode(bytes) {
+        Ok(Message::Hello { protocol_version, overlay_loaded, overlay_path, .. }) => HelloWait::Hello {
+            protocol_version,
+            overlay_loaded,
+            overlay_path: (!overlay_path.is_empty()).then_some(overlay_path),
+        },
+        Err(ProtoError::BadVersion(v)) => {
+            HelloWait::Hello { protocol_version: v, overlay_loaded: false, overlay_path: None }
+        }
+        Ok(_) => HelloWait::PipeError("expected hello".into()),
+        Err(e) => HelloWait::PipeError(format!("decode hello: {e}")),
+    }
+}
+
 fn outcome_from_hello(hw: HelloWait) -> Result<Outcome, ()> {
     match hw {
         HelloWait::Hello { protocol_version, overlay_loaded, overlay_path } => {
@@ -2319,7 +2402,7 @@ pub fn run(w: &mut dyn Win32, cfg: &Config) -> Outcome {
 - [ ] **Step 4: Run the decision tests (green)**
 
 Run: `cargo test -p uw-helper --test decide`
-Expected: `test result: ok. 13 passed`.
+Expected: `test result: ok. 16 passed`.
 
 - [ ] **Step 5: Commit**
 
@@ -3017,7 +3100,7 @@ mod win {
     use std::io::{BufRead, Write};
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
-    use uw_helper::decide::{run, Config, HelloWait, HookKind, Outcome, Win32};
+    use uw_helper::decide::{hello_wait_from_bytes, run, Config, HelloWait, HookKind, Outcome, Win32};
     use uw_pipe_proto::jsonl::{Command, Event};
     use uw_pipe_proto::names::{helper_mutex_name, marker_mutex_name, pipe_name};
     use uw_pipe_proto::pipe::{decode, encode, Message, HEADER_LEN, MAX_PATH_UNITS, MAX_PAYLOAD};
@@ -3214,17 +3297,8 @@ mod win {
                 }
             }
             match self.read_message(timeout_ms) {
-                Some(bytes) => match decode(&bytes) {
-                    Ok(Message::Hello { protocol_version, overlay_loaded, overlay_path, .. }) => {
-                        HelloWait::Hello {
-                            protocol_version,
-                            overlay_loaded,
-                            overlay_path: (!overlay_path.is_empty()).then_some(overlay_path),
-                        }
-                    }
-                    Ok(_) => HelloWait::PipeError("expected hello".into()),
-                    Err(e) => HelloWait::PipeError(format!("decode hello: {e}")),
-                },
+                // Portable and unit-tested; maps another header version to `version_mismatch`.
+                Some(bytes) => hello_wait_from_bytes(&bytes),
                 None => HelloWait::Timeout,
             }
         }
@@ -3518,7 +3592,7 @@ Run:
 cargo build --release --target x86_64-pc-windows-gnu -p uw-test-game -p uw-bootstrap -p uw-test-overlay -p uw-helper
 xvfb-run -a cargo test -p uw-helper --test wine_e2e helper_connects_loads_overlay_and_reports_ok -- --ignored --test-threads=1
 ```
-Expected: `helper_connects_loads_overlay_and_reports_ok ... ok`, `test result: ok. 1 passed`. The helper's stdout carries `{"event":"bootstrap_connected",…}` then `{"event":"status","code":"ok"}`, and one `uw-test-overlay-<pid>.txt` appears under the prefix TEMP.
+Expected: `helper_connects_loads_overlay_and_reports_ok ... ok`, `test result: ok. 1 passed`. The helper's stdout carries `{"event":"bootstrap_connected","overlay_loaded":false}` then `{"event":"status","code":"ok","detail":0,"message":"overlay started"}`, and one `uw-test-overlay-<pid>.txt` appears in the prefix user's `AppData/Local/Temp`.
 
 - [ ] **Step 6: Commit**
 
@@ -4162,32 +4236,42 @@ done
 
 - [ ] **Step 2: Owner live check — connect and load the overlay (Deadlock running)**
 
-Owner runs (Deadlock must be running under Proton):
+Owner runs (Deadlock running under Proton 11.0):
 ```bash
+# Step 2 (Deadlock running under Proton 11.0):
+grep ClientVersion ~/.local/share/Steam/steamapps/common/Deadlock/game/citadel/steam.inf
+#   expect one line, e.g. ClientVersion=6813 (record it with the result)
+GAME=$(pgrep -x deadlock.exe); echo "$GAME"            # expect one pid
 ~/.local/share/underwolf/uw-inject --overlay ~/.local/share/underwolf/uw_test_overlay.dll
+#   expect stdout, in order:
+#     {"event":"bootstrap_connected","overlay_loaded":false}
+#     {"event":"status","code":"ok","detail":0,"message":"overlay started"}
+#   and stderr: [uw-helper64] hooked WH_GETMESSAGE thread=…   (record which hook)
+#   then press Ctrl-C (ends uw-inject and its helper; the bootstrap stays pinned)
+ls ~/.local/share/Steam/steamapps/compatdata/1422450/pfx/drive_c/users/steamuser/AppData/Local/Temp/uw-test-overlay-*.txt
+#   expect exactly 1 file
+pgrep -x deadlock.exe                                  # expect the same pid: the game still runs
 ```
-Expected stdout, in order:
-```
-{"event":"bootstrap_connected","overlay_loaded":false}
-{"event":"status","code":"ok"}
-```
-And a `uw-test-overlay-<pid>.txt` file appears in Deadlock's Wine `%TEMP%` (inside the Proton prefix, e.g. `.../compatdata/1422450/pfx/drive_c/users/steamuser/Temp/`). **Deadlock keeps running normally.** Leave `uw-inject` running or Ctrl-C it (Ctrl-C ends the helper; the bootstrap stays pinned in the game). If the first event is `{"event":"error","code":"no_window"}` or `bootstrap_timeout`, retry with `--fallback` appended. **If it still fails, STOP and report to the owner.**
+**Deadlock keeps running normally.** If the first event is `{"event":"error","code":"no_window"}` or `bootstrap_timeout`, retry with `--fallback` appended (the stderr line then reads `hooked WH_CALLWNDPROC`). **If it still fails, STOP and report to the owner.**
 
 - [ ] **Step 3: Owner live check — restart reconnects without reloading**
 
-Owner runs `uw-inject` a second time (same command; the first may be left running or stopped):
+Run this only after Step 2's `uw-inject` was stopped with Ctrl-C. While a first `uw-inject` still runs, its helper holds `Local\underwolf-helper-<pid>` and the pipe, so a second run would print `{"event":"error","code":"already_running"}`.
 ```bash
+# Step 3 (after Step 2's uw-inject was stopped with Ctrl-C):
 ~/.local/share/underwolf/uw-inject --overlay ~/.local/share/underwolf/uw_test_overlay.dll
+#   expect stdout: {"event":"bootstrap_connected","overlay_loaded":true}
+#   and stderr: [uw-helper64] marker present; skipping hook
+#   then Ctrl-C
+ls ~/.local/share/Steam/steamapps/compatdata/1422450/pfx/drive_c/users/steamuser/AppData/Local/Temp/uw-test-overlay-*.txt | wc -l
+#   expect 1 (the overlay was not loaded again)
+pgrep -x deadlock.exe                                  # expect the same pid
 ```
-Expected: the pinned bootstrap reconnects and reports the overlay is already loaded:
-```
-{"event":"bootstrap_connected","overlay_loaded":true}
-```
-No second `uw-test-overlay-*` file is created, and **Deadlock keeps running normally** throughout.
+**Deadlock keeps running normally** throughout.
 
 - [ ] **Step 4: Record the result**
 
-Note the outcome (pass/fail, which hook worked, any observations) at the bottom of
+Note the outcome (pass/fail, the `ClientVersion`, which hook fired from the Step 2 stderr line, any observations) at the bottom of
 `docs/superpowers/specs/2026-10-22-injection-design.md` under a new "Live check (owner)" line, or in the plan report. Commit only if a file changed:
 
 ```bash
@@ -4216,7 +4300,7 @@ Run:
 ```bash
 cargo test -p uw-pipe-proto -p uw-inject -p uw-helper -p uw-bootstrap
 ```
-Expected: every crate's tests pass (`uw-pipe-proto`: names (1) + `pipe` (10) + `jsonl` (5); `uw-inject`: discovery/driver (12) + `cli` (2); `uw-helper`: `decide` (13); `uw-bootstrap`: `state` (3)). No failures.
+Expected: every crate's tests pass (`uw-pipe-proto`: names (1) + `pipe` (10) + `jsonl` (5); `uw-inject`: discovery/driver (12) + `cli` (2); `uw-helper`: `decide` (16); `uw-bootstrap`: `state` (3)). No failures.
 
 - [ ] **Step 3: All Windows artifacts build**
 
