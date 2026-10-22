@@ -140,14 +140,10 @@ fn serve_once(pid: u32, state: &mut OverlayState) {
         return;
     }
     let mut buf = vec![0u8; HEADER_LEN + MAX_PAYLOAD];
-    loop {
-        match read_message(pipe, &mut buf) {
-            Some(bytes) => {
-                if !handle(pipe, &buf[..bytes], pid, state) {
-                    break; // a bad frame closes the connection (design: bootstrap reconnects)
-                }
-            }
-            None => break, // pipe broken: reconnect
+    // `None` means the pipe broke: fall out and reconnect.
+    while let Some(bytes) = read_message(pipe, &mut buf) {
+        if !handle(pipe, &buf[..bytes], pid, state) {
+            break; // a bad frame closes the connection (design: bootstrap reconnects)
         }
     }
     close(pipe);
