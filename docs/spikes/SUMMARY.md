@@ -13,7 +13,8 @@ Linux only (plan Amendment C). For the owner's review before any milestone plan 
 ## Decisions needed from owner
 
 From the findings docs:
-- **01:** none open (DLL load method, transport and C3's input surface are decided there).
+- **01:** none open (DLL load method and C3's input surface are decided there; transport,
+  localhost TCP, was the assistant's call, and milestone item 2 would replace it).
 - **02:** whether the ~3% budget applies to the layer alone or to the whole overlay including
   Chromium, and which optimisations come first.
 - **03, 1. Hideout/sandbox match id:** the game gives none there, so no `match_start`/`match_end`.
@@ -22,6 +23,11 @@ From the findings docs:
   choose another source?
 - **03, 3. `tower_destroyed` accuracy:** accept it on the owner-observed subset, or verify it on a
   matchmade match first?
+- **03, Verdict wording** (ledger, Task C7): "GO, with owner-accepted deviations" is the
+  implementer's reading (template: `GO` / `NO-GO` / `PARTIAL`). Deviations (owner rulings): 1 real
+  match instead of ≥ 3; latency by eye; bench not alternated, with nothing injected in A. Not an
+  owner ruling: `installed_build` not run on 6810 with f528948. Keep the wording, use `GO` plus
+  this list, or `PARTIAL`?
 
 Plan's minimum list:
 - **AMD verification:** not done. Spikes 1 and 2 ran on NVIDIA only (no AMD hardware). 02: AMD is
@@ -30,8 +36,8 @@ Plan's minimum list:
 - **Proton-version fragility of injection and input:** only Proton 11.0 was tested (01, 03), and
   not Proton's Wayland driver (01). 01 rates the parts:
   - Joining the game's Wine session from outside (wineserver socket layout, the container sharing
-    `/tmp` and the PID namespace, matching `WINE*SYNC`): medium risk. The launcher refuses to run
-    if it can't find the session.
+    `/tmp` and the PID namespace, matching `WINE*SYNC`): medium risk. The Linux injection launcher
+    (`uw-spike-inject`) refuses to run if it can't find the session.
   - The injection itself (standard Win32): low risk.
   - The hook (`WndProc` subclassing, `WM_KEY*` delivery, SDL3's statically imported
     `GetRawInputBuffer`): low risk from Proton, moderate from game updates.
@@ -86,7 +92,8 @@ dropped (Amendment C), so Spike 2 (Windows Vulkan, DX11) and Spike 3 (Windows) h
    today's slots; the producer grows the dirty rect until the consumer catches up and the layer
    copies only dirty rows. Target: bring Spike 2's full-cost result under the 3% gate.
    - Proved (02): the CPU-copy path composites three widgets in Deadlock and survives host and
-     game restarts, alt-tab, windowed ↔ fullscreen and resolution changes.
+     game restarts, alt-tab, windowed ↔ fullscreen and resolution changes (in-game re-check of
+     the bug-2 fix still to do, 02).
    - Cost (02): full overlay +2.74% FPS / +3.57% p99 (normal settings) and +3.07% / +2.50% (max
      settings), each failing one measure; layer alone +1.29% / +1.22% (PASS). About half is the
      layer, half Chromium plus the copies. No GPU-bound measurement was possible on this machine.
@@ -94,9 +101,10 @@ dropped (Amendment C), so Spike 2 (Windows Vulkan, DX11) and Spike 3 (Windows) h
 5. **Then the Deadlock provider** (spec §6.4, from Spike 3), **the app runtime** (§6.2), **the
    launcher** (§6.6) **and the catalog** (§6.5).
    - Proved (03): the in-game collector reads `phase`, `match_id`, `steam_id`, `roster`, `items`
-     (local count, bot match only), `match_clock`, `match_start`/`match_end`,
-     `kill`/`death`/`assist`, `game_mode`, the `game_paused` event, `team_score` and
-     `match_outcome` live. Cost +0.38% avg FPS, +0.14% p99 (PASS). Two `client.dll` patches
+     (local count, bot match only), `match_clock`, `game_mode`, the `game_paused` event,
+     `team_score` and `match_outcome` live; `uw-gep`'s provider derives `match_start`/`match_end`
+     and `kill`/`death`/`assist` from them. Cost +0.38% avg FPS, +0.14% p99 (PASS; not
+     alternated, nothing injected in A; owner ruling). Two `client.dll` patches
      (6801 → 6807 → 6810) needed no code change. Under deliberate corruption the first run
      published a wrong value; with the layout check added, the rerun switched the roster off
      instead (PASS).

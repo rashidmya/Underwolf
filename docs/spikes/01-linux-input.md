@@ -173,13 +173,14 @@ layer's C2 running alongside, not a hook bug); P6 never minimized, paused or los
 - **Keyboard assumed legacy `WM_KEY*`.** The WndProc gate catches keyboard; a game using *raw*
   keyboard (`RIDEV_NOLEGACY` on the keyboard) would bypass it. Deadlock is expected to use legacy
   `WM_KEY*` for UI/text, but confirm Ctrl+Tab and typing register. If not, the raw hook must extend
-  to keyboard.
+  to keyboard. (resolved: see lines 95–96 and 164–167, P1 and P3 PASS)
 - **IAT hook vs. dynamic resolution.** The hook patches the game's import table for
   `GetRawInputData`. If Source 2 resolves it via `GetProcAddress` instead of a static import, the
   IAT patch misses it and an inline detour (MinHook/retour) is needed. Confirm the camera actually
-  stops in edit mode (P2) first.
+  stops in edit mode (P2) first. (resolved: see lines 95–96 and 166–167, P2 PASS)
 - **DLL load method under Proton:** runtime injection from outside Steam's container is proven
-  against a plain Wine session, not yet against Deadlock's container (see above).
+  against a plain Wine session, not yet against Deadlock's container (see above). (resolved: see
+  line 132, "In Deadlock — PASS")
 - **Proton-version fragility.** Depends on Wine delivering keyboard as `WM_KEY*`, `SetWindowLongPtrW`
   subclassing working in the container, and user32 raw-input semantics. Record the Proton version
   tested and re-check on upgrades.
