@@ -127,6 +127,68 @@ fn unknown_status_code_is_bad_code() {
     assert!(matches!(decode(&bytes), Err(ProtoError::BadCode(99))));
 }
 
+#[test]
+fn short_buffer_is_rejected() {
+    assert!(matches!(decode(&[0u8; 15]), Err(ProtoError::Short)));
+    assert!(matches!(decode(&[]), Err(ProtoError::Short)));
+}
+
+#[test]
+fn truncated_payloads_are_rejected() {
+    // Header fine, payload too short for its fields.
+    assert!(matches!(decode(&frame(3, &[])), Err(ProtoError::Truncated)));
+    assert!(matches!(decode(&frame(1, &[1, 0, 7, 0])), Err(ProtoError::Truncated)));
+    // Header claims 8 payload bytes but only 2 follow.
+    let mut bytes = frame(3, &[]);
+    bytes[12..16].copy_from_slice(&8u32.to_le_bytes());
+    bytes.extend_from_slice(&[0, 0]);
+    assert!(matches!(decode(&bytes), Err(ProtoError::Truncated)));
+}
+
+#[test]
+fn invalid_strings_are_rejected() {
+    // load_overlay whose path is a lone high surrogate.
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&1u32.to_le_bytes());
+    payload.extend_from_slice(&1u16.to_le_bytes());
+    payload.extend_from_slice(&0xD800u16.to_le_bytes());
+    assert!(matches!(decode(&frame(2, &payload)), Err(ProtoError::BadString)));
+    // status whose message is invalid UTF-8.
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&1u32.to_le_bytes());
+    payload.extend_from_slice(&0u16.to_le_bytes());
+    payload.extend_from_slice(&0u32.to_le_bytes());
+    payload.extend_from_slice(&2u16.to_le_bytes());
+    payload.extend_from_slice(&[0xff, 0xfe]);
+    assert!(matches!(decode(&frame(3, &payload)), Err(ProtoError::BadString)));
+}
+
+#[test]
+fn encode_truncates_to_the_caps() {
+    let Message::LoadOverlay { path, .. } =
+        decode(&encode(&Message::LoadOverlay { request_id: 1, path: "A".repeat(2000) })).unwrap()
+    else {
+        panic!("not load_overlay")
+    };
+    assert_eq!(path.encode_utf16().count(), MAX_PATH_UNITS);
+
+    let status = |message: String| match decode(&encode(&Message::Status {
+        request_id: 1,
+        code: StatusCode::Ok,
+        detail: 0,
+        message,
+    }))
+    .unwrap()
+    {
+        Message::Status { message, .. } => message,
+        _ => panic!("not status"),
+    };
+    // 255 x 'x' then a 2-byte char: the cap lands mid code point, so back off to 255 bytes.
+    assert_eq!(status(format!("{}é", "x".repeat(255))).len(), 255);
+    // 200 x 2-byte chars = 400 bytes: truncated to exactly 256 bytes.
+    assert_eq!(status("é".repeat(200)).len(), MAX_STATUS_BYTES);
+}
+
 /// Build a frame with a valid magic and the given type over a raw payload.
 fn frame(ty: u16, payload: &[u8]) -> Vec<u8> {
     let mut v = Vec::new();
