@@ -44,16 +44,20 @@ pub fn server_socket(uid: u32, dev: u64, ino: u64) -> PathBuf {
     PathBuf::from(format!("/tmp/.wine-{uid}/server-{dev:x}-{ino:x}/socket"))
 }
 
+/// True when a `/proc/<pid>/cmdline` (NUL-separated argv) has an argv[0] naming `exe`.
+/// Only argv[0]: Proton's `steam.exe` wrapper carries the Linux game path as argv[1].
+pub fn cmdline_names(cmdline: &[u8], exe: &str) -> bool {
+    let argv0 = cmdline.split(|&b| b == 0).next().unwrap_or_default();
+    exe_matches(&String::from_utf8_lossy(argv0), exe)
+}
+
 /// Pids whose argv0 names `exe`. Under Proton, a game's argv0 is its Windows path.
 pub fn find_pids(exe: &str) -> Vec<i32> {
     let Ok(dir) = std::fs::read_dir("/proc") else { return Vec::new() };
     let mut pids: Vec<i32> = dir
         .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
         .filter(|pid: &i32| {
-            std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|cmdline| {
-                let argv0 = cmdline.split(|&b| b == 0).next().unwrap_or_default();
-                exe_matches(&String::from_utf8_lossy(argv0), exe)
-            })
+            std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|cmdline| cmdline_names(&cmdline, exe))
         })
         .collect();
     pids.sort_unstable();
@@ -125,8 +129,13 @@ impl GameSession {
             Some(p) => p,
             None => *find_pids(exe).first().ok_or_else(|| GameError::NotRunning(format!("{exe} is not running")))?,
         };
-        let environ = std::fs::read(format!("/proc/{pid}/environ"))
-            .map_err(|e| GameError::NoWineSession(format!("environ of {pid}: {e}")))?;
+        let environ = std::fs::read(format!("/proc/{pid}/environ")).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                GameError::NotRunning(format!("process {pid} is not running"))
+            } else {
+                GameError::NoWineSession(format!("environ of {pid}: {e}"))
+            }
+        })?;
         let env = wine_env(&environ);
         let prefix = env
             .iter()
@@ -156,7 +165,15 @@ impl GameSession {
     pub fn wine(&self, program: &Path, args: &[OsString]) -> Command {
         let mut cmd = Command::new(self.proton.join("bin/wine"));
         cmd.arg(program).args(args);
-        for var in ["WINESERVER", "WINELOADER", "WINEDLLPATH", "WINEPREFIX"] {
+        for var in [
+            "WINESERVER",
+            "WINELOADER",
+            "WINEDLLPATH",
+            "WINEPREFIX",
+            "WINEFSYNC",
+            "WINEESYNC",
+            "WINENTSYNC",
+        ] {
             cmd.env_remove(var);
         }
         for (key, value) in &self.env {

@@ -6,7 +6,7 @@ use uw_pipe_proto::jsonl::{Command, Event};
 
 #[cfg(unix)]
 use uw_inject::discovery::{
-    config_info_for_prefix, find_pids, proton_files_from_config_info, server_socket, wine_env,
+    cmdline_names, config_info_for_prefix, find_pids, proton_files_from_config_info, server_socket, wine_env,
     GameError, GameSession,
 };
 
@@ -128,12 +128,35 @@ fn driver_with_no_overlay_sends_nothing() {
     assert_eq!(d.on_event(&Event::BootstrapConnected { overlay_loaded: false }), vec![]);
 }
 
+#[cfg(unix)]
 #[test]
 fn live_cmdlines_game_matches_and_proton_wrapper_does_not() {
-    // argv[0] of the game's Wine process (comm is "MainThrd", so never match on comm).
-    let game = r"S:\steamapps\common\Deadlock\game\bin\win64\deadlock.exe";
-    // argv[0] of the Proton steam.exe wrapper; the Linux deadlock.exe path is only argv[1].
-    let wrapper = r"c:\windows\system32\steam.exe";
-    assert!(exe_matches(game, "deadlock.exe"));
-    assert!(!exe_matches(wrapper, "deadlock.exe"));
+    // Real NUL-separated /proc/<pid>/cmdline bytes. The game's comm is "MainThrd".
+    let game = b"S:\\steamapps\\common\\Deadlock\\game\\bin\\win64\\deadlock.exe\0";
+    // The Proton wrapper: steam.exe is argv[0], the Linux game path only argv[1].
+    let wrapper = b"c:\\windows\\system32\\steam.exe\0/home/buga/.local/share/Steam/steamapps/common/Deadlock/game/bin/win64/deadlock.exe\0";
+    assert!(cmdline_names(game, "deadlock.exe"));
+    assert!(!cmdline_names(wrapper, "deadlock.exe"));
+}
+
+#[test]
+fn wine_paths_keep_spaces_and_unicode_and_absolutize() {
+    assert_eq!(
+        to_wine_path(Path::new("/home/u/My Games/ünï 日本/a b.dll")),
+        r"Z:\home\u\My Games\ünï 日本\a b.dll"
+    );
+    let rel = to_wine_path(Path::new("rel/x.dll"));
+    assert!(rel.starts_with(r"Z:\") && rel.ends_with(r"\rel\x.dll"), "{rel}");
+}
+
+#[test]
+fn exe_matches_rejects_suffix_only() {
+    assert!(!exe_matches("notdeadlock.exe", "deadlock.exe"));
+}
+
+#[cfg(unix)]
+#[test]
+fn wine_env_drops_non_sync_wine_vars() {
+    let environ = b"WINEDLLOVERRIDES=steam.exe=b\0WINEPREFIX=/p\0";
+    assert_eq!(wine_env(environ), vec![("WINEPREFIX".to_string(), "/p".to_string())]);
 }

@@ -9,7 +9,8 @@ pub mod discovery;
 
 /// A Unix path as Wine's `Z:` drive sees it (used for both the bootstrap and overlay paths).
 pub fn to_wine_path(path: &std::path::Path) -> String {
-    format!("Z:{}", path.to_string_lossy().replace('/', "\\"))
+    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    format!("Z:{}", abs.to_string_lossy().replace('/', "\\"))
 }
 
 /// True when `name` (a bare exe name or a Windows/Unix path) names the exe `target`.
