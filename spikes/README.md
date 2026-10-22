@@ -181,6 +181,10 @@ Space-separated `key=value`, passed to the collector at load:
   `QueryPerformanceCounter` and publishes the most frequent as `gep_internal.discovery`
   (status `discovering`, then `discovered`); no passes run. Use it to check the main-loop caller after a patch:
   `uw-gep watch --jsonl /tmp/discover.jsonl --args discover=60`, in the Hideout.
+- `discover_out=<windows path>` (with `discover=`): also writes the full chain table (every call
+  site chain, one per line) to that file. The top-32 summary may not show the main loop, so use
+  this to re-derive the caller after a patch. The path can't contain spaces (args are
+  space-separated). Example: `--args "discover=10 discover_out=Z:\tmp\discover.json"`.
 - `corrupt=<Class>.<field>`: moves one resolved schema field offset on purpose, to test the
   fail-safe. Expected: the affected task is disabled (`gep_internal.disabled_tasks`, `invalid: …`)
   or publishes no wrong value. Any wrong published value is a Spike 3 failure. Examples:

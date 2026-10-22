@@ -15,6 +15,7 @@
 //! `UW_PROTON_FILES` overrides the Proton `files` directory (default: Proton 11.0 in the Steam
 //! library; any Wine install with `bin/wine` and `bin/wineserver` works, e.g. `/usr`).
 //! `UW_GEP_BIN` overrides the `uw-gep` binary (default: `target/debug/uw-gep`).
+//! The scratch prefixes and the JSONL log go under `std::env::temp_dir()` (`$TMPDIR` or `/tmp`).
 
 use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
@@ -62,7 +63,7 @@ impl Drop for Session {
 #[ignore = "needs Proton and the x86_64-pc-windows-gnu artifacts"]
 fn injects_c3_dll_into_a_running_wine_process() {
     let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
-    let prefix = PathBuf::from("/tmp/opencode/uw-inject-e2e-pfx");
+    let prefix = std::env::temp_dir().join("uw-inject-e2e-pfx");
     std::fs::create_dir_all(&prefix).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -189,8 +190,8 @@ fn uw_gep_receives_collector_selftest_and_snapshot_after_helper_restart() {
     }
 
     let (host_port, gep_port) = (free_port(), free_port());
-    let _session = start_sleeper(Path::new("/tmp/opencode/uw-gep-e2e-pfx"), host_port);
-    let jsonl = PathBuf::from("/tmp/opencode/uw-gep-e2e.jsonl");
+    let _session = start_sleeper(&std::env::temp_dir().join("uw-gep-e2e-pfx"), host_port);
+    let jsonl = std::env::temp_dir().join("uw-gep-e2e.jsonl");
     let _ = std::fs::remove_file(&jsonl);
 
     let child = Command::new(&gep_bin)

@@ -7,8 +7,8 @@
 
 ## Verdict
 
-**Linux: GO, with owner-accepted conditions.** Windows (a: Vulkan layer, b: DX11 hook) is
-pending (Tasks 14–15).
+**Linux: GO, with owner-accepted conditions.** Windows (a: Vulkan layer, b: DX11 hook) is not
+scheduled (Tasks 14–15 dropped, Amendment C).
 
 - Electron widgets are composited inside Deadlock's frames under Proton by the Vulkan layer.
   They survive host restarts, game restarts, alt-tab, windowed ↔ fullscreen and resolution
@@ -178,4 +178,4 @@ benchmark (Task 5) also runs a GPU-bound scenario.
 - A GPU-bound benchmark: the RTX 4090 kept Deadlock CPU-bound even at maximum settings.
 - GNOME, and X11 sessions: compositing happens inside Vulkan and should be session-independent,
   but it was only run on KDE Wayland. Spike 1 covers the session matrix.
-- Windows: Tasks 14–15.
+- Windows: not scheduled (Tasks 14–15 dropped, Amendment C).

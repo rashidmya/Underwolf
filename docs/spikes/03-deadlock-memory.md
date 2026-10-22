@@ -22,8 +22,9 @@
   `team_score` and `match_outcome`.
 - `tower_destroyed` is implemented; the owner-observed subset matched, but the full count is
   unverified. `incoming_damage` and `match_history` are unavailable.
-- Cost: +0.38% avg FPS, +0.14% p99 (PASS). Two client.dll patches (6801 to 6807 to 6810) needed
-  no code change. The main-loop patterns (tier0/engine2) have not been through a patch.
+- Cost: +0.38% avg FPS, +0.14% p99 (PASS). client.dll went from 6801 to 6807, 6810 and 6813
+  (Step 8 ran live on 6813) with no code change. The main-loop patterns (tier0/engine2) have not
+  been through a patch.
 - Deviations (owner rulings): 1 real match instead of at least 3; latency checked by eye; the
   bench was not alternated and had nothing injected in A.
 - Fail-safe: the first Step 5 run published a wrong value (local kills stayed 0) under
@@ -52,8 +53,8 @@ The schema dump of this build is `spikes/dl-collector/dumps/schema-6801.json`.
 ### Live runs (Task C6)
 
 Setup: runs on 2026-10-21 and 2026-10-22, Deadlock ClientVersion 6807 (Steps 1, 2, 4, 5 first
-run, 6) and 6810 (Steps 3, 5 rerun, 8; patched mid-window, see Step 7), Proton 11.0, Linux
-7.2.11-1-cachyos, Intel Core i9-13900K.
+run, 6), 6810 (Steps 3, 5 rerun) and 6813 (Step 8); patched mid-window, see Step 7. Proton 11.0,
+Linux 7.2.11-1-cachyos, Intel Core i9-13900K.
 JSONL logs and watch logs are kept in `~/.local/share/underwolf-spike/runs/c6-*` (not committed:
 `*.jsonl` is ignored). Bare file names below are in that directory.
 
@@ -174,10 +175,17 @@ JSONL logs and watch logs are kept in `~/.local/share/underwolf-spike/runs/c6-*`
   `installed_build` test and Step 1 with **no code changes**. Record which patterns and fields
   survived and the diff of the two schema dumps. If no patch lands within the spike window, record
   that.
-  - New build: two patches landed in the spike window, 6801 to 6807 and 6807 to 6810.
+  - New build: client.dll was patched in the spike window, from 6801 to 6807, 6810 and 6813.
     - 6801 to 6807 (client.dll SHA-256 `a7d0d9e8…589e` to `96ee2a33…`, installed 2026-10-21
       19:57). `tier0`/`engine2` unchanged by it.
-    - 6807 to 6810 (`96ee2a33…` to `5c50c21e…`, 23:48). `tier0`/`engine2` still unchanged.
+    - 6807 to 6810 (`96ee2a33…` to `5c50c21e…`, 23:48, BuildID 26115603). `tier0`/`engine2`
+      still unchanged.
+    - Two more Steam updates on 2026-10-22 (Steam `content_log.txt`): BuildID 26118388 at 08:00:25
+      (its contents are not known) and BuildID 26124462 at 10:45:38. Afterwards `steam.inf` says
+      ClientVersion 6813 (mtime 10:45:37) and `client.dll` (now `cd46c548…`) has mtime 10:45:38.
+      `tier0`/`engine2` still date from 2026-10-21 01:23 (unpatched). Step 8 ran live on 6813
+      (BuildID 26124462): the game was not running from 01:00:25 to 14:45:12, it ran 14:45:12 to
+      15:54:27, and `c6-s8-live.jsonl` covers 14:45:55 to 15:54:24.
   - Patterns / fields that survived, with no code changes: on 6807 `installed_build` passes 3/3
     (all client.dll patterns, schema fields and the main-loop callers resolve); the code moved
     (GAME_TIME hit RVA 0x1975d70 to 0x1975d00). On 6810 the collector loaded from the unchanged
@@ -185,12 +193,17 @@ JSONL logs and watch logs are kept in `~/.local/share/underwolf-spike/runs/c6-*`
     roster and items sane in the Hideout. Later builds (b4df974, 1472875) also pass
     `installed_build` 3/3 on 6810 (layout relations hold). `installed_build` was not run on 6810
     with f528948 itself; the later builds' changes were the layout check and the Step 8 tasks, not
-    patch fixes.
+    patch fixes. On 6813 the installed collector DLL from 1472875 (built 2026-10-22 02:31, before
+    both later updates) ran the whole Step 8 live session unchanged, and `installed_build` passes
+    3/3 on 6813.
   - Schema dump diff: 6801 vs 6807 empty (3963 classes, 13832 fields, 0 added/removed/moved);
-    6801 vs 6810 empty (same counts). Dumps `schema-6807.json` and `schema-6810.json` are in the
-    session scratchpad (not committed).
-  - Step 1 rerun: Steps 1, 2, 4 and 6 all ran on 6807, and Steps 3, 5 rerun and 8 on 6810, with
-    no code changes caused by the patches.
+    6801 vs 6810 empty (same counts). 6801 vs 6813: one class differs,
+    `CCitadel_Ability_Doorman_Doorway` (`m_flDebugDrawDuration` added at 6456,
+    `m_nDoorPlacementSphere` moved 6456 to 6460; 3963 classes, 13833 fields). The collector reads
+    nothing from that class, so none of its fields moved. Dumps `schema-6807.json`,
+    `schema-6810.json` and `schema-6813.json` are in the session scratchpad (not committed).
+  - Step 1 rerun: Steps 1, 2, 4 and 6 all ran on 6807, Steps 3 and 5 rerun on 6810, and Step 8
+    on 6813, with no code changes caused by the patches.
   - Caveat: `tier0`/`engine2` were not patched, so the main-loop patterns have not been through a
     patch yet.
 - [ ] **Step 8: Timeboxed features (2 days, owner decision).** `game_mode`, `game_paused` (if not
@@ -210,7 +223,8 @@ JSONL logs and watch logs are kept in `~/.local/share/underwolf-spike/runs/c6-*`
   | `incoming_damage` | none usable: only via the Panorama HUD object `CCitadel_Hud_DamageReport` (non-schema offsets) or a message hook, outside the collector rules (schema fields only; QPC is the only hook) | n/a | `unavailable` (no task; not emitted) |
 
   - Live check: private lobby with bots, match 122217736, owner host, team 3, build 1472875 on
-    6810, log `c6-s8-live.jsonl` (watch log `c6-s8-live-watch.log`). In the Hideout: no
+    6813 (BuildID 26124462; the tasks were written and tested offline on 6810, see Step 7), log
+    `c6-s8-live.jsonl` (watch log `c6-s8-live-watch.log`). In the Hideout: no
     `tower_destroyed`, `disabled_tasks` [].
   - Final `match_clock` 26:24 = scoreboard 26:24 (the missing last second of Step 3 did not
     reproduce).
@@ -230,28 +244,29 @@ unavailable.
 
 | Feature/key | Source | Resolution (schema name / pattern) | Accuracy result | Survived patch | Notes |
 |---|---|---|---|---|---|
-| `gep_internal.version_info` | memory (the collector's own text) | Collector name and version, plus the schema record layout it found in the game (`disk-class-v2`) | Published live at start in every run; the value is the collector's own (the layout name comes from the game's schema data) | Yes (the layout resolved on 6807 and 6810) | `{"collector":"uw-spike-dlcollector 0.0.0","schema_layout":"disk-class-v2"}` |
+| `gep_internal.version_info` | memory (the collector's own text) | Collector name and version, plus the schema record layout it found in the game (`disk-class-v2`) | Published live at start in every run; the value is the collector's own (the layout name comes from the game's schema data) | Yes (the layout resolved on 6807, 6810 and 6813) | `{"collector":"uw-spike-dlcollector 0.0.0","schema_layout":"disk-class-v2"}` |
 | `game_info.phase` | memory | `RULES` pattern (game rules global) + `C_CitadelGameRules.m_eGameState` | Read live in every run. Bot match: Init, MatchIntro, WaitForMapToLoad, PreGameWait, GameInProgress, PostGame, End. Private lobby: PostGame to None, no End | Yes | GameInProgress in the Hideout/sandbox. Required field: without it the collector publishes only its error status (`plugin_status`, `plugin_error`) |
-| `game_info.game_mode` | memory | `C_CitadelGameRules.m_eMatchMode` + `m_eGameMode`, named by fixed tables copied from the 6810 `ECitadelMatchMode` / `ECitadelGameMode` schema enums (prefix stripped) | PASS: private lobby `{"match_mode":"PrivateLobby","game_mode":"Normal"}`, cleared at match end | Not exercised: added on 6810 (its fields are equal in all three dumps) | Not published in the Hideout (neither value has a name there); unnamed values are left out. Field-to-enum pairing proven offline on 6810 from the field records (`m_eMatchMode` 0x18076c3bd / `ECitadelMatchMode` 0x18076c3cd; `m_eGameMode` 0x18076c3f9 / `ECitadelGameMode` 0x18076c409); `installed_build` pins the enum tables |
+| `game_info.game_mode` | memory | `C_CitadelGameRules.m_eMatchMode` + `m_eGameMode`, named by fixed tables copied from the 6810 `ECitadelMatchMode` / `ECitadelGameMode` schema enums (prefix stripped) | PASS: private lobby `{"match_mode":"PrivateLobby","game_mode":"Normal"}`, cleared at match end | Survived one client.dll patch (written and tested offline on 6810, live only on 6813; its fields are equal in all four dumps) | Not published in the Hideout (neither value has a name there); unnamed values are left out. Field-to-enum pairing proven offline on 6810 from the field records (`m_eMatchMode` 0x18076c3bd / `ECitadelMatchMode` 0x18076c3cd; `m_eGameMode` 0x18076c3f9 / `ECitadelGameMode` 0x18076c409); `installed_build` pins the enum tables |
 | `game_info.match_history` | unavailable | None: no task or provider reads it | n/a | n/a | Not attempted in Spike 3; the status table reports it `unavailable` |
 | `game_info.steam_id` | memory | The roster's local row: `CBasePlayerController.m_steamID` where `m_bIsLocalPlayerController` is set; `uw-gep`'s provider emits it when it changes | PASS: published in every run with the roster; the roster's steam ids matched all 12 API players of the real match (`verify` keys rows by them: 0 MISSING, 0 MISMATCH) | Yes | Not emitted while the roster is off (Step 5 rerun). Bots have steam id 0 |
-| `match_info.team_score` | memory | `TEAMS` pattern (team list) + `C_Team.m_iScore` per team; `C_BaseEntity.m_iTeamNum` 2 = amber, 3 = sapphire | PASS: mid-match HUD 7 / 5 = log; final 40 / 63 = scoreboard | Not exercised: added on 6810 | The game's top bar shows `m_iScore` as the team's kills (static evidence, 8b). Also published in the Hideout (0-0, then amber 1 after an owner kill). `installed_build` pins the team numbers to the game's parser |
+| `match_info.team_score` | memory | `TEAMS` pattern (team list) + `C_Team.m_iScore` per team; `C_BaseEntity.m_iTeamNum` 2 = amber, 3 = sapphire | PASS: mid-match HUD 7 / 5 = log; final 40 / 63 = scoreboard | Survived one client.dll patch (written and tested offline on 6810, live only on 6813) | The game's top bar shows `m_iScore` as the team's kills (static evidence, 8b). Also published in the Hideout (0-0, then amber 1 after an owner kill). `installed_build` pins the team numbers to the game's parser |
 | `match_info.match_id` | memory | `RULES` + `C_CitadelGameRules.m_unMatchID` (0 is not emitted) | PASS: bot match 121745243 and real match 121819616 equal the scoreboard; `verify` OK | Yes | None in the Hideout/sandbox (no match there; see Decisions). Required field |
 | `match_info.roster` | memory | `TEAMS` + `ENTITIES` patterns (team list, controller handles, entity list); `C_Team.m_aPlayerControllers`, `C_BaseEntity.m_iTeamNum`, `CBasePlayerController.m_iszPlayerName` / `m_steamID` / `m_bIsLocalPlayerController`, `CCitadelPlayerController.m_PlayerDataGlobal`, `PlayerDataGlobal_t.m_nHeroID` / `m_iPlayerKills` / `m_iDeaths` / `m_iPlayerAssists` | PASS: 24/24 player rows exact (bot match by scoreboard; real match by scoreboard and API: `verify --team-map 2=0,3=1` gave 61 OK, 0 MISMATCH, 0 MISSING, 0 UNCONFIRMED, hero and team rows included) | Yes | Step 5 first run published a wrong value under deliberate corruption (see Verdict); the layout check now switches the roster off instead. Keys `roster_0`..`roster_11`, one slot per player. Bots are `Bot0`..`Bot10` |
 | `match_info.items` | memory | The roster's walk + `PlayerDataGlobal_t.m_vecUpgrades` (at most 64) | Count only: local 7 = scoreboard 7 (bot match); real match 11-12 per player (not compared) | Yes | Item ids were not compared with any list (`verify` does not check items). Keys `items_0`..`items_11` |
 | `match_info.incoming_damage` | unavailable | None. Overwolf reads the HUD object `CCitadel_Hud_DamageReport` at fixed non-schema offsets (only while the damage panel is open); the HUD's numbers arrive as user messages (`k_EUserMsg_Damage`, `k_EUserMsg_RecentDamageSummary`) | n/a | n/a | Outside the collector rules (schema fields only; QPC is the only hook). No schema field holds incoming damage per source. Post-match only: deadlock-api.com metadata has `player_damage_taken` (a total, no per-source split, no time filter) |
-| `match_info.match_outcome` | memory | `RULES` + `C_CitadelGameRules.m_iWinningTeam` (2 = AMBER, 3 = SAPPHIRE), only in PostGame and End, where the game's match-end panel shows the winner | PASS: `{"winning_team":"SAPPHIRE"}` at PostGame, scoreboard "Archmother Victorious" (1 match) | Not exercised: added on 6810 | The winning team, as Overwolf documents it, not local victory/defeat. Null in other phases; never set when leaving mid-match |
+| `match_info.match_outcome` | memory | `RULES` + `C_CitadelGameRules.m_iWinningTeam` (2 = AMBER, 3 = SAPPHIRE), only in PostGame and End, where the game's match-end panel shows the winner | PASS: `{"winning_team":"SAPPHIRE"}` at PostGame, scoreboard "Archmother Victorious" (1 match) | Survived one client.dll patch (written and tested offline on 6810, live only on 6813) | The winning team, as Overwolf documents it, not local victory/defeat. Null in other phases; never set when leaving mid-match |
 | event `match_start` | memory (via `uw-gep`'s provider) | Provider: `phase` reaches GameInProgress with a known `match_id`; once per match id | PASS: at GameInProgress in the bot match and the real match | Yes | Never fires in the Hideout/sandbox (no match id). Data `{"match_id":"…"}` (Overwolf: null) |
 | event `match_end` | memory (via provider) | Provider: `phase` leaves GameInProgress, PostGame or PostGame_PlayOfTheGame (or is cleared) after a start | PASS: at End, 10 s after PostGame (bot match, real match); at PostGame to None in the private lobby (no End); on leaving mid-match (no PostGame) | Yes | Fires on leaving too, not only at a finished match. Data `{"match_id":"…"}` (Overwolf: null) |
 | event `kill` | memory (via provider) | Provider: the local roster row's `m_iPlayerKills` up by exactly 1 within one match id and steam id | PASS: 31 events = scoreboard 31 (bot match). Latency: "instantly" by the owner's eye; relay delay median 7 ms, p95 14 ms, max 15 ms, plus a pass interval of at most 50 ms | Yes | Data `{"kills":N}` (Overwolf: null) |
 | event `death` | memory (via provider) | Same, `m_iDeaths` | PASS: 6 events = scoreboard 6 (bot match) | Yes | Data `{"deaths":N}` (Overwolf: null) |
 | event `assist` | memory (via provider) | Same, `m_iPlayerAssists` | PASS: 9 events = scoreboard 9 (bot match) | Yes | Data `{"assists":N}` (Overwolf: null) |
 | event `match_clock` | memory | Clock task: `CLOCK_SECONDS`, `GAME_TIME`, `ADJUST_TIME` and `CONVAR_GETTER` patterns (three ConVars, the globals, the time-adjust function, which must equal the rules vtable slot +0x220 on every read) + `C_GameRules.m_nTotalPausedTicks` / `m_nPauseStartTick` / `m_bGamePaused`, `C_CitadelGameRules.m_flGameStartTime` / `m_eGameMode` / `m_eGameState` | PASS: last value = scoreboard in the bot match (23:23) and the private lobby (26:24); real match 46:57 vs 46:58 (the final second was not published before PostGame cleared the clock); frozen during pauses | Yes (`GAME_TIME` moved from RVA 0x1975d70 to 0x1975d00 and still resolved) | The collector's `clock` event, renamed by the provider; once per second, GameInProgress only. Data `{"match_clock":"MM:SS"}` (Overwolf: "01:00"). Also the info key `match_info.match_clock` |
-| event `game_paused` | memory | Clock task: a change of `C_GameRules.m_bGamePaused` between two passes in GameInProgress; data `true` / `false` | PASS: 2 pauses gave exactly true, false, true, false (private lobby, owner host) | Not exercised: the true/false event was added on 6810 | The info key `match_info.game_paused` ("true"/"false") is older and survived both patches, as did an older pause-only event (`{"game_paused":true}`, since C3b), which fired on both pauses of the real match (6810, unchanged f528948 build; not compared with the display) |
-| event `tower_destroyed` | memory | `C_CitadelTeam.m_nBossesAlive` (checked against `m_nBossesMax`) for teams 2 and 3 of the `TEAMS` list: one event per unit the count drops, data = the team that lost it; only in GameInProgress and Normal mode; baseline per game rules object and match id | Partly: 22 events (Amber 14, Sapphire 8); the owner-observed subset matched; the full count is unverified (Step 8) | Not exercised: added on 6810 | The field Overwolf's plugin compares (learned from its raw decompile, see Verdict). The Patron's loss falls in PostGame and fires no event. Data `"Amber"` / `"Sapphire"` (a JSON string) |
+| event `game_paused` | memory | Clock task: a change of `C_GameRules.m_bGamePaused` between two passes in GameInProgress; data `true` / `false` | PASS: 2 pauses gave exactly true, false, true, false (private lobby, owner host) | Survived one client.dll patch (the true/false event was written and tested offline on 6810, live only on 6813) | The info key `match_info.game_paused` ("true"/"false") is older and survived every patch in the window (6807, 6810, 6813), as did an older pause-only event (`{"game_paused":true}`, since C3b), which fired on both pauses of the real match (6810, unchanged f528948 build; not compared with the display) |
+| event `tower_destroyed` | memory | `C_CitadelTeam.m_nBossesAlive` (checked against `m_nBossesMax`) for teams 2 and 3 of the `TEAMS` list: one event per unit the count drops, data = the team that lost it; only in GameInProgress and Normal mode; baseline per game rules object and match id | Partly: 22 events (Amber 14, Sapphire 8); the owner-observed subset matched; the full count is unverified (Step 8) | Survived one client.dll patch (written and tested offline on 6810, live only on 6813) | The field Overwolf's plugin compares (learned from its raw decompile, see Verdict). The Patron's loss falls in PostGame and fires no event. Data `"Amber"` / `"Sapphire"` (a JSON string) |
 
-- "Survived patch": the row's patterns and fields resolved on 6807 and 6810 with the code written
-  for 6801, and no change (Step 7). Rows added in Step 8 ran only on 6810: "not exercised".
+- "Survived patch": the row's patterns and fields resolved on 6807, 6810 and 6813 with the code
+  written for 6801, and no change (Step 7). Rows added in Step 8 were written and tested offline
+  on 6810 and ran live only on 6813, so they survived one client.dll patch.
 - Every row also depends on the main-loop caller patterns (`tier0.dll`, `engine2.dll`). Neither
   DLL was patched in the window, so that part is not exercised.
 - "via provider": `uw-gep`'s provider computes the event from keys read from memory, by the
@@ -358,6 +373,11 @@ Data and events:
   `Internal`. A value added by a later build has no name and is left out.
 - The status table marks a row `supported` on its first value (`team_score` already in the
   Hideout): `supported` means seen, not verified.
+- A game-state value outside the table publishes `phase="Invalid"`
+  (`spikes/dl-collector/src/tasks/phase.rs:25-32`; `game_mode.rs:35-42` leaves such values out),
+  so a state added by a later patch would fire `match_end` mid-match
+  (`spikes/gep-host/src/provider.rs:94-99`). Deferred to milestone 1: changing shipped collector
+  code would invalidate the live-tested build.
 
 Updates:
 - The main-loop patterns have not been through a patch. The tier0 one depends on
@@ -388,6 +408,12 @@ Channel and client:
   need a game restart.
 - `uw-gep verify` attributes rows by the latest match id in the log and silently drops an API
   player without `account_id`.
+- Events pass two throttles: the collector's (`spikes/dl-collector/src/collector.rs:163`,
+  `:471-484`) and a second one in `ProducerOut::push_event`
+  (`spikes/dl-collector/src/plugin.rs:90-92`, `:271`, constants `:38-39`), against the C3b
+  ruling; under a burst, a refusal by the second spends the collector's budget again on every
+  retry. Deferred to milestone 1: changing shipped collector code would invalidate the
+  live-tested build.
 
 Cost:
 - Stack walk: about 424 calls per frame reach tier0+0x14222e on the window thread (plus about 44

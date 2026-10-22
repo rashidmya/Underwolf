@@ -44,9 +44,10 @@ Plan's minimum list:
 - **Spike 3 features unavailable or unverified (03):**
   - Unavailable: `incoming_damage`, `match_history`.
   - Unverified: the full `tower_destroyed` count (22 events; the deadlock-api metadata never came).
-  - Not yet through a patch: the rows added on 6810 (`game_mode`, `team_score`, `match_outcome`,
-    the `game_paused` true/false event, `tower_destroyed`) and the `tier0`/`engine2` main-loop
-    patterns.
+  - Not yet through a patch: only the `tier0`/`engine2` main-loop patterns. The rows added in
+    Step 8 (`game_mode`, `team_score`, `match_outcome`, the `game_paused` true/false event,
+    `tower_destroyed`) were written and tested offline on 6810 and ran live only on 6813, so they
+    survived one `client.dll` patch.
 
 ## Not scheduled
 
@@ -104,10 +105,10 @@ dropped (Amendment C), so Spike 2 (Windows Vulkan, DX11) and Spike 3 (Windows) h
      (local count, bot match only), `match_clock`, `game_mode`, the `game_paused` event,
      `team_score` and `match_outcome` live; `uw-gep`'s provider derives `match_start`/`match_end`
      and `kill`/`death`/`assist` from them. Cost +0.38% avg FPS, +0.14% p99 (PASS; not
-     alternated, nothing injected in A; owner ruling). Two `client.dll` patches
-     (6801 → 6807 → 6810) needed no code change. Under deliberate corruption the first run
-     published a wrong value; with the layout check added, the rerun switched the roster off
-     instead (PASS).
+     alternated, nothing injected in A; owner ruling). `client.dll` went from 6801 to 6807, 6810
+     and 6813 (the Step 8 live checks ran on 6813) with no code change. Under deliberate
+     corruption the first run published a wrong value; with the layout check added, the rerun
+     switched the roster off instead (PASS).
    - Provider requirement (03): turn the collector's raw event data into Overwolf's documented
      shapes (`match_clock` as "01:00", null for kill/death/assist/match_start/match_end, the plain
      team name for `tower_destroyed`).

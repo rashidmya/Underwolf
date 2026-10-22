@@ -12,14 +12,24 @@ use uw_spike_dlcollector::roots::{
 use uw_spike_dlcollector::schema::SchemaFields;
 use uw_spike_dlcollector::tasks::{GAME_MODES, MATCH_MODES, TEAM_AMBER, TEAM_SAPPHIRE};
 
-const DEFAULT_PATH: &str =
-    "/home/buga/.local/share/Steam/steamapps/common/Deadlock/game/citadel/bin/win64/client.dll";
+/// `<rel>` under the default Steam install of Deadlock, `$HOME/.local/share/Steam/...`.
+fn default_game_path(rel: &str) -> String {
+    let home = std::env::var("HOME")
+        .expect("HOME is not set (or set UW_DEADLOCK_CLIENT_DLL / UW_DEADLOCK_BIN_DIR)");
+    format!("{home}/.local/share/Steam/steamapps/common/Deadlock/game/{rel}")
+}
+
+/// `UW_DEADLOCK_CLIENT_DLL`, or client.dll in the default install.
+fn client_dll_path() -> String {
+    std::env::var("UW_DEADLOCK_CLIENT_DLL")
+        .unwrap_or_else(|_| default_game_path("citadel/bin/win64/client.dll"))
+}
 
 /// Reads the installed client.dll from disk (read-only). Run with `-- --ignored installed_build`.
 #[test]
 #[ignore]
 fn installed_build() {
-    let path = std::env::var("UW_DEADLOCK_CLIENT_DLL").unwrap_or_else(|_| DEFAULT_PATH.to_string());
+    let path = client_dll_path();
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
     let (mem, base) = file_image(&bytes).unwrap();
     drop(bytes);
@@ -216,12 +226,11 @@ fn schema_enum(mem: &dyn MemRead, client: &Module, name: &str) -> Vec<(String, i
         .collect()
 }
 
-const DEFAULT_BIN_DIR: &str =
-    "/home/buga/.local/share/Steam/steamapps/common/Deadlock/game/bin/win64";
-
-/// Maps `<UW_DEADLOCK_BIN_DIR>/<name>` (read-only) as its own image.
+/// Maps `<UW_DEADLOCK_BIN_DIR>/<name>` (read-only) as its own image; the default directory is
+/// `game/bin/win64` of the default install.
 fn bin_module(name: &str) -> (FakeMem, Module) {
-    let dir = std::env::var("UW_DEADLOCK_BIN_DIR").unwrap_or_else(|_| DEFAULT_BIN_DIR.to_string());
+    let dir =
+        std::env::var("UW_DEADLOCK_BIN_DIR").unwrap_or_else(|_| default_game_path("bin/win64"));
     let path = format!("{dir}/{name}");
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
     let (mem, base) = file_image(&bytes).unwrap();
@@ -273,7 +282,7 @@ impl ChannelOut for Recorder {
 #[test]
 #[ignore]
 fn installed_build_collector_starts_with_every_task() {
-    let path = std::env::var("UW_DEADLOCK_CLIENT_DLL").unwrap_or_else(|_| DEFAULT_PATH.to_string());
+    let path = client_dll_path();
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
     let (mem, base) = file_image(&bytes).unwrap();
     drop(bytes);

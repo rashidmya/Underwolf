@@ -64,8 +64,8 @@ messages and raw input. The injected DLL:
   real call fill the game's buffer, forwards the motion/clicks to the host, and while editing zeroes
   the buffer in place so the camera does not move (P2). Held buttons are released on entry via a
   tagged `SendInput` that the hook passes straight through.
-- It touches only the input path — no game memory is read or written and no game logic is hooked
-  (spec rule for C2/C3).
+- No game data or code is changed; it changes only import-table slots and the window procedure on
+  the input path (spec rule for C2/C3; spec §6.3 allows both).
 
 **How it is wired into the spikes pipeline (host-mediated TCP relay).** The Vulkan layer is a
 native-Linux `.so` (winevulkan host side) and the hook is a Windows PE under Wine, so they can only
@@ -87,8 +87,8 @@ orchestration, the raw-input parse/neutralize core (`input/tests/rawinput.rs`, i
 `SendInput`, `DllMain`, Winsock transport) type-checks for `x86_64-pc-windows-gnu` but is **not**
 run in CI — the owner verifies it on hardware.
 
-**Pass/fail matrix (to be filled on hardware).** KDE Wayland and GNOME Wayland (plan Amendment B;
-the game runs through XWayland in both).
+**Pass/fail matrix.** KDE Wayland and GNOME Wayland (plan Amendment B; the game runs through
+XWayland in both).
 
 | Cell | P1 | P2 | P3 | P4 | P5 | P6 | Notes |
 |---|---|---|---|---|---|---|---|
