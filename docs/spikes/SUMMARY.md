@@ -46,7 +46,7 @@ Plan's minimum list:
 - **Spike 3 features unavailable or failed (03):**
   - Unavailable: `incoming_damage`, `match_history`.
   - Failed: `tower_destroyed` (second real match 122304230: 20 events vs 18 API objectives, 16 of
-    17 matched 7-10 s late, 1 missed, 4 extra). Owner ruling 2026-10-22: fix in milestone 1.
+    17 matched 0-10 s after the API's destroyed time, 1 missed, 4 extra). Owner ruling 2026-10-22: fix in milestone 1.
   - Not yet through a patch: only the `tier0`/`engine2` main-loop patterns. The rows added in
     Step 8 (`game_mode`, `team_score`, `match_outcome`, the `game_paused` true/false event,
     `tower_destroyed`) were written and tested offline on 6810 and ran live only on 6813, so they
