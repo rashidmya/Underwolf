@@ -1,0 +1,30 @@
+[package]
+name = "uw-bootstrap"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The pinned in-game bootstrap: a thread-hook procedure Wine loads into the game. On the first
+# call it pins itself and starts one worker thread, then always `CallNextHookEx`. `DllMain` does
+# nothing (it also runs in the helper). Built as `uw_bootstrap64.dll` for x86_64-pc-windows-gnu.
+# Task 5 grows the worker to connect the pipe and load the overlay. `lib` (rlib) is needed so the
+# crate's `state` unit tests can link it on Linux; `cdylib` is the DLL.
+[lib]
+name = "uw_bootstrap64"
+crate-type = ["lib", "cdylib"]
+
+[target.'cfg(windows)'.dependencies]
+# `CreateFileW` needs `Win32_Security` and `WriteFile` needs `Win32_System_IO` (windows-sys gates
+# each function by the features of the types in its signature), so both are required even though
+# the bootstrap passes null/ignored arguments for them.
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }

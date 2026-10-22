@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["spikes/*"]
+members = ["spikes/*", "crates/*"]
 exclude = ["spikes/osr-host", "spikes/bench"]
 
 [workspace.package]

@@ -1,0 +1,29 @@
+[package]
+name = "uw-helper"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The Wine-side helper (`uw-helper64.exe`): finds the game's UI thread and sets a thread hook that
+# makes Wine load `uw_bootstrap64.dll` into the game, then (Task 6) serves the named pipe. Task 1
+# is the minimal proof: hook, post wake-ups, wait for the bootstrap's proof file, exit. The
+# portable decision logic (Task 4) and pipe wiring (Task 6) are added to `src/lib.rs` and the bin.
+[lib]
+name = "uw_helper"
+path = "src/lib.rs"
+
+[[bin]]
+name = "uw-helper64"
+path = "src/bin/uw-helper64.rs"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+] }

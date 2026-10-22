@@ -1,0 +1,21 @@
+[package]
+name = "uw-test-game"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# A stand-in game for the Wine end-to-end tests: one visible top-level window and a standard
+# message loop, so the helper's hook has a UI thread to target. `--no-window` sleeps instead
+# (for the `no_window` test). Built for x86_64-pc-windows-gnu.
+[[bin]]
+name = "uw-test-game"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+] }

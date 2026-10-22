@@ -600,6 +600,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
+name = "uw-bootstrap"
+version = "0.0.0"
+dependencies = [
+ "windows-sys",
+]
+
+[[package]]
+name = "uw-helper"
+version = "0.0.0"
+dependencies = [
+ "windows-sys",
+]
+
+[[package]]
 name = "uw-spike-common"
 version = "0.0.0"
 
@@ -704,6 +718,13 @@ dependencies = [
  "napi-derive",
  "rustix",
  "uw-spike-ipc",
+]
+
+[[package]]
+name = "uw-test-game"
+version = "0.0.0"
+dependencies = [
+ "windows-sys",
 ]
 
 [[package]]
