@@ -215,3 +215,117 @@ fn helper_connects_loads_overlay_and_reports_ok() {
     // The overlay wrote its marker file; find it by walking the prefix.
     assert_eq!(markers(&pfx, "uw-test-overlay-").len(), 1, "expected the overlay marker in the prefix");
 }
+
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn reloading_the_same_path_is_already_loaded_and_another_is_already_loaded_other() {
+    let mut pfx = setup("reload");
+    pfx.game = Some(wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).spawn().unwrap());
+    let overlay = to_wine_path(&win_artifact("uw_test_overlay.dll"));
+    let other = to_wine_path(&win_artifact("uw_bootstrap64.dll")); // a different, existing DLL
+
+    let mut helper = start_helper(&pfx, &[], &[]);
+    assert!(helper.next_event(Duration::from_secs(200)).contains("bootstrap_connected"));
+
+    helper.send(&load_overlay_line(&overlay));
+    assert!(helper.next_event(Duration::from_secs(30)).contains(r#""code":"ok""#));
+    helper.send(&load_overlay_line(&overlay));
+    assert!(helper.next_event(Duration::from_secs(30)).contains(r#""code":"already_loaded""#));
+    helper.send(&load_overlay_line(&other));
+    assert!(helper.next_event(Duration::from_secs(30)).contains(r#""code":"already_loaded_other""#));
+}
+
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn a_new_helper_reuses_the_pinned_bootstrap_without_rehooking() {
+    let mut pfx = setup("reconnect");
+    pfx.game = Some(wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).spawn().unwrap());
+    let overlay = to_wine_path(&win_artifact("uw_test_overlay.dll"));
+
+    // Helper 1: connect and load the overlay. Leaving the block kills it (design: "kill the
+    // helper, start a new one"); its pipe and helper mutex go with it.
+    {
+        let mut first = start_helper(&pfx, &[], &[]);
+        assert!(first.next_event(Duration::from_secs(200)).contains("bootstrap_connected"));
+        first.send(&load_overlay_line(&overlay));
+        assert!(first.next_event(Duration::from_secs(30)).contains(r#""code":"ok""#));
+    }
+
+    // Helper 2: the marker mutex exists, so it skips the hook, and the pinned bootstrap reconnects
+    // with overlay_loaded: true (design "Reconnect after a client restart").
+    let second = start_helper(&pfx, &[], &[]);
+    let connected = second.next_event(Duration::from_secs(60));
+    assert!(connected.contains("bootstrap_connected"), "got: {connected}");
+    assert!(connected.contains(r#""overlay_loaded":true"#), "got: {connected}");
+    // It reused the pinned bootstrap without re-hooking (design: "no new hook").
+    assert!(second.wait_stderr("marker present; skipping hook", Duration::from_secs(5)));
+
+    // The overlay was not loaded a second time: still exactly one marker file.
+    assert_eq!(markers(&pfx, "uw-test-overlay-").len(), 1);
+}
+
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn forced_callwndproc_fallback_also_connects_and_loads() {
+    let mut pfx = setup("fallback");
+    pfx.game = Some(wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).spawn().unwrap());
+    let overlay = to_wine_path(&win_artifact("uw_test_overlay.dll"));
+
+    let mut helper = start_helper(&pfx, &["--fallback"], &[]);
+    assert!(helper.next_event(Duration::from_secs(200)).contains("bootstrap_connected"));
+    // The connection must have come through WH_CALLWNDPROC, not a WH_GETMESSAGE fallback after a
+    // timeout (design "forced WH_CALLWNDPROC"; the wake-ups make it fire — I1).
+    assert!(helper.wait_stderr("hooked WH_CALLWNDPROC", Duration::from_secs(5)));
+    helper.send(&load_overlay_line(&overlay));
+    assert!(helper.next_event(Duration::from_secs(30)).contains(r#""code":"ok""#));
+}
+
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn a_game_without_a_window_reports_no_window() {
+    let mut pfx = setup("nowindow");
+    pfx.game = Some(
+        wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).arg("--no-window").spawn().unwrap(),
+    );
+    // A short window timeout instead of the 120 s default; the prefix boot still counts against
+    // the overall event deadline below.
+    let helper = start_helper(&pfx, &[], &[("UW_WINDOW_TIMEOUT_MS", "8000")]);
+    let event = helper.next_event(Duration::from_secs(200));
+    assert!(event.contains(r#""event":"error""#) && event.contains(r#""code":"no_window""#), "got: {event}");
+}
+
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn an_overlay_without_the_export_reports_no_start_export() {
+    let mut pfx = setup("noexport");
+    pfx.game = Some(wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).spawn().unwrap());
+    // The bootstrap DLL exists and loads but has no `uw_overlay_start` export.
+    let no_export = to_wine_path(&win_artifact("uw_bootstrap64.dll"));
+
+    let mut helper = start_helper(&pfx, &[], &[]);
+    assert!(helper.next_event(Duration::from_secs(200)).contains("bootstrap_connected"));
+    helper.send(&load_overlay_line(&no_export));
+    assert!(helper.next_event(Duration::from_secs(30)).contains(r#""code":"no_start_export""#));
+}
+
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn killing_the_game_reports_game_exited() {
+    let mut pfx = setup("gameexit");
+    pfx.game = Some(wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).spawn().unwrap());
+    let overlay = to_wine_path(&win_artifact("uw_test_overlay.dll"));
+
+    let mut helper = start_helper(&pfx, &[], &[]);
+    assert!(helper.next_event(Duration::from_secs(200)).contains("bootstrap_connected"));
+    helper.send(&load_overlay_line(&overlay));
+    assert!(helper.next_event(Duration::from_secs(30)).contains(r#""code":"ok""#));
+
+    // Kill the game while the helper is idle on stdin; the watcher thread must notice and report
+    // `game_exited` (design failure table), without waiting for the next stdin command.
+    if let Some(mut g) = pfx.game.take() {
+        let _ = g.kill();
+        wait_bounded(&mut g, Duration::from_secs(10));
+    }
+    let event = helper.next_event(Duration::from_secs(20));
+    assert!(event.contains(r#""event":"error""#) && event.contains(r#""code":"game_exited""#), "got: {event}");
+}
