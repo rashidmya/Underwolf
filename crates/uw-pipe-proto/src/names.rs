@@ -6,6 +6,10 @@
 pub fn pipe_name(pid: u32) -> String {
     format!(r"\\.\pipe\underwolf-{pid}")
 }
+/// The overlay's own pipe (design 2a: the overlay connects separately from the bootstrap).
+pub fn overlay_pipe_name(pid: u32) -> String {
+    format!(r"\\.\pipe\underwolf-{pid}-overlay")
+}
 pub fn helper_mutex_name(pid: u32) -> String {
     format!(r"Local\underwolf-helper-{pid}")
 }
@@ -40,6 +44,7 @@ mod tests {
     #[test]
     fn names_embed_the_pid() {
         assert_eq!(pipe_name(1234), r"\\.\pipe\underwolf-1234");
+        assert_eq!(overlay_pipe_name(1234), r"\\.\pipe\underwolf-1234-overlay");
         assert_eq!(helper_mutex_name(1234), r"Local\underwolf-helper-1234");
         assert_eq!(marker_mutex_name(1234), r"Local\underwolf-bootstrap-1234");
         assert_eq!(bell_game_name(1234), r"Local\underwolf-1234-bell-game");

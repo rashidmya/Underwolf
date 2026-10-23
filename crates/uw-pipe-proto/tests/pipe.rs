@@ -200,3 +200,73 @@ fn frame(ty: u16, payload: &[u8]) -> Vec<u8> {
     v.extend_from_slice(payload);
     v
 }
+
+// --- The overlay pipe (plan 2a) ---
+
+use uw_pipe_proto::pipe::{check_overlay_first, decode_overlay, encode_overlay, OverlayFirst, OverlayMessage};
+
+#[test]
+fn overlay_messages_round_trip() {
+    for m in [
+        OverlayMessage::Hello { module_version: 3, state_layout: 1 },
+        OverlayMessage::Ping { nonce: 77 },
+        OverlayMessage::Pong { nonce: 77, seen_seq: u64::MAX - 1 },
+    ] {
+        assert_eq!(decode_overlay(&encode_overlay(&m)).unwrap(), m);
+    }
+}
+
+/// Catches the payload layout drifting from the design table (hello 8 bytes, ping 4, pong 16).
+#[test]
+fn overlay_payloads_have_the_design_sizes_and_types() {
+    let hello = encode_overlay(&OverlayMessage::Hello { module_version: 3, state_layout: 1 });
+    assert_eq!((u16::from_le_bytes([hello[4], hello[5]]), hello.len() - 16), (0x0101, 8));
+    let ping = encode_overlay(&OverlayMessage::Ping { nonce: 1 });
+    assert_eq!((u16::from_le_bytes([ping[4], ping[5]]), ping.len() - 16), (0x0102, 4));
+    let pong = encode_overlay(&OverlayMessage::Pong { nonce: 1, seen_seq: 9 });
+    assert_eq!((u16::from_le_bytes([pong[4], pong[5]]), pong.len() - 16), (0x0103, 16));
+    assert_eq!(u64::from_le_bytes(pong[24..32].try_into().unwrap()), 9, "seen_seq at payload offset 8");
+}
+
+/// Catches one pipe accepting the other pipe's messages (design: types from 0x0100 are rejected
+/// on the bootstrap pipe, and the bootstrap's on the overlay pipe).
+#[test]
+fn a_message_from_the_other_pipe_is_an_unknown_type() {
+    let status = encode(&Message::Status { request_id: 1, code: StatusCode::Ok, detail: 0, message: String::new() });
+    assert!(matches!(decode_overlay(&status), Err(ProtoError::UnknownType(3))));
+    let ping = encode_overlay(&OverlayMessage::Ping { nonce: 1 });
+    assert!(matches!(decode(&ping), Err(ProtoError::UnknownType(0x0102))));
+}
+
+#[test]
+fn short_bad_magic_and_truncated_overlay_messages_are_rejected() {
+    assert!(matches!(decode_overlay(&[0u8; 15]), Err(ProtoError::Short)));
+    let mut bytes = encode_overlay(&OverlayMessage::Ping { nonce: 1 });
+    bytes[0] = b'X';
+    assert!(matches!(decode_overlay(&bytes), Err(ProtoError::BadMagic)));
+    // A pong whose payload stops after the nonce.
+    assert!(matches!(decode_overlay(&frame(0x0103, &1u32.to_le_bytes())), Err(ProtoError::Truncated)));
+}
+
+/// Catches the helper accepting a first message that is not a supported `overlay_hello`.
+#[test]
+fn the_first_overlay_message_must_be_a_supported_hello() {
+    let hello = |layout| encode_overlay(&OverlayMessage::Hello { module_version: 5, state_layout: layout });
+    assert_eq!(check_overlay_first(&hello(1)), OverlayFirst::Hello { module_version: 5 });
+    // Another state layout, or another header version: version_mismatch, not pipe_error.
+    assert_eq!(check_overlay_first(&hello(2)), OverlayFirst::VersionMismatch);
+    let mut newer = hello(1);
+    newer[6..8].copy_from_slice(&2u16.to_le_bytes());
+    assert_eq!(check_overlay_first(&newer), OverlayFirst::VersionMismatch);
+    // A ping, a bootstrap hello, or garbage first: pipe_error.
+    assert!(matches!(check_overlay_first(&encode_overlay(&OverlayMessage::Ping { nonce: 1 })), OverlayFirst::Bad(_)));
+    let bootstrap_hello = encode(&Message::Hello {
+        protocol_version: PROTOCOL_VERSION,
+        bootstrap_version: 1,
+        bitness: 64,
+        overlay_loaded: false,
+        overlay_path: String::new(),
+    });
+    assert!(matches!(check_overlay_first(&bootstrap_hello), OverlayFirst::Bad(_)));
+    assert!(matches!(check_overlay_first(b"not a frame at all"), OverlayFirst::Bad(_)));
+}

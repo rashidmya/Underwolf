@@ -2,6 +2,10 @@
 //! (`magic`="UWP1", `type: u16`, `version: u16`, `pid: u32`, `payload_len: u32`) then a payload of
 //! at most `MAX_PAYLOAD` bytes. Paths are UTF-16 with a `u16` code-unit-count prefix (<= 1024);
 //! status messages are UTF-8 with a `u16` byte-count prefix (<= 256).
+//!
+//! Two pipes use this framing. The bootstrap pipe carries `Message` (types 1-3); the overlay pipe
+//! carries `OverlayMessage` (types from 0x0100), so a message sent to the wrong pipe is rejected
+//! as `UnknownType`.
 
 pub const MAGIC: [u8; 4] = *b"UWP1";
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -13,6 +17,9 @@ pub const MAX_STATUS_BYTES: usize = 256;
 const TYPE_HELLO: u16 = 1;
 const TYPE_LOAD_OVERLAY: u16 = 2;
 const TYPE_STATUS: u16 = 3;
+const TYPE_OVERLAY_HELLO: u16 = 0x0101;
+const TYPE_PING: u16 = 0x0102;
+const TYPE_PONG: u16 = 0x0103;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusCode {
@@ -162,14 +169,19 @@ pub fn encode(m: &Message) -> Vec<u8> {
             (TYPE_STATUS, p)
         }
     };
+    frame(ty, &payload)
+}
+
+/// The 16-byte header, then the payload.
+fn frame(ty: u16, payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(HEADER_LEN + payload.len());
     out.extend_from_slice(&MAGIC);
     out.extend_from_slice(&ty.to_le_bytes());
     out.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
-    // `pid` is reserved (the sender's Windows pid); 0 here, filled and checked by plan 2.
+    // `pid` is reserved (the sender's Windows pid); always 0, not checked.
     out.extend_from_slice(&0u32.to_le_bytes());
     out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-    out.extend_from_slice(&payload);
+    out.extend_from_slice(payload);
     out
 }
 
@@ -189,6 +201,12 @@ impl<'a> Cur<'a> {
         let s = self.b.get(self.i..end).ok_or(ProtoError::Truncated)?;
         self.i = end;
         Ok(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+    }
+    fn u64(&mut self) -> Result<u64, ProtoError> {
+        let end = self.i + 8;
+        let s = self.b.get(self.i..end).ok_or(ProtoError::Truncated)?;
+        self.i = end;
+        Ok(u64::from_le_bytes(s.try_into().unwrap()))
     }
     fn u8(&mut self) -> Result<u8, ProtoError> {
         let v = *self.b.get(self.i).ok_or(ProtoError::Truncated)?;
@@ -218,8 +236,8 @@ impl<'a> Cur<'a> {
     }
 }
 
-/// Decode one framed message. A string-length field over its cap fails before any allocation.
-pub fn decode(bytes: &[u8]) -> Result<Message, ProtoError> {
+/// Check the header; the message type and the payload it frames.
+fn unframe(bytes: &[u8]) -> Result<(u16, &[u8]), ProtoError> {
     if bytes.len() < HEADER_LEN {
         return Err(ProtoError::Short);
     }
@@ -239,6 +257,13 @@ pub fn decode(bytes: &[u8]) -> Result<Message, ProtoError> {
         return Err(ProtoError::PayloadTooLarge);
     }
     let payload = bytes.get(HEADER_LEN..HEADER_LEN + payload_len).ok_or(ProtoError::Truncated)?;
+    Ok((ty, payload))
+}
+
+/// Decode one framed bootstrap-pipe message. A string-length field over its cap fails before any
+/// allocation. An overlay-pipe type is `UnknownType`.
+pub fn decode(bytes: &[u8]) -> Result<Message, ProtoError> {
+    let (ty, payload) = unframe(bytes)?;
     let mut c = Cur { b: payload, i: 0 };
     match ty {
         TYPE_HELLO => Ok(Message::Hello {
@@ -258,5 +283,87 @@ pub fn decode(bytes: &[u8]) -> Result<Message, ProtoError> {
             Ok(Message::Status { request_id, code, detail, message })
         }
         other => Err(ProtoError::UnknownType(other)),
+    }
+}
+
+/// The overlay pipe (`\\.\pipe\underwolf-<pid>-overlay`): the in-game overlay's own connection to
+/// the helper (design "Overlay pipe messages").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OverlayMessage {
+    /// game -> helper, always first: the overlay module's version and the state block layout it
+    /// reads.
+    Hello { module_version: u32, state_layout: u16 },
+    /// helper -> game.
+    Ping { nonce: u32 },
+    /// game -> helper: the ping's nonce and the last `seq` the overlay applied.
+    Pong { nonce: u32, seen_seq: u64 },
+}
+
+/// Encode an overlay-pipe message (header + payload). Reserved fields are 0.
+pub fn encode_overlay(m: &OverlayMessage) -> Vec<u8> {
+    let mut p = Vec::new();
+    let ty = match m {
+        OverlayMessage::Hello { module_version, state_layout } => {
+            p.extend_from_slice(&module_version.to_le_bytes());
+            p.extend_from_slice(&state_layout.to_le_bytes());
+            p.extend_from_slice(&0u16.to_le_bytes());
+            TYPE_OVERLAY_HELLO
+        }
+        OverlayMessage::Ping { nonce } => {
+            p.extend_from_slice(&nonce.to_le_bytes());
+            TYPE_PING
+        }
+        OverlayMessage::Pong { nonce, seen_seq } => {
+            p.extend_from_slice(&nonce.to_le_bytes());
+            p.extend_from_slice(&0u32.to_le_bytes());
+            p.extend_from_slice(&seen_seq.to_le_bytes());
+            TYPE_PONG
+        }
+    };
+    frame(ty, &p)
+}
+
+/// Decode one framed overlay-pipe message. A bootstrap-pipe type is `UnknownType`.
+pub fn decode_overlay(bytes: &[u8]) -> Result<OverlayMessage, ProtoError> {
+    let (ty, payload) = unframe(bytes)?;
+    let mut c = Cur { b: payload, i: 0 };
+    match ty {
+        TYPE_OVERLAY_HELLO => {
+            let module_version = c.u32()?;
+            let state_layout = c.u16()?;
+            c.u16()?; // reserved
+            Ok(OverlayMessage::Hello { module_version, state_layout })
+        }
+        TYPE_PING => Ok(OverlayMessage::Ping { nonce: c.u32()? }),
+        TYPE_PONG => {
+            let nonce = c.u32()?;
+            c.u32()?; // reserved
+            Ok(OverlayMessage::Pong { nonce, seen_seq: c.u64()? })
+        }
+        other => Err(ProtoError::UnknownType(other)),
+    }
+}
+
+/// How the helper takes the first message on a new overlay-pipe connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OverlayFirst {
+    /// An `overlay_hello` the helper supports.
+    Hello { module_version: u32 },
+    /// An `overlay_hello` with another header version or state layout (design: `version_mismatch`).
+    VersionMismatch,
+    /// Anything else (design: `pipe_error`; the connection is dropped).
+    Bad(String),
+}
+
+/// Classify the first overlay-pipe message (design: it must be `overlay_hello`; a header version
+/// or `state_layout` the helper does not support gives `version_mismatch`).
+pub fn check_overlay_first(bytes: &[u8]) -> OverlayFirst {
+    match decode_overlay(bytes) {
+        Ok(OverlayMessage::Hello { module_version, state_layout }) if state_layout == crate::state::LAYOUT_VERSION => {
+            OverlayFirst::Hello { module_version }
+        }
+        Ok(OverlayMessage::Hello { .. }) | Err(ProtoError::BadVersion(_)) => OverlayFirst::VersionMismatch,
+        Ok(_) => OverlayFirst::Bad("expected overlay_hello first".into()),
+        Err(e) => OverlayFirst::Bad(format!("decode overlay_hello: {e}")),
     }
 }
