@@ -51,6 +51,8 @@ fn replies_expose_their_request_id() {
     *e.request_id_mut().unwrap() = 8;
     assert_eq!(e, Event::reply_error(8, "state_busy"));
     assert_eq!(Event::StateSet { request_id: 5, seq: 1 }.request_id(), Some(5));
+    assert_eq!(Event::Pong { request_id: 3, seen_seq: 0 }.request_id(), Some(3));
+    assert_eq!(Event::reply_error(4, "state_busy").request_id(), Some(4));
     let status = Event::Status { request_id: 6, code: "ok".into(), detail: 0, message: String::new() };
     assert_eq!(status.request_id(), Some(6));
     assert_eq!(Event::error("no_window").request_id(), None);
