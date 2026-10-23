@@ -78,3 +78,16 @@ fn a_helper_that_cannot_start_stops_the_host() {
     assert_eq!(next(&host), Event::Stopped { reason: "game_not_found".into() });
     assert_eq!(host.recv_timeout(Duration::from_secs(5)), Err(RecvTimeoutError::Disconnected));
 }
+
+/// Catches the stdout reader ending at a line that is not UTF-8: that line must become a
+/// `helper_protocol_error` and the events after it must still arrive.
+#[test]
+fn a_non_utf8_line_is_a_protocol_error_and_later_events_still_arrive() {
+    let host = Host::start(
+        Scripts(vec![r#"printf '\377\n'; echo '{"event":"game_exited"}'; read -r line; exit 0"#]),
+        Desired::new(None),
+    );
+    assert_eq!(next(&host), Event::HelperProtocolError { line: "\u{fffd}".into() });
+    assert_eq!(next(&host), Event::GameExited);
+    assert_eq!(next(&host), Event::Stopped { reason: "game_exited".into() });
+}

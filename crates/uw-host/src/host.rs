@@ -109,9 +109,18 @@ fn spawn(mut cmd: Command, tx: &Sender<Input>) -> Result<ChildStdin, String> {
     let stdout = child.stdout.take().expect("piped stdout");
     let tx = tx.clone();
     std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            let Ok(line) = line else { break };
-            if !line.trim().is_empty() && tx.send(Input::HelperLine(line)).is_err() {
+        let mut reader = BufReader::new(stdout);
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            // Bytes, not `lines()`: a line that is not UTF-8 must not end the reader.
+            match reader.read_until(b'\n', &mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            let line = String::from_utf8_lossy(&buf);
+            let line = line.trim_end_matches(['\n', '\r']);
+            if !line.trim().is_empty() && tx.send(Input::HelperLine(line.to_string())).is_err() {
                 break;
             }
         }

@@ -195,6 +195,7 @@ fn a_line_that_is_not_an_event_is_a_helper_protocol_error() {
 /// Catches `overlay_timeout` missing, repeated, or raised although the overlay connected.
 #[test]
 fn status_ok_without_an_overlay_within_10_s_is_overlay_timeout() {
+    assert_eq!(OVERLAY_TIMEOUT_MS, 10_000, "the design's 10 s");
     let ok = |id| Event::Status { request_id: id, code: "ok".into(), detail: 0, message: String::new() };
     let mut f = Fake::started();
     f.now = 1_000;
