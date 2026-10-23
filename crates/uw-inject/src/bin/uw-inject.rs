@@ -67,9 +67,27 @@ extern "C" fn on_signal(_sig: libc::c_int) {
     unsafe { libc::_exit(130) };
 }
 
+/// Hand each non-blank line of `input` to `each`, until EOF or a read error.
+#[cfg(unix)]
+fn command_lines(mut input: impl std::io::BufRead, mut each: impl FnMut(&str)) {
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        // Bytes, not `lines()`: a line that is not UTF-8 must not end the reader.
+        match input.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let line = String::from_utf8_lossy(&buf);
+        let line = line.trim_end_matches(['\n', '\r']);
+        if !line.trim().is_empty() {
+            each(line);
+        }
+    }
+}
+
 #[cfg(unix)]
 fn run() -> Result<i32, String> {
-    use std::io::BufRead;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -140,16 +158,10 @@ fn run() -> Result<i32, String> {
     let user_ids = Arc::new(UserIds::default());
     let ids = Arc::clone(&user_ids);
     std::thread::spawn(move || {
-        for line in std::io::stdin().lock().lines() {
-            let Ok(line) = line else { break };
-            if line.trim().is_empty() {
-                continue;
-            }
-            match ids.outgoing(&line, commands.next_request_id()) {
-                Ok(cmd) => commands.send(cmd),
-                Err(e) => eprintln!("[uw-inject] bad command: {e}"),
-            }
-        }
+        command_lines(std::io::stdin().lock(), |line| match ids.outgoing(line, commands.next_request_id()) {
+            Ok(cmd) => commands.send(cmd),
+            Err(e) => eprintln!("[uw-inject] bad command: {e}"),
+        });
         // Our stdin closing does not stop us: Ctrl-C, a signal or a stop does.
     });
 
@@ -201,5 +213,13 @@ mod tests {
         ids.incoming(&mut error);
         assert_eq!(error, Event::reply_error(5, "overlay_not_connected"));
         assert!(ids.outgoing("not json", 6).is_err());
+    }
+
+    /// Catches a line that is not UTF-8 ending the reader: every later command would be ignored.
+    #[test]
+    fn a_line_that_is_not_utf8_is_passed_on_and_later_commands_still_arrive() {
+        let mut seen = Vec::new();
+        super::command_lines(&b"\xff\n\n{\"cmd\":\"ping\"}\r\n"[..], |l| seen.push(l.to_string()));
+        assert_eq!(seen, ["\u{fffd}", r#"{"cmd":"ping"}"#]);
     }
 }

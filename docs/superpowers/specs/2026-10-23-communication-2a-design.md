@@ -1,6 +1,6 @@
 # Milestone 1, plan 2a: Communication, control channel (design)
 
-Date: 2026-10-23. Status: for owner review.
+Date: 2026-10-23. Status: implemented; the owner's live check passed (see "Live check (owner)").
 Implements spec §6.3 "Client ↔ in-game channel" (`2026-10-20-underwolf-design.md`), the control
 half. Proposed in `docs/spikes/SUMMARY.md`, milestone 1 item 2. Builds on plan 1
 (`2026-10-22-injection-design.md`).
