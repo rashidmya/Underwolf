@@ -398,12 +398,16 @@ fn killing_the_game_reports_game_exited() {
     helper.send(&load_overlay_line(&overlay));
     helper.expect_event(r#""code":"ok""#, Duration::from_secs(30));
 
-    // Kill the game while the helper is idle on stdin; the watcher thread must notice and report
-    // `game_exited` (design failure table), without waiting for the next stdin command.
+    // Kill the game while the helper is idle; the watcher thread must notice and report
+    // `game_exited` (design failure table), without waiting for the next stdin command. The relay
+    // may see the bootstrap pipe drop first (`bootstrap_disconnected`); nothing else may come.
     if let Some(mut g) = pfx.game.take() {
         let _ = g.kill();
         wait_bounded(&mut g, Duration::from_secs(10));
     }
-    let event = helper.next_event(Duration::from_secs(20));
+    let mut event = helper.next_event(Duration::from_secs(20));
+    if event == r#"{"event":"bootstrap_disconnected"}"# {
+        event = helper.next_event(Duration::from_secs(20));
+    }
     assert_eq!(event, r#"{"event":"game_exited"}"#);
 }

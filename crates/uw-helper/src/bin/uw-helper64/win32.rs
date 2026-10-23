@@ -71,9 +71,7 @@ unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> windows_sys::co
 }
 
 /// The control channel: the objects the game opens after its `overlay_hello`, and the overlay
-/// pipe it connects to. Held here so both exist from before the hook on; the relay loop (plan 2a
-/// Task 7) serves them and removes this `allow`.
-#[allow(dead_code)]
+/// pipe it connects to. Created before the bootstrap pipe; the relay serves both.
 pub(crate) struct Channel {
     pub(crate) objects: Objects,
     pub(crate) overlay: PipeServer,

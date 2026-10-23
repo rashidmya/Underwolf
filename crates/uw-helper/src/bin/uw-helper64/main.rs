@@ -1,14 +1,15 @@
 //! `uw-helper64 <game-exe> --bootstrap <windows path> [--fallback]`
 //!
-//! Runs inside the game's Wine session. Finds the game's UI thread and sets a thread hook that
-//! makes Wine load `uw_bootstrap64.dll` into the game (or, if a bootstrap is already pinned, skips
-//! the hook), serves the named pipe, and relays JSON lines: events (`bootstrap_connected`,
-//! `status`, `error`, …) on stdout, commands (`load_overlay`, …) on stdin, each reply echoing its
+//! Runs inside the game's Wine session. Creates the control channel (doorbells, mask region,
+//! state block, overlay pipe) and the bootstrap pipe, finds the game's UI thread and sets a thread
+//! hook that makes Wine load `uw_bootstrap64.dll` into the game (or, if a bootstrap is already
+//! pinned, skips the hook), then serves both pipes and relays JSON lines: commands
+//! (`load_overlay`, `set_state`, `ping`) on stdin, events on stdout, each reply echoing its
 //! command's `request_id`; diagnostics on stderr.
 //!
-//! Modules: `win32` (the real `Win32` for `decide`), `pipe_server` (the overlapped pipe server),
-//! `commands` (the stdin reader; stdin closing ends the helper in every phase), `relay` (the
-//! JSON-lines relay and the game watcher).
+//! Modules: `win32` (the real `Win32` for `decide`, and the channel), `pipe_server` (the
+//! overlapped pipe server both pipes use), `commands` (the stdin reader; stdin closing ends the
+//! helper in every phase), `relay` (the one wait loop, and the game watcher).
 
 #[cfg(not(windows))]
 fn main() {
@@ -66,7 +67,13 @@ fn helper_main() -> i32 {
     }
 
     // Read stdin from the start, so its closing ends the helper in every phase.
-    let commands = commands::spawn_stdin_reader();
+    let commands = match commands::spawn_stdin_reader() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[uw-helper64] {e}");
+            return 1;
+        }
+    };
     let mut w = win32::RealWin32::new(exe, bootstrap);
     // The Wine tests override the long default timeouts so `no_window` and `bootstrap_timeout`
     // do not block for two minutes; unset in production, the defaults stand.
@@ -78,14 +85,17 @@ fn helper_main() -> i32 {
         hello_timeout_ms: env_ms("UW_HELLO_TIMEOUT_MS", defaults.hello_timeout_ms),
         window_poll_ms: defaults.window_poll_ms,
     };
+    // The slow-overlay tests shorten the `status` and `ping` timeouts the same way.
+    let status_timeout_ms = env_ms("UW_STATUS_TIMEOUT_MS", pipe_server::RELAY_TIMEOUT_MS);
+    let ping_timeout_ms = env_ms("UW_PING_TIMEOUT_MS", pipe_server::RELAY_TIMEOUT_MS);
     let outcome = run(&mut w, &cfg);
     commands.refuse_queued();
     relay::emit(&outcome.to_event());
     match outcome {
         Outcome::Connected { .. } => {
             let pid = w.pid;
-            if let Some(pipe) = w.pipe.as_mut() {
-                relay::relay(pipe, pid, &commands);
+            if let (Some(channel), Some(pipe)) = (w.channel.as_mut(), w.pipe.as_mut()) {
+                relay::run(pid, &commands, channel, pipe, status_timeout_ms, ping_timeout_ms);
             }
             0
         }

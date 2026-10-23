@@ -1,16 +1,22 @@
 //! The stdin reader. One thread reads JSON-lines commands for the whole run, from before the hook
-//! on, and hands each to the relay through a channel. When stdin closes the helper exits at once,
-//! in every phase (design 2a "Failures": no orphan helper keeps the helper mutex).
+//! on, and hands each to the relay through a channel, signalling `event` (an unnamed auto-reset
+//! event) so the relay's wait wakes. When stdin closes the helper exits at once, in every phase
+//! (design 2a "Failures": no orphan helper keeps the helper mutex).
 
 use std::io::BufRead;
 use std::sync::mpsc::{channel, Receiver};
 
 use uw_pipe_proto::jsonl::{Command, Event};
 
+use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::System::Threading::{CreateEventW, SetEvent};
+
 use crate::relay::emit;
 
 pub(crate) struct Commands {
     pub(crate) rx: Receiver<Command>,
+    /// Signalled after each command is queued; never closed (it lives as long as the process).
+    pub(crate) event: HANDLE,
 }
 
 impl Commands {
@@ -29,8 +35,14 @@ impl Commands {
     }
 }
 
-pub(crate) fn spawn_stdin_reader() -> Commands {
+pub(crate) fn spawn_stdin_reader() -> Result<Commands, String> {
+    // SAFETY: an unnamed auto-reset event, initially unsignaled.
+    let event = unsafe { CreateEventW(std::ptr::null(), 0, 0, std::ptr::null()) };
+    if event.is_null() {
+        return Err("CreateEventW failed".into());
+    }
     let (tx, rx) = channel();
+    let signal = event as usize; // a HANDLE is not `Send`; the event is never closed
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {
             let Ok(line) = line else { break };
@@ -42,6 +54,8 @@ pub(crate) fn spawn_stdin_reader() -> Commands {
                     if tx.send(cmd).is_err() {
                         break;
                     }
+                    // SAFETY: signals the event created above.
+                    unsafe { SetEvent(signal as HANDLE) };
                 }
                 Err(e) => eprintln!("[uw-helper64] bad command: {e}"),
             }
@@ -49,5 +63,5 @@ pub(crate) fn spawn_stdin_reader() -> Commands {
         eprintln!("[uw-helper64] stdin closed; exiting");
         std::process::exit(0);
     });
-    Commands { rx }
+    Ok(Commands { rx, event })
 }
