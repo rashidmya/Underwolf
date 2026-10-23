@@ -7,15 +7,23 @@ publish.workspace = true
 
 # A stand-in game for the Wine end-to-end tests: one visible top-level window and a standard
 # message loop, so the helper's hook has a UI thread to target. `--no-window` sleeps instead
-# (for the `no_window` test). Built for x86_64-pc-windows-gnu.
+# (for the `no_window` test); `--bad-state-block` first creates and holds the state block with a
+# layout v2 header (for the `version_mismatch` test). Built for x86_64-pc-windows-gnu.
 [[bin]]
 name = "uw-test-game"
 path = "src/main.rs"
 
+[dependencies]
+uw-pipe-proto = { path = "../uw-pipe-proto" }
+
 [target.'cfg(windows)'.dependencies]
+# `CreateFileMappingW` takes `SECURITY_ATTRIBUTES`, so `Win32_Security` is needed.
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
-    "Win32_UI_WindowsAndMessaging",
+    "Win32_Security",
     "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
 ] }

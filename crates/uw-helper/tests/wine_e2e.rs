@@ -17,6 +17,8 @@ use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+use uw_pipe_proto::jsonl::{Command as Cmd, Event};
+
 fn wine() -> String {
     std::env::var("UW_WINE").unwrap_or_else(|_| "/usr/bin/wine".into())
 }
@@ -151,10 +153,23 @@ struct Helper {
 
 impl Helper {
     /// The next JSON-lines event, or a test failure (with the helper's stderr) after `within`.
-    fn next_event(&self, within: Duration) -> String {
+    fn next_any_event(&self, within: Duration) -> String {
         self.events
             .recv_timeout(within)
             .unwrap_or_else(|_| panic!("no helper event within {within:?}; stderr: {:?}", self.stderr_lines()))
+    }
+
+    /// The next event other than the overlay's own `overlay_connected`/`overlay_disconnected`.
+    /// Since plan 2a the loaded test overlay connects on its own pipe, in parallel with the
+    /// bootstrap's events, and the bootstrap-level tests do not look at it.
+    fn next_event(&self, within: Duration) -> String {
+        let deadline = Instant::now() + within;
+        loop {
+            let event = self.next_any_event(deadline.saturating_duration_since(Instant::now()));
+            if !event.contains(r#""event":"overlay_connected""#) && !event.contains(r#""event":"overlay_disconnected""#) {
+                return event;
+            }
+        }
     }
 
     /// The next event, which must contain `needle`. A mismatch fails with the event and the
@@ -175,6 +190,37 @@ impl Helper {
         let stdin = self.stdin.as_mut().expect("helper stdin is open");
         writeln!(stdin, "{line}").unwrap();
         stdin.flush().unwrap();
+    }
+
+    /// The next event, parsed (a line that is not an event fails the test).
+    fn next_parsed(&self, within: Duration) -> Event {
+        let line = self.next_any_event(within);
+        Event::parse(&line).unwrap_or_else(|e| panic!("not an event ({e}): {line}"))
+    }
+
+    /// Read events until each of `want` has been seen, in any order (two sources, such as the
+    /// bootstrap's `status` and the overlay's `overlay_connected`, race). Returns all seen.
+    fn expect_all(&self, want: &[Event], within: Duration) -> Vec<Event> {
+        let deadline = Instant::now() + within;
+        let mut seen = Vec::new();
+        while !want.iter().all(|w| seen.contains(w)) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(!left.is_zero(), "missing {want:?}; saw {seen:?}; stderr: {:?}", self.stderr_lines());
+            seen.push(self.next_parsed(left));
+        }
+        seen
+    }
+
+    /// No event at all within `d`.
+    fn expect_quiet(&self, d: Duration) {
+        if let Ok(line) = self.events.recv_timeout(d) {
+            panic!("expected no event, got {line}");
+        }
+    }
+
+    fn send_cmd(&mut self, cmd: &Cmd) {
+        let line = cmd.to_line();
+        self.send(&line);
     }
 
     /// Wait up to `within` for a stderr diagnostic line containing `needle`.
@@ -410,4 +456,88 @@ fn killing_the_game_reports_game_exited() {
         event = helper.next_event(Duration::from_secs(20));
     }
     assert_eq!(event, r#"{"event":"game_exited"}"#);
+}
+
+// --- The control channel (plan 2a) ---
+
+const OVERLAY_VERSION: u32 = 1;
+
+/// The test overlay's last applied state (`uw-test-state-<pid>.txt`), once it has written one.
+fn overlay_state(pfx: &Prefix) -> Option<String> {
+    let found = markers(pfx, "uw-test-state-");
+    found.first().and_then(|p| std::fs::read_to_string(p).ok())
+}
+
+fn load(path: &str) -> Cmd {
+    Cmd::LoadOverlay { request_id: 1, path: path.into() }
+}
+
+fn ok(request_id: u32) -> Event {
+    Event::Status { request_id, code: "ok".into(), detail: 0, message: "overlay started".into() }
+}
+
+fn applied(applied_seq: u64) -> Event {
+    Event::Bell { bits: vec!["state_applied".into()], applied_seq }
+}
+
+/// Connect, load the test overlay, and wait for both its `status ok` and its own connection.
+fn start_with_overlay(pfx: &Prefix) -> Helper {
+    let overlay = to_wine_path(&win_artifact("uw_test_overlay.dll"));
+    let mut helper = start_helper(pfx, &[], &[]);
+    helper.expect_event("bootstrap_connected", Duration::from_secs(200));
+    helper.send_cmd(&load(&overlay));
+    helper.expect_all(&[ok(1), Event::OverlayConnected { module_version: OVERLAY_VERSION }], Duration::from_secs(30));
+    helper
+}
+
+/// Catches the design's main flow breaking anywhere: the overlay not connecting on its own pipe,
+/// `set_state` not reaching the game through the state block and `bell-game`, the overlay's
+/// `state_applied` not coming back through `bell-host`, `applied_seq` not matching `seq`, or an
+/// unchanged `set_state` bumping `seq` or ringing.
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn the_overlay_connects_and_applies_set_state() {
+    let mut pfx = setup("state");
+    pfx.game = Some(wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).spawn().unwrap());
+    let mut helper = start_with_overlay(&pfx);
+
+    helper.send_cmd(&Cmd::SetState { request_id: 2, edit_mode: Some(true), visible: None });
+    assert_eq!(helper.next_parsed(Duration::from_secs(10)), Event::StateSet { request_id: 2, seq: 1 });
+    assert_eq!(helper.next_parsed(Duration::from_secs(10)), applied(1));
+    assert_eq!(overlay_state(&pfx).as_deref(), Some("seq=1 edit_mode=1 visible=0\n"));
+
+    // Nothing changes: the same seq, and no bell.
+    helper.send_cmd(&Cmd::SetState { request_id: 3, edit_mode: Some(true), visible: None });
+    assert_eq!(helper.next_parsed(Duration::from_secs(10)), Event::StateSet { request_id: 3, seq: 1 });
+    helper.expect_quiet(Duration::from_secs(2));
+
+    helper.send_cmd(&Cmd::SetState { request_id: 4, edit_mode: Some(false), visible: Some(true) });
+    assert_eq!(helper.next_parsed(Duration::from_secs(10)), Event::StateSet { request_id: 4, seq: 2 });
+    assert_eq!(helper.next_parsed(Duration::from_secs(10)), applied(2));
+    assert_eq!(overlay_state(&pfx).as_deref(), Some("seq=2 edit_mode=0 visible=1\n"));
+}
+
+/// Catches `ping` not reaching the overlay, its `pong` not coming back with the request's id and
+/// the last applied seq, or a ping with no overlay being sent anyway instead of refused.
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn ping_gets_pong_with_the_last_applied_seq() {
+    let mut pfx = setup("ping");
+    pfx.game = Some(wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).spawn().unwrap());
+    let overlay = to_wine_path(&win_artifact("uw_test_overlay.dll"));
+    let mut helper = start_helper(&pfx, &[], &[]);
+    helper.expect_event("bootstrap_connected", Duration::from_secs(200));
+
+    // No overlay yet: refused at once (design: no queueing while disconnected).
+    helper.send_cmd(&Cmd::Ping { request_id: 9 });
+    assert_eq!(helper.next_parsed(Duration::from_secs(10)), Event::reply_error(9, "overlay_not_connected"));
+
+    helper.send_cmd(&load(&overlay));
+    helper.expect_all(&[ok(1), Event::OverlayConnected { module_version: OVERLAY_VERSION }], Duration::from_secs(30));
+    helper.send_cmd(&Cmd::Ping { request_id: 10 });
+    assert_eq!(helper.next_parsed(Duration::from_secs(10)), Event::Pong { request_id: 10, seen_seq: 0 });
+    helper.send_cmd(&Cmd::SetState { request_id: 11, edit_mode: Some(true), visible: None });
+    helper.expect_all(&[Event::StateSet { request_id: 11, seq: 1 }, applied(1)], Duration::from_secs(10));
+    helper.send_cmd(&Cmd::Ping { request_id: 12 });
+    assert_eq!(helper.next_parsed(Duration::from_secs(10)), Event::Pong { request_id: 12, seen_seq: 1 });
 }

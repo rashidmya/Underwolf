@@ -760,6 +760,7 @@ dependencies = [
 name = "uw-test-game"
 version = "0.0.0"
 dependencies = [
+ "uw-pipe-proto",
  "windows-sys",
 ]
 
@@ -767,6 +768,7 @@ dependencies = [
 name = "uw-test-overlay"
 version = "0.0.0"
 dependencies = [
+ "uw-game-channel",
  "windows-sys",
 ]
 
