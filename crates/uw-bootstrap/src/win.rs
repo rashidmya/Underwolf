@@ -119,11 +119,11 @@ fn create_marker(pid: u32) -> HANDLE {
 }
 
 /// Connect to the pipe (retry while missing/busy), send `hello`, then serve requests until the
-/// pipe breaks.
+/// pipe breaks. The handle closes when `pipe` drops, on return or on unwind.
 fn serve_once(pid: u32, state: &mut OverlayState) {
     let pipe = loop {
         match connect(pid) {
-            Some(h) => break h,
+            Some(p) => break p,
             None => {
                 // SAFETY: a plain sleep before retrying (design: "retry once a second").
                 unsafe { Sleep(RETRY_MS) };
@@ -137,22 +137,34 @@ fn serve_once(pid: u32, state: &mut OverlayState) {
         overlay_loaded: state.loaded_path().is_some(),
         overlay_path: state.loaded_path().unwrap_or_default().to_string(),
     };
-    if write_message(pipe, &hello).is_err() {
-        close(pipe);
+    if write_message(pipe.0, &hello).is_err() {
         return;
     }
     let mut buf = vec![0u8; HEADER_LEN + MAX_PAYLOAD];
     // `None` means the pipe broke: fall out and reconnect.
-    while let Some(bytes) = read_message(pipe, &mut buf) {
-        if !handle(pipe, &buf[..bytes], pid, state) {
+    while let Some(bytes) = read_message(pipe.0, &mut buf) {
+        if !handle(pipe.0, &buf[..bytes], pid, state) {
             break; // a bad frame closes the connection (design: bootstrap reconnects)
         }
     }
-    close(pipe);
+}
+
+/// Owns the pipe client handle and closes it on drop. A panic in `serve_once` then still frees
+/// the helper's single pipe instance; a leaked handle would keep it connected, so every reconnect
+/// would get `ERROR_PIPE_BUSY` until the helper exits.
+struct Pipe(HANDLE);
+
+impl Drop for Pipe {
+    fn drop(&mut self) {
+        // SAFETY: closes the handle this guard owns, exactly once.
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
 }
 
 /// Open the pipe client; `None` while the server pipe is missing or busy (both mean "retry").
-fn connect(pid: u32) -> Option<HANDLE> {
+fn connect(pid: u32) -> Option<Pipe> {
     let name = wide(&pipe_name(pid));
     // SAFETY: NUL-terminated name; opening an existing pipe for duplex message I/O.
     let h = unsafe {
@@ -176,7 +188,7 @@ fn connect(pid: u32) -> Option<HANDLE> {
     unsafe {
         SetNamedPipeHandleState(h, &mode, std::ptr::null(), std::ptr::null());
     }
-    Some(h)
+    Some(Pipe(h))
 }
 
 /// Handle one decoded request; returns `false` to close the connection.
@@ -265,11 +277,4 @@ fn read_message(pipe: HANDLE, buf: &mut [u8]) -> Option<usize> {
     // SAFETY: reads one message into `buf` (sized HEADER_LEN + MAX_PAYLOAD, the maximum).
     let ok = unsafe { ReadFile(pipe, buf.as_mut_ptr(), buf.len() as u32, &mut read, std::ptr::null_mut()) };
     if ok != 0 && read > 0 { Some(read as usize) } else { None }
-}
-
-fn close(h: HANDLE) {
-    // SAFETY: closes a handle we own.
-    unsafe {
-        CloseHandle(h);
-    }
 }
