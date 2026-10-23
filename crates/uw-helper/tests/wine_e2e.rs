@@ -236,7 +236,7 @@ fn start_helper(pfx: &Prefix, extra: &[&str], envs: &[(&str, &str)]) -> Helper {
 }
 
 fn load_overlay_line(path_wine: &str) -> String {
-    format!(r#"{{"cmd":"load_overlay","path":"{}"}}"#, path_wine.replace('\\', "\\\\"))
+    format!(r#"{{"cmd":"load_overlay","request_id":1,"path":"{}"}}"#, path_wine.replace('\\', "\\\\"))
 }
 
 /// Drive the helper over JSON lines: connect, load the test overlay, expect `ok` and the marker.
@@ -405,5 +405,5 @@ fn killing_the_game_reports_game_exited() {
         wait_bounded(&mut g, Duration::from_secs(10));
     }
     let event = helper.next_event(Duration::from_secs(20));
-    assert!(event.contains(r#""event":"error""#) && event.contains(r#""code":"game_exited""#), "got: {event}");
+    assert_eq!(event, r#"{"event":"game_exited"}"#);
 }

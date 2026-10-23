@@ -291,12 +291,20 @@ fn a_non_hello_first_message_is_a_pipe_error() {
 #[test]
 fn outcomes_map_to_json_events() {
     assert_eq!(
-        Outcome::Connected { overlay_loaded: true, overlay_path: None }.to_event(),
-        Event::BootstrapConnected { overlay_loaded: true }
+        Outcome::Connected { overlay_loaded: false, overlay_path: None }.to_event(),
+        Event::BootstrapConnected { overlay_loaded: false, overlay_path: None }
+    );
+    // The pinned overlay's path reaches the host (plan 1 final review M3).
+    assert_eq!(
+        Outcome::Connected { overlay_loaded: true, overlay_path: Some(r"Z:\g\o.dll".into()) }.to_event(),
+        Event::BootstrapConnected { overlay_loaded: true, overlay_path: Some(r"Z:\g\o.dll".into()) }
     );
     assert_eq!(Outcome::NoWindow.to_event(), Event::error("no_window"));
     assert_eq!(Outcome::AlreadyRunning.to_event(), Event::error("already_running"));
-    assert_eq!(Outcome::HookFailed(5).to_event(), Event::Error { code: "hook_failed".into(), detail: Some(5) });
+    assert_eq!(
+        Outcome::HookFailed(5).to_event(),
+        Event::Error { request_id: None, code: "hook_failed".into(), detail: Some(5) }
+    );
     assert_eq!(Outcome::BootstrapTimeout.to_event(), Event::error("bootstrap_timeout"));
     assert_eq!(Outcome::VersionMismatch.to_event(), Event::error("version_mismatch"));
     assert_eq!(Outcome::PipeError("x".into()).to_event(), Event::error("pipe_error"));
@@ -416,7 +424,8 @@ fn the_game_exiting_while_waiting_for_the_pinned_bootstrap_is_game_exited() {
     assert!(f.now < 10_000, "waited {} ms for a game that had exited", f.now);
 }
 
+/// Catches `game_exited` sent as an `error` (design 2a: it is an event of its own).
 #[test]
 fn game_exited_maps_to_its_json_event() {
-    assert_eq!(Outcome::GameExited.to_event(), Event::error("game_exited"));
+    assert_eq!(Outcome::GameExited.to_event(), Event::GameExited);
 }

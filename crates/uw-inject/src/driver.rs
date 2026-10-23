@@ -9,17 +9,18 @@ pub struct Driver {
     overlay: Option<String>,
     sent_load: bool,
     connected: bool,
+    next_request: u32,
 }
 
 impl Driver {
     /// `overlay` is the Windows path to load, or `None` to connect only.
     pub fn new(overlay: Option<String>) -> Driver {
-        Driver { overlay, sent_load: false, connected: false }
+        Driver { overlay, sent_load: false, connected: false, next_request: 1 }
     }
 
     pub fn on_event(&mut self, event: &Event) -> Vec<Command> {
         match event {
-            Event::BootstrapConnected { overlay_loaded } => {
+            Event::BootstrapConnected { overlay_loaded, .. } => {
                 self.connected = true;
                 if *overlay_loaded {
                     // The pinned bootstrap already has the overlay (client restart): nothing to do.
@@ -28,12 +29,14 @@ impl Driver {
                 match &self.overlay {
                     Some(path) if !overlay_loaded && !self.sent_load => {
                         self.sent_load = true;
-                        vec![Command::LoadOverlay { path: path.clone() }]
+                        let request_id = self.next_request;
+                        self.next_request += 1;
+                        vec![Command::LoadOverlay { request_id, path: path.clone() }]
                     }
                     _ => vec![],
                 }
             }
-            Event::Status { .. } | Event::Error { .. } => vec![],
+            _ => vec![],
         }
     }
 

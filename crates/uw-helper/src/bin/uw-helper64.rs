@@ -3,7 +3,8 @@
 //! Runs inside the game's Wine session. Finds the game's UI thread and sets a thread hook that
 //! makes Wine load `uw_bootstrap64.dll` into the game (or, if a bootstrap is already pinned, skips
 //! the hook), serves the named pipe, and relays JSON lines: events (`bootstrap_connected`,
-//! `status`, `error`) on stdout, commands (`load_overlay`) on stdin, diagnostics on stderr.
+//! `status`, `error`, …) on stdout, commands (`load_overlay`, …) on stdin, each reply echoing its
+//! command's `request_id`; diagnostics on stderr.
 
 #[cfg(not(windows))]
 fn main() {
@@ -145,7 +146,6 @@ mod win {
         ov: Box<OVERLAPPED>,
         hello_buf: Vec<u8>,
         accept: Accept,
-        next_request: u32,
     }
 
     impl RealWin32 {
@@ -164,7 +164,6 @@ mod win {
                 ov: Box::new(unsafe { std::mem::zeroed() }),
                 hello_buf: vec![0u8; HEADER_LEN + MAX_PAYLOAD],
                 accept: Accept::Listening,
-                next_request: 1,
             }
         }
 
@@ -397,25 +396,30 @@ mod win {
                     continue;
                 }
                 match Command::parse(&line) {
-                    Ok(Command::LoadOverlay { path }) => {
+                    Ok(Command::LoadOverlay { request_id, path }) => {
                         if path.encode_utf16().count() > MAX_PATH_UNITS {
-                            emit(&Event::error("path_too_long"));
+                            emit(&Event::reply_error(request_id, "path_too_long"));
                             continue;
                         }
-                        let request_id = self.next_request;
-                        self.next_request += 1;
+                        // The command's id travels to the bootstrap, which echoes it in `status`.
                         if !self.write_message(&Message::LoadOverlay { request_id, path }) {
-                            emit(&Event::error("game_exited"));
+                            // The bootstrap's end is gone: `bootstrap_disconnected`, not
+                            // `game_exited` (design 2a, "Plan 1 items").
+                            emit(&Event::reply_error(request_id, "bootstrap_not_connected"));
+                            emit(&Event::BootstrapDisconnected);
                             return;
                         }
                         match self.read_message(RELAY_TIMEOUT_MS).and_then(|b| decode(&b).ok()) {
-                            Some(Message::Status { code, detail, message, .. }) => {
-                                emit(&Event::Status { code: code.as_str().into(), detail, message });
+                            Some(Message::Status { request_id, code, detail, message }) => {
+                                emit(&Event::Status { request_id, code: code.as_str().into(), detail, message });
                             }
-                            _ => {
-                                emit(&Event::error("status_timeout"));
-                            }
+                            _ => emit(&Event::reply_error(request_id, "status_timeout")),
                         }
+                    }
+                    // No overlay channel yet: commands that need the overlay fail (design: no
+                    // queueing while disconnected).
+                    Ok(cmd @ (Command::SetState { .. } | Command::Ping { .. })) => {
+                        emit(&Event::reply_error(cmd.request_id(), "overlay_not_connected"));
                     }
                     Err(e) => eprintln!("[uw-helper64] bad command: {e}"),
                 }
@@ -452,7 +456,7 @@ mod win {
                 WaitForSingleObject(h, INFINITE);
                 CloseHandle(h);
             }
-            emit(&Event::error("game_exited"));
+            emit(&Event::GameExited);
             std::process::exit(0);
         });
     }

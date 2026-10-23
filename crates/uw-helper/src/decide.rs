@@ -52,16 +52,16 @@ impl Outcome {
     /// The JSON-lines event the helper emits for this outcome.
     pub fn to_event(&self) -> Event {
         match self {
-            Outcome::Connected { overlay_loaded, .. } => {
-                Event::BootstrapConnected { overlay_loaded: *overlay_loaded }
+            Outcome::Connected { overlay_loaded, overlay_path } => {
+                Event::BootstrapConnected { overlay_loaded: *overlay_loaded, overlay_path: overlay_path.clone() }
             }
             // `hook_failed` keeps its GetLastError as the event's `detail` (design failure table).
-            Outcome::HookFailed(e) => Event::Error { code: "hook_failed".into(), detail: Some(*e) },
+            Outcome::HookFailed(e) => Event::Error { request_id: None, code: "hook_failed".into(), detail: Some(*e) },
             Outcome::AlreadyRunning => Event::error("already_running"),
             Outcome::NoWindow => Event::error("no_window"),
             Outcome::BootstrapTimeout => Event::error("bootstrap_timeout"),
             Outcome::VersionMismatch => Event::error("version_mismatch"),
-            Outcome::GameExited => Event::error("game_exited"),
+            Outcome::GameExited => Event::GameExited,
             // `pipe_error` is a helper-local I/O failure not in the design's failure table; it maps
             // here so the host still sees a structured error rather than a silent exit.
             Outcome::PipeError(_) => Event::error("pipe_error"),

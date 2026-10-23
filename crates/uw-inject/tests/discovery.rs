@@ -109,11 +109,14 @@ fn driver_loads_overlay_once_when_bootstrap_connects_fresh() {
     let mut d = Driver::new(Some(r"Z:\games\overlay.dll".into()));
     // Fresh connection with no overlay: send load_overlay once.
     assert_eq!(
-        d.on_event(&Event::BootstrapConnected { overlay_loaded: false }),
-        vec![Command::LoadOverlay { path: r"Z:\games\overlay.dll".into() }]
+        d.on_event(&Event::BootstrapConnected { overlay_loaded: false, overlay_path: None }),
+        vec![Command::LoadOverlay { request_id: 1, path: r"Z:\games\overlay.dll".into() }]
     );
     // A later status does not re-send.
-    assert_eq!(d.on_event(&Event::Status { code: "ok".into(), detail: 0, message: String::new() }), vec![]);
+    assert_eq!(
+        d.on_event(&Event::Status { request_id: 1, code: "ok".into(), detail: 0, message: String::new() }),
+        vec![]
+    );
     assert!(d.is_done());
 }
 
@@ -121,14 +124,17 @@ fn driver_loads_overlay_once_when_bootstrap_connects_fresh() {
 fn driver_does_not_reload_after_client_restart() {
     let mut d = Driver::new(Some(r"Z:\games\overlay.dll".into()));
     // Reconnect: the pinned bootstrap already has the overlay, so send nothing.
-    assert_eq!(d.on_event(&Event::BootstrapConnected { overlay_loaded: true }), vec![]);
+    assert_eq!(
+        d.on_event(&Event::BootstrapConnected { overlay_loaded: true, overlay_path: Some(r"Z:\games\overlay.dll".into()) }),
+        vec![]
+    );
     assert!(d.is_done());
 }
 
 #[test]
 fn driver_with_no_overlay_sends_nothing() {
     let mut d = Driver::new(None);
-    assert_eq!(d.on_event(&Event::BootstrapConnected { overlay_loaded: false }), vec![]);
+    assert_eq!(d.on_event(&Event::BootstrapConnected { overlay_loaded: false, overlay_path: None }), vec![]);
 }
 
 #[cfg(unix)]
