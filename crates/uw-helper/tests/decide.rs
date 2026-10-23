@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use uw_helper::decide::{
-    hello_wait_from_bytes, run, Config, HelloWait, HookKind, Outcome, Win32, REWAKE_MS,
+    hello_wait_from_bytes, run, ChannelError, Config, HelloWait, HookKind, Outcome, Win32, REWAKE_MS,
 };
 use uw_pipe_proto::jsonl::Event;
 use uw_pipe_proto::pipe::{encode, Message, StatusCode, PROTOCOL_VERSION};
@@ -20,6 +20,7 @@ struct Fake {
     alive_until: Option<u64>,
     marker: bool,
     lock_free: bool,
+    channel: Result<(), ChannelError>,
     pipe: Result<(), String>,
     getmessage_ok: bool,
     callwndproc_ok: bool,
@@ -48,6 +49,7 @@ impl Fake {
             alive_until: None,
             marker: false,
             lock_free: true,
+            channel: Ok(()),
             pipe: Ok(()),
             getmessage_ok: true,
             callwndproc_ok: true,
@@ -89,6 +91,10 @@ impl Win32 for Fake {
     }
     fn take_helper_lock(&mut self, _pid: u32) -> bool {
         self.lock_free
+    }
+    fn create_channel(&mut self, _pid: u32) -> Result<(), ChannelError> {
+        self.log.push("create_channel".into());
+        self.channel.clone()
     }
     fn create_pipe(&mut self, _pid: u32) -> Result<(), String> {
         self.log.push("create_pipe".into());
@@ -308,6 +314,7 @@ fn outcomes_map_to_json_events() {
     assert_eq!(Outcome::BootstrapTimeout.to_event(), Event::error("bootstrap_timeout"));
     assert_eq!(Outcome::VersionMismatch.to_event(), Event::error("version_mismatch"));
     assert_eq!(Outcome::PipeError("x".into()).to_event(), Event::error("pipe_error"));
+    assert_eq!(Outcome::ChannelFailed("x".into()).to_event(), Event::error("channel_failed"));
 }
 
 // --- The design's failure table with the production timeouts, on the fake clock. ---
@@ -428,4 +435,49 @@ fn the_game_exiting_while_waiting_for_the_pinned_bootstrap_is_game_exited() {
 #[test]
 fn game_exited_maps_to_its_json_event() {
     assert_eq!(Outcome::GameExited.to_event(), Event::GameExited);
+}
+
+// --- The control channel (plan 2a) ---
+
+fn position(f: &Fake, entry: &str) -> usize {
+    f.log.iter().position(|c| c == entry).unwrap_or_else(|| panic!("no {entry} in {:?}", f.log))
+}
+
+/// Catches the bootstrap pipe or the hook coming before the channel (design 2a flow step 2: the
+/// objects and the overlay pipe exist before the bootstrap can connect).
+#[test]
+fn the_channel_is_created_before_the_bootstrap_pipe_and_the_hook() {
+    let mut f = Fake::happy();
+    f.hellos.push_back(hello(PROTOCOL_VERSION, false, None));
+    assert_eq!(run(&mut f, &cfg()), Outcome::Connected { overlay_loaded: false, overlay_path: None });
+    assert!(position(&f, "create_channel") < position(&f, "create_pipe"));
+    assert!(position(&f, "create_pipe") < position(&f, "set_hook GetMessage"));
+
+    // The reconnect path (marker present) creates them in the same order.
+    let mut f = Fake::happy();
+    f.marker = true;
+    f.hellos.push_back(hello(PROTOCOL_VERSION, true, Some(r"Z:\g\overlay.dll")));
+    run(&mut f, &cfg());
+    assert!(position(&f, "create_channel") < position(&f, "create_pipe"));
+}
+
+/// Catches a foreign state block (held by the game from another client version) being used, or
+/// reported as anything but `version_mismatch`, or the game being hooked anyway.
+#[test]
+fn a_foreign_state_block_is_version_mismatch_before_any_pipe_or_hook() {
+    for marker in [false, true] {
+        let mut f = Fake::happy();
+        f.marker = marker;
+        f.channel = Err(ChannelError::VersionMismatch);
+        assert_eq!(run(&mut f, &cfg()), Outcome::VersionMismatch, "marker {marker}");
+        assert!(!f.log.iter().any(|c| c == "create_pipe" || c.starts_with("set_hook")), "{:?}", f.log);
+    }
+}
+
+#[test]
+fn a_channel_that_cannot_be_created_is_channel_failed() {
+    let mut f = Fake::happy();
+    f.channel = Err(ChannelError::Failed("CreateEventW: 5".into()));
+    assert_eq!(run(&mut f, &cfg()), Outcome::ChannelFailed("CreateEventW: 5".into()));
+    assert!(!f.log.iter().any(|c| c.starts_with("set_hook")));
 }

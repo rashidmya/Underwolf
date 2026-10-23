@@ -1,7 +1,7 @@
-//! The relay: JSON-lines commands from stdin to the bootstrap pipe and replies back as events on
-//! stdout, plus the game watcher that reports `game_exited`.
+//! The relay: JSON-lines commands (from the stdin reader) to the bootstrap pipe and replies back
+//! as events on stdout, plus the game watcher that reports `game_exited`.
 
-use std::io::{BufRead, Write};
+use std::io::Write;
 
 use uw_pipe_proto::jsonl::{Command, Event};
 use uw_pipe_proto::pipe::{decode, Message, MAX_PATH_UNITS};
@@ -9,6 +9,7 @@ use uw_pipe_proto::pipe::{decode, Message, MAX_PATH_UNITS};
 use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, INFINITE, PROCESS_SYNCHRONIZE};
 
+use crate::commands::Commands;
 use crate::pipe_server::{PipeServer, RELAY_TIMEOUT_MS};
 
 /// Write one event line to stdout (whole lines, so threads never interleave).
@@ -19,17 +20,12 @@ pub(crate) fn emit(event: &Event) {
 }
 
 /// Relay host commands to the bootstrap and status replies back. A watcher thread reports
-/// `game_exited` the moment the game process ends, even while this blocks on stdin.
-pub(crate) fn relay(pipe: &mut PipeServer, pid: u32) {
+/// `game_exited` the moment the game process ends, even while this waits for a command.
+pub(crate) fn relay(pipe: &mut PipeServer, pid: u32, commands: &Commands) {
     spawn_game_watcher(pid);
-    let stdin = std::io::stdin();
-    for line in stdin.lock().lines() {
-        let Ok(line) = line else { break };
-        if line.trim().is_empty() {
-            continue;
-        }
-        match Command::parse(&line) {
-            Ok(Command::LoadOverlay { request_id, path }) => {
+    for cmd in commands.rx.iter() {
+        match cmd {
+            Command::LoadOverlay { request_id, path } => {
                 if path.encode_utf16().count() > MAX_PATH_UNITS {
                     emit(&Event::reply_error(request_id, "path_too_long"));
                     continue;
@@ -49,12 +45,11 @@ pub(crate) fn relay(pipe: &mut PipeServer, pid: u32) {
                     _ => emit(&Event::reply_error(request_id, "status_timeout")),
                 }
             }
-            // No overlay channel yet: commands that need the overlay fail (design: no
-            // queueing while disconnected).
-            Ok(cmd @ (Command::SetState { .. } | Command::Ping { .. })) => {
+            // The overlay pipe is not served yet: commands that need the overlay fail (design:
+            // no queueing while disconnected).
+            cmd @ (Command::SetState { .. } | Command::Ping { .. }) => {
                 emit(&Event::reply_error(cmd.request_id(), "overlay_not_connected"));
             }
-            Err(e) => eprintln!("[uw-helper64] bad command: {e}"),
         }
     }
 }

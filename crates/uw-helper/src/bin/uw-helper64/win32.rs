@@ -1,10 +1,12 @@
 //! The real `Win32` for `decide`: Toolhelp and window lookups, the helper and marker mutexes, the
-//! thread hook and its wake-ups, and the bootstrap pipe (a `PipeServer`).
+//! thread hook and its wake-ups, the control channel (objects and overlay pipe) and the bootstrap
+//! pipe.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use uw_helper::decide::{HelloWait, HookKind, Win32};
-use uw_pipe_proto::names::{helper_mutex_name, marker_mutex_name, pipe_name};
+use uw_game_channel::objects::{Objects, ObjectsError};
+use uw_helper::decide::{ChannelError, HelloWait, HookKind, Win32};
+use uw_pipe_proto::names::{helper_mutex_name, marker_mutex_name, overlay_pipe_name, pipe_name};
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HMODULE, HWND, INVALID_HANDLE_VALUE, LPARAM,
@@ -68,6 +70,15 @@ unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> windows_sys::co
     1 // keep enumerating
 }
 
+/// The control channel: the objects the game opens after its `overlay_hello`, and the overlay
+/// pipe it connects to. Held here so both exist from before the hook on; the relay loop (plan 2a
+/// Task 7) serves them and removes this `allow`.
+#[allow(dead_code)]
+pub(crate) struct Channel {
+    pub(crate) objects: Objects,
+    pub(crate) overlay: PipeServer,
+}
+
 pub(crate) struct RealWin32 {
     exe: String,
     bootstrap: String,
@@ -77,6 +88,8 @@ pub(crate) struct RealWin32 {
     hook: HHOOK,
     module: HMODULE,
     helper_mutex: HANDLE,
+    /// The control channel, from `create_channel` on.
+    pub(crate) channel: Option<Channel>,
     /// The bootstrap pipe, from `create_pipe` on.
     pub(crate) pipe: Option<PipeServer>,
 }
@@ -91,6 +104,7 @@ impl RealWin32 {
             hook: std::ptr::null_mut(),
             module: std::ptr::null_mut(),
             helper_mutex: std::ptr::null_mut(),
+            channel: None,
             pipe: None,
         }
     }
@@ -120,11 +134,15 @@ impl RealWin32 {
 impl Drop for RealWin32 {
     fn drop(&mut self) {
         self.unhook();
+        // Release the channel and the bootstrap pipe (each pipe cancels any pending accept and
+        // closes its handles) before the helper mutex: the one-helper lock must outlive the pipe
+        // names, so a successor helper never finds them still held.
+        drop(self.channel.take());
+        drop(self.pipe.take());
         if !self.helper_mutex.is_null() {
             // SAFETY: closes the helper mutex handle this helper created and still owns.
             unsafe { CloseHandle(self.helper_mutex) };
         }
-        // `pipe` drops after this: it cancels any pending accept and closes its handles.
     }
 }
 
@@ -204,6 +222,18 @@ impl Win32 for RealWin32 {
         self.helper_mutex = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
         // SAFETY: no arguments; read right after CreateMutexW.
         unsafe { GetLastError() != ERROR_ALREADY_EXISTS }
+    }
+    fn create_channel(&mut self, pid: u32) -> Result<(), ChannelError> {
+        let objects = Objects::create(pid).map_err(|e| match e {
+            ObjectsError::VersionMismatch(h) => {
+                eprintln!("[uw-helper64] state block: {h}; restart the game");
+                ChannelError::VersionMismatch
+            }
+            other => ChannelError::Failed(other.to_string()),
+        })?;
+        let overlay = PipeServer::create(&overlay_pipe_name(pid)).map_err(ChannelError::Failed)?;
+        self.channel = Some(Channel { objects, overlay });
+        Ok(())
     }
     fn create_pipe(&mut self, pid: u32) -> Result<(), String> {
         self.pipe = Some(PipeServer::create(&pipe_name(pid))?);

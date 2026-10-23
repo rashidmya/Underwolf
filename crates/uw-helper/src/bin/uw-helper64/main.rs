@@ -7,7 +7,8 @@
 //! command's `request_id`; diagnostics on stderr.
 //!
 //! Modules: `win32` (the real `Win32` for `decide`), `pipe_server` (the overlapped pipe server),
-//! `relay` (the JSON-lines relay and the game watcher).
+//! `commands` (the stdin reader; stdin closing ends the helper in every phase), `relay` (the
+//! JSON-lines relay and the game watcher).
 
 #[cfg(not(windows))]
 fn main() {
@@ -15,6 +16,8 @@ fn main() {
     std::process::exit(2);
 }
 
+#[cfg(windows)]
+mod commands;
 #[cfg(windows)]
 mod pipe_server;
 #[cfg(windows)]
@@ -62,6 +65,8 @@ fn helper_main() -> i32 {
         return 2;
     }
 
+    // Read stdin from the start, so its closing ends the helper in every phase.
+    let commands = commands::spawn_stdin_reader();
     let mut w = win32::RealWin32::new(exe, bootstrap);
     // The Wine tests override the long default timeouts so `no_window` and `bootstrap_timeout`
     // do not block for two minutes; unset in production, the defaults stand.
@@ -74,12 +79,13 @@ fn helper_main() -> i32 {
         window_poll_ms: defaults.window_poll_ms,
     };
     let outcome = run(&mut w, &cfg);
+    commands.refuse_queued();
     relay::emit(&outcome.to_event());
     match outcome {
         Outcome::Connected { .. } => {
             let pid = w.pid;
             if let Some(pipe) = w.pipe.as_mut() {
-                relay::relay(pipe, pid);
+                relay::relay(pipe, pid, &commands);
             }
             0
         }

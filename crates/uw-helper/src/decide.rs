@@ -1,6 +1,7 @@
 //! The helper's portable decision logic: wait for the game and its UI thread, take the helper
-//! lock, skip the hook when the marker mutex already exists (the pinned bootstrap will reconnect),
-//! otherwise set `WH_GETMESSAGE` (fall back to `WH_CALLWNDPROC` on a set failure or a hello
+//! lock, create the control channel (doorbells, mask region, state block, overlay pipe) and then
+//! the bootstrap pipe, skip the hook when the marker mutex already exists (the pinned bootstrap
+//! will reconnect), otherwise set `WH_GETMESSAGE` (fall back to `WH_CALLWNDPROC` on a set failure or a hello
 //! timeout), post wake-ups and re-wake every `REWAKE_MS` while waiting, and classify the `hello`.
 //! The game exiting during any wait ends the run with `GameExited`. Side effects go through the
 //! `Win32` trait so this is unit-tested on Linux with a fake; the real implementation lives in the
@@ -35,6 +36,16 @@ pub enum HelloWait {
     PipeError(String),
 }
 
+/// Why `Win32::create_channel` failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelError {
+    /// A state block the game held across a helper restart is not layout v1 (design 2a:
+    /// `version_mismatch`, "restart the game").
+    VersionMismatch,
+    /// An object or the overlay pipe could not be created.
+    Failed(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     AlreadyRunning,
@@ -46,6 +57,8 @@ pub enum Outcome {
     GameExited,
     Connected { overlay_loaded: bool, overlay_path: Option<String> },
     PipeError(String),
+    /// The control channel's objects or the overlay pipe could not be created.
+    ChannelFailed(String),
 }
 
 impl Outcome {
@@ -65,6 +78,9 @@ impl Outcome {
             // `pipe_error` is a helper-local I/O failure not in the design's failure table; it maps
             // here so the host still sees a structured error rather than a silent exit.
             Outcome::PipeError(_) => Event::error("pipe_error"),
+            // Like `pipe_error`: a helper-local failure, reported so the host sees a structured
+            // error rather than a silent exit.
+            Outcome::ChannelFailed(_) => Event::error("channel_failed"),
         }
     }
 }
@@ -103,7 +119,10 @@ pub trait Win32 {
     fn marker_exists(&mut self, pid: u32) -> bool;
     /// Take `Local\underwolf-helper-<pid>`; `false` means another helper already holds it.
     fn take_helper_lock(&mut self, pid: u32) -> bool;
-    /// Create the pipe server before hooking (design step 4).
+    /// Create the control channel (design 2a flow step 2: the doorbell events, the mask region,
+    /// the state block, then the overlay pipe). Called right before `create_pipe`.
+    fn create_channel(&mut self, pid: u32) -> Result<(), ChannelError>;
+    /// Create the bootstrap pipe server before hooking (design step 4).
     fn create_pipe(&mut self, pid: u32) -> Result<(), String>;
     /// Set a thread-scoped hook; `Err` carries `GetLastError`.
     fn set_hook(&mut self, kind: HookKind, thread: u32) -> Result<(), u32>;
@@ -138,6 +157,16 @@ pub fn hello_wait_from_bytes(bytes: &[u8]) -> HelloWait {
         Ok(_) => HelloWait::PipeError("expected hello".into()),
         Err(e) => HelloWait::PipeError(format!("decode hello: {e}")),
     }
+}
+
+/// The channel, then the bootstrap pipe (design 2a flow step 2). `Err` ends the run.
+fn create_pipes(w: &mut dyn Win32, pid: u32) -> Result<(), Outcome> {
+    match w.create_channel(pid) {
+        Ok(()) => {}
+        Err(ChannelError::VersionMismatch) => return Err(Outcome::VersionMismatch),
+        Err(ChannelError::Failed(e)) => return Err(Outcome::ChannelFailed(e)),
+    }
+    w.create_pipe(pid).map_err(Outcome::PipeError)
 }
 
 fn outcome_from_hello(hw: HelloWait) -> Result<Outcome, ()> {
@@ -197,11 +226,11 @@ pub fn run(w: &mut dyn Win32, cfg: &Config) -> Outcome {
     }
 
     // 3. Already there? The pinned bootstrap from an earlier helper will reconnect: create the
-    //    pipe, skip the hook, and wait for its hello (no hook, so nothing to wake).
+    //    channel and the pipe, skip the hook, and wait for its hello (no hook, so nothing to wake).
     if w.marker_exists(pid) {
         w.log("marker present; skipping hook");
-        if let Err(e) = w.create_pipe(pid) {
-            return Outcome::PipeError(e);
+        if let Err(o) = create_pipes(w, pid) {
+            return o;
         }
         return await_hello(w, pid, None, cfg.hello_timeout_ms).unwrap_or(Outcome::BootstrapTimeout);
     }
@@ -219,8 +248,8 @@ pub fn run(w: &mut dyn Win32, cfg: &Config) -> Outcome {
         }
         w.sleep_ms(cfg.window_poll_ms);
     };
-    if let Err(e) = w.create_pipe(pid) {
-        return Outcome::PipeError(e);
+    if let Err(o) = create_pipes(w, pid) {
+        return o;
     }
 
     let first = if cfg.force_fallback { HookKind::CallWndProc } else { HookKind::GetMessage };

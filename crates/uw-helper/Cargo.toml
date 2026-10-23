@@ -6,8 +6,8 @@ license.workspace = true
 publish.workspace = true
 
 # The Wine-side helper (`uw-helper64.exe`): finds the game's UI thread and sets a thread hook that
-# makes Wine load `uw_bootstrap64.dll` into the game, then serves the named pipe and relays JSON
-# lines. The portable decision logic is in `src/lib.rs` (`decide`); the Win32 wiring is the bin.
+# makes Wine load `uw_bootstrap64.dll` into the game, creates the control channel's objects
+# (`uw-game-channel`), then serves the bootstrap and overlay pipes and relays JSON lines. The portable decision logic is in `src/lib.rs` (`decide`); the Win32 wiring is the bin.
 [lib]
 name = "uw_helper"
 path = "src/lib.rs"
@@ -17,6 +17,7 @@ name = "uw-helper64"
 path = "src/bin/uw-helper64/main.rs"
 
 [dependencies]
+uw-game-channel = { path = "../uw-game-channel" }
 uw-pipe-proto = { path = "../uw-pipe-proto" }
 
 [target.'cfg(windows)'.dependencies]
