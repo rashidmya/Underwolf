@@ -751,6 +751,7 @@ impl Drop for Probe {
 #[test]
 #[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
 fn the_overlay_hello_rule_and_bad_messages_drop_the_overlay() {
+    win_artifact("examples/overlay_probe.exe"); // fail at once if the probe is not built
     let mut pfx = setup("hello");
     pfx.game = Some(wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).spawn().unwrap());
     let helper = start_helper(&pfx, &[], &[]);
@@ -787,6 +788,7 @@ fn the_overlay_hello_rule_and_bad_messages_drop_the_overlay() {
 #[test]
 #[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
 fn set_state_is_busy_under_the_lock_and_a_busy_bell_is_retried() {
+    win_artifact("examples/overlay_probe.exe"); // fail at once if the probe is not built
     let mut pfx = setup("busy");
     pfx.game = Some(wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).spawn().unwrap());
     let mut helper = start_helper(&pfx, &[], &[]);

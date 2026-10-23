@@ -57,8 +57,9 @@ mod win {
     }
 
     fn game_pid() -> Option<u32> {
+        // SAFETY: the snapshot is closed before returning; `e` is zeroed with `dwSize` set, as `Process32FirstW`/`NextW` require.
         unsafe {
-            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            let snap =CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
             if snap == INVALID_HANDLE_VALUE {
                 return None;
             }
@@ -91,6 +92,7 @@ mod win {
     struct Pipe(HANDLE);
     impl Drop for Pipe {
         fn drop(&mut self) {
+            // SAFETY: closes the pipe handle this value owns, exactly once (`Pipe` is only built from a valid handle).
             unsafe { CloseHandle(self.0) };
         }
     }
@@ -99,6 +101,7 @@ mod win {
         let name = wide(&overlay_pipe_name(pid));
         let start = Instant::now();
         loop {
+            // SAFETY: `name` is NUL-terminated and outlives the call; no security attributes, no template.
             let h = unsafe {
                 CreateFileW(
                     name.as_ptr(),
@@ -112,10 +115,12 @@ mod win {
             };
             if h != INVALID_HANDLE_VALUE {
                 let mode = PIPE_READMODE_MESSAGE;
+                // SAFETY: `h` is the pipe just opened; `mode` lives across the call; the other two may be null.
                 unsafe { SetNamedPipeHandleState(h, &mode, std::ptr::null(), std::ptr::null()) };
                 return Pipe(h);
             }
             if start.elapsed() > Duration::from_secs(30) {
+                // SAFETY: no arguments.
                 say(&format!("connect failed {}", unsafe { GetLastError() }));
                 std::process::exit(5);
             }
@@ -125,6 +130,7 @@ mod win {
 
     fn write(p: &Pipe, b: &[u8]) -> bool {
         let mut n = 0u32;
+        // SAFETY: `p.0` is an open pipe handle; `b` is valid for `b.len()` bytes; `n` outlives the call; no overlapped I/O.
         unsafe {
             WriteFile(
                 p.0,
@@ -140,6 +146,7 @@ mod win {
     fn read(p: &Pipe) -> Result<Vec<u8>, u32> {
         let mut buf = vec![0u8; 8192];
         let mut n = 0u32;
+        // SAFETY: `p.0` is an open pipe handle; `buf` is valid for `buf.len()` bytes; `n` outlives the call; no overlapped I/O.
         let ok = unsafe {
             ReadFile(
                 p.0,
@@ -150,6 +157,7 @@ mod win {
             )
         };
         if ok == 0 {
+            // SAFETY: no arguments.
             return Err(unsafe { GetLastError() });
         }
         buf.truncate(n as usize);
@@ -229,6 +237,7 @@ mod win {
                 say("released");
                 let start = Instant::now();
                 while start.elapsed() < Duration::from_secs(60) {
+                    // SAFETY: waits on the bell-game event handle `o` owns.
                     if unsafe { WaitForSingleObject(o.bell_game(), 300) } != WAIT_OBJECT_0 {
                         continue;
                     }
