@@ -210,3 +210,14 @@ All tests above pass, the owner's live check passes, and no code under `crates/`
 - Proton: only Proton 11.0 tested (as in the spikes).
 - Anti-cheat: VAC risk accepted by the owner (spec); a message hook is a standard Windows
   mechanism and no remote thread is created.
+
+## Live check (owner)
+
+2026-10-23, Deadlock ClientVersion 6819, Proton 11.0, Hideout, no launch options. **Pass.**
+
+- First run: `[uw-helper64] hooked WH_GETMESSAGE thread=312`, then `bootstrap_connected`
+  (`overlay_loaded: false`) and `status ok` "overlay started"; one marker
+  `uw-test-overlay-308.txt` in the prefix's Temp. Ctrl-C ended `uw-inject` and the helper.
+- Second run: `[uw-helper64] marker present; skipping hook`, then `bootstrap_connected`
+  (`overlay_loaded: true`); still one marker.
+- The game process (pid 21848) kept running through both runs. Smoothness was not watched.
