@@ -6,6 +6,7 @@
 //!
 //! Ignored by default (needs Wine and the Windows artifacts). Build and run:
 //!   cargo build --release --target x86_64-pc-windows-gnu -p uw-test-game -p uw-bootstrap -p uw-test-overlay -p uw-helper
+//!   cargo build --release --target x86_64-pc-windows-gnu -p uw-helper --example overlay_probe
 //!   xvfb-run -a cargo test -p uw-helper --test wine_e2e -- --ignored --test-threads=1
 //! `UW_WINE` overrides the `wine` binary (default `/usr/bin/wine`); `UW_WINESERVER` the
 //! `wineserver` (default `/usr/bin/wineserver`). The scratch prefix goes under the system temp.
@@ -689,4 +690,134 @@ fn closing_stdin_ends_the_helper_after_it_connected() {
     helper.close_stdin();
     let status = helper.wait_exit(Duration::from_secs(10));
     assert_eq!(status.and_then(|s| s.code()), Some(0), "stderr: {:?}", helper.stderr_lines());
+}
+
+/// Version the `overlay_probe` example reports in its `overlay_hello`.
+const PROBE_VERSION: u32 = 77;
+
+/// `examples/overlay_probe.exe` running in the game's prefix: a scripted overlay-pipe client whose
+/// stdout lines arrive on a channel. Dropping it kills it.
+struct Probe {
+    child: Child,
+    lines: Receiver<String>,
+}
+
+impl Probe {
+    fn start(pfx: &Prefix, args: &[&str]) -> Probe {
+        let mut child = wine_cmd(pfx, &win_artifact("examples/overlay_probe.exe"))
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Probe { child, lines: rx }
+    }
+
+    fn expect_line(&self, needle: &str, within: Duration) -> String {
+        let line = self.lines.recv_timeout(within).unwrap_or_else(|_| panic!("probe: no line within {within:?}"));
+        assert!(line.contains(needle), "probe: expected {needle}, got {line}");
+        line
+    }
+
+    fn expect_quiet(&self, d: Duration) {
+        if let Ok(line) = self.lines.recv_timeout(d) {
+            panic!("probe: expected nothing, got {line}");
+        }
+    }
+}
+
+impl Drop for Probe {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        wait_bounded(&mut self.child, Duration::from_secs(10));
+    }
+}
+
+/// Catches the overlay hello rule breaking (design "Messages and layouts"): a first message that is
+/// not a supported `overlay_hello` must be refused with `pipe_error` (not a hello) or
+/// `version_mismatch` (an unsupported state layout) and the connection dropped, with no
+/// `overlay_connected`. After a good hello, a message that is garbage or over the size limit must
+/// give `pipe_error`, drop the overlay, and leave the helper listening for a new connection.
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn the_overlay_hello_rule_and_bad_messages_drop_the_overlay() {
+    let mut pfx = setup("hello");
+    pfx.game = Some(wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).spawn().unwrap());
+    let helper = start_helper(&pfx, &[], &[]);
+    helper.expect_event("bootstrap_connected", Duration::from_secs(200));
+    {
+        let p = Probe::start(&pfx, &["bad-first"]);
+        assert_eq!(helper.next_parsed(Duration::from_secs(60)), Event::error("pipe_error"));
+        p.expect_line("dropped", Duration::from_secs(10));
+    }
+    {
+        let p = Probe::start(&pfx, &["bad-version"]);
+        assert_eq!(helper.next_parsed(Duration::from_secs(60)), Event::error("version_mismatch"));
+        p.expect_line("dropped", Duration::from_secs(10));
+    }
+    helper.expect_quiet(Duration::from_secs(1));
+    for mode in ["ok-then-bad", "oversize"] {
+        let p = Probe::start(&pfx, &[mode]);
+        assert_eq!(helper.next_parsed(Duration::from_secs(60)), Event::OverlayConnected { module_version: PROBE_VERSION });
+        assert_eq!(helper.next_parsed(Duration::from_secs(10)), Event::error("pipe_error"));
+        assert_eq!(helper.next_parsed(Duration::from_secs(10)), Event::OverlayDisconnected);
+        p.expect_line("dropped", Duration::from_secs(10));
+        // The helper listens again.
+        assert_eq!(helper.next_parsed(Duration::from_secs(10)), Event::OverlayConnected { module_version: PROBE_VERSION });
+        p.expect_line("reconnected", Duration::from_secs(10));
+        drop(p);
+        assert_eq!(helper.next_parsed(Duration::from_secs(10)), Event::OverlayDisconnected);
+    }
+}
+
+/// Catches `set_state` treating a lock timeout as acquired (it must answer `state_busy` after
+/// about 100 ms), a bell read under a busy lock being lost (its bits must go back and ring again),
+/// a `set_state` that changes nothing bumping `seq` or ringing `bell-game`, and a `set_state` with
+/// no overlay connected not being refused.
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn set_state_is_busy_under_the_lock_and_a_busy_bell_is_retried() {
+    let mut pfx = setup("busy");
+    pfx.game = Some(wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).spawn().unwrap());
+    let mut helper = start_helper(&pfx, &[], &[]);
+    helper.expect_event("bootstrap_connected", Duration::from_secs(200));
+    helper.send_cmd(&Cmd::SetState { request_id: 1, edit_mode: Some(true), visible: None });
+    assert_eq!(helper.next_parsed(Duration::from_secs(10)), Event::reply_error(1, "overlay_not_connected"));
+
+    // The probe holds the state lock for 3 s.
+    let p = Probe::start(&pfx, &["hold", "3000"]);
+    assert_eq!(helper.next_parsed(Duration::from_secs(60)), Event::OverlayConnected { module_version: PROBE_VERSION });
+    p.expect_line("locked", Duration::from_secs(10));
+    helper.send_cmd(&Cmd::SetState { request_id: 2, edit_mode: Some(true), visible: None });
+    assert_eq!(helper.next_parsed(Duration::from_secs(2)), Event::reply_error(2, "state_busy"));
+    p.expect_line("released", Duration::from_secs(10));
+    // The bell rung while the lock was held comes out once, after the release.
+    assert_eq!(helper.next_parsed(Duration::from_secs(5)), applied(42));
+    helper.expect_quiet(Duration::from_secs(1));
+
+    helper.send_cmd(&Cmd::SetState { request_id: 3, edit_mode: Some(true), visible: None });
+    assert_eq!(helper.next_parsed(Duration::from_secs(5)), Event::StateSet { request_id: 3, seq: 1 });
+    p.expect_line("bell 1 seq 1", Duration::from_secs(5));
+    assert_eq!(helper.next_parsed(Duration::from_secs(5)), applied(1));
+
+    // Nothing changes: the current seq, no bump, no bell-game ring.
+    helper.send_cmd(&Cmd::SetState { request_id: 4, edit_mode: Some(true), visible: None });
+    assert_eq!(helper.next_parsed(Duration::from_secs(5)), Event::StateSet { request_id: 4, seq: 1 });
+    p.expect_quiet(Duration::from_millis(1500));
+    helper.expect_quiet(Duration::from_millis(500));
+
+    helper.send_cmd(&Cmd::SetState { request_id: 5, edit_mode: Some(false), visible: Some(true) });
+    assert_eq!(helper.next_parsed(Duration::from_secs(5)), Event::StateSet { request_id: 5, seq: 2 });
+    p.expect_line("bell 6 seq 2", Duration::from_secs(5));
+    assert_eq!(helper.next_parsed(Duration::from_secs(5)), applied(2));
 }
