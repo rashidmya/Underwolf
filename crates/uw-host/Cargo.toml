@@ -1,0 +1,19 @@
+[package]
+name = "uw-host"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The Linux host library (design 2a): find a running Proton game and its Wine session
+# (`discovery`, moved from uw-inject), start the Wine-side helper and restart it when it dies,
+# assign request ids, and keep the overlay at a desired state (`driver`, `supervisor`). `host`
+# runs it all with real processes; `uw-inject` is a thin CLI on it.
+[lib]
+name = "uw_host"
+
+[dependencies]
+uw-pipe-proto = { path = "../uw-pipe-proto" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

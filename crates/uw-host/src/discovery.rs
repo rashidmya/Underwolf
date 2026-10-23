@@ -1,7 +1,8 @@
 //! Find a running Proton game and what it takes to run another program in its Wine session: the
 //! game's `WINEPREFIX` and `WINE*SYNC` settings (from `/proc/<pid>/environ`), its wineserver
 //! socket, and Proton's `files` directory (from the prefix's `config_info`). Ported and renamed
-//! from the injection spike; no dependency on `spikes/`.
+//! from the injection spike (by plan 1, into uw-inject; moved here by plan 2a); no dependency on
+//! `spikes/`.
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::fs::MetadataExt;

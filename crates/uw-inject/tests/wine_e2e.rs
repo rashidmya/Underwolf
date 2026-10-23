@@ -15,7 +15,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::channel;
 use std::time::{Duration, Instant, SystemTime};
 
-use uw_inject::discovery::find_pids;
+use uw_host::discovery::find_pids;
 
 fn wine() -> String {
     std::env::var("UW_WINE").unwrap_or_else(|_| "/usr/bin/wine".into())

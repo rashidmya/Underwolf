@@ -3,7 +3,7 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use uw_inject::discovery::{helper_command, GameSession};
+use uw_host::discovery::{helper_command, GameSession};
 
 fn session() -> GameSession {
     GameSession {
@@ -55,4 +55,22 @@ fn helper_command_passes_fallback_flag() {
     );
     let args: Vec<_> = cmd.get_args().collect();
     assert_eq!(args.last(), Some(&OsStr::new("--fallback")));
+}
+
+/// Catches a sync variable from the caller's shell leaking into the helper when the game does not
+/// set it (plan 1 Task 3 review M3; its own test per N1): the helper's sync mode must match the
+/// running wineserver.
+#[test]
+fn helper_command_clears_sync_variables_the_game_does_not_set() {
+    let cmd = helper_command(
+        &session(),
+        Path::new("/x/uw-helper64.exe"),
+        "deadlock.exe",
+        Path::new("/x/uw_bootstrap64.dll"),
+        false,
+    );
+    let envs: Vec<_> = cmd.get_envs().collect();
+    assert!(envs.contains(&(OsStr::new("WINEESYNC"), None)), "{envs:?}");
+    assert!(envs.contains(&(OsStr::new("WINENTSYNC"), None)), "{envs:?}");
+    assert!(envs.contains(&(OsStr::new("WINEFSYNC"), Some(OsStr::new("1")))), "{envs:?}");
 }

@@ -51,9 +51,9 @@ fn run() -> Result<i32, String> {
     use std::path::PathBuf;
     use std::process::Stdio;
 
-    use uw_inject::discovery::{helper_command, GameSession};
-    use uw_inject::driver::Driver;
-    use uw_inject::to_wine_path;
+    use uw_host::discovery::{helper_command, GameSession};
+    use uw_host::driver::{Desired, Driver};
+    use uw_host::{to_wine_path, RequestIds};
     use uw_pipe_proto::jsonl::Event;
 
     let mut pid: Option<i32> = None;
@@ -121,7 +121,7 @@ fn run() -> Result<i32, String> {
 
     let mut stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
-    let mut driver = Driver::new(overlay.as_deref().map(to_wine_path));
+    let mut driver = Driver::new(Desired::new(overlay.as_deref().map(to_wine_path)), RequestIds::default());
 
     for line in BufReader::new(stdout).lines() {
         let line = line.map_err(|e| format!("reading the helper: {e}"))?;

@@ -2,12 +2,10 @@ use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
 
-use uw_inject::driver::Driver;
-use uw_inject::{exe_matches, to_wine_path};
-use uw_pipe_proto::jsonl::{Command, Event};
+use uw_host::{exe_matches, to_wine_path};
 
 #[cfg(unix)]
-use uw_inject::discovery::{
+use uw_host::discovery::{
     cmdline_names, config_info_for_prefix, find_pids, proton_files_from_config_info, server_socket, wine_env,
     GameError, GameSession,
 };
@@ -74,6 +72,15 @@ fn game_session_find_reports_a_missing_process() {
     assert!(err.to_string().contains("uw-no-such-game.exe is not running"), "{err}");
 }
 
+/// Catches an explicit `--pid` that does not exist being reported as `no_wine_session` (plan 1
+/// Task 3 review M2; its own test per N1). `pid_max` is far below `i32::MAX`.
+#[cfg(unix)]
+#[test]
+fn an_explicit_pid_that_does_not_exist_is_game_not_found() {
+    let err = GameSession::find("x.exe", Some(i32::MAX)).unwrap_err();
+    assert_eq!(err.code(), "game_not_found", "{err}");
+}
+
 #[cfg(unix)]
 #[test]
 fn game_error_codes_match_the_design() {
@@ -102,39 +109,6 @@ fn exe_matches_basename_case_insensitively() {
     assert!(exe_matches("Deadlock.EXE", "deadlock.exe"));
     assert!(exe_matches(r"S:\common\Deadlock\game\bin\win64\deadlock.exe", "deadlock.exe"));
     assert!(!exe_matches("deadlock.exe.bak", "deadlock.exe"));
-}
-
-#[test]
-fn driver_loads_overlay_once_when_bootstrap_connects_fresh() {
-    let mut d = Driver::new(Some(r"Z:\games\overlay.dll".into()));
-    // Fresh connection with no overlay: send load_overlay once.
-    assert_eq!(
-        d.on_event(&Event::BootstrapConnected { overlay_loaded: false, overlay_path: None }),
-        vec![Command::LoadOverlay { request_id: 1, path: r"Z:\games\overlay.dll".into() }]
-    );
-    // A later status does not re-send.
-    assert_eq!(
-        d.on_event(&Event::Status { request_id: 1, code: "ok".into(), detail: 0, message: String::new() }),
-        vec![]
-    );
-    assert!(d.is_done());
-}
-
-#[test]
-fn driver_does_not_reload_after_client_restart() {
-    let mut d = Driver::new(Some(r"Z:\games\overlay.dll".into()));
-    // Reconnect: the pinned bootstrap already has the overlay, so send nothing.
-    assert_eq!(
-        d.on_event(&Event::BootstrapConnected { overlay_loaded: true, overlay_path: Some(r"Z:\games\overlay.dll".into()) }),
-        vec![]
-    );
-    assert!(d.is_done());
-}
-
-#[test]
-fn driver_with_no_overlay_sends_nothing() {
-    let mut d = Driver::new(None);
-    assert_eq!(d.on_event(&Event::BootstrapConnected { overlay_loaded: false, overlay_path: None }), vec![]);
 }
 
 #[cfg(unix)]

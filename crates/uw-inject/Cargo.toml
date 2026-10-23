@@ -5,13 +5,10 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# Linux side: find a running Proton game and its Wine session, start `uw-helper64.exe` inside it,
-# and drive it over JSON lines. Discovery and path conversion are ported from the injection spike
-# (adapted; no dependency on spikes/). The `uw-inject` binary is the operator CLI.
-[lib]
-name = "uw_inject"
-
+# The operator CLI (`uw-inject`): find a running Proton game, start `uw-helper64.exe` in its Wine
+# session and drive it over JSON lines. Discovery and driving live in `uw-host`.
 [dependencies]
+uw-host = { path = "../uw-host" }
 uw-pipe-proto = { path = "../uw-pipe-proto" }
 
 [target.'cfg(unix)'.dependencies]

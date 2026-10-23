@@ -624,10 +624,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "uw-host"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "uw-pipe-proto",
+]
+
+[[package]]
 name = "uw-inject"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "uw-host",
  "uw-pipe-proto",
 ]
 
