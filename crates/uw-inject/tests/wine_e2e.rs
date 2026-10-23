@@ -146,6 +146,7 @@ fn run_inject(fx: &Fixture, until: &str, within: Duration, linger: Duration) -> 
         .arg(win_artifact("uw_bootstrap64.dll"))
         .arg("--overlay")
         .arg(win_artifact("uw_test_overlay.dll"))
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
