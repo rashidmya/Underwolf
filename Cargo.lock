@@ -608,6 +608,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "uw-game-channel"
+version = "0.0.0"
+dependencies = [
+ "uw-pipe-proto",
+ "windows-sys",
+]
+
+[[package]]
 name = "uw-helper"
 version = "0.0.0"
 dependencies = [
