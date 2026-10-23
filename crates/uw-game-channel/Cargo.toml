@@ -7,8 +7,9 @@ publish.workspace = true
 
 # The control channel's in-game side (design 2a). `objects` holds the named doorbells, mask
 # region, state block and lock: the helper creates them (`Objects::create`) and the game only
-# opens them (`Objects::open`). Windows only; on Linux the crate is empty. The examples are the
-# gate probes run by `tests/wine_objects.rs`.
+# opens them (`Objects::open`). `start` runs the in-game worker (overlay pipe, bells, ping). An
+# overlay module links it. Windows only; on Linux the crate is empty. The examples are the gate
+# probes run by `tests/wine_objects.rs`.
 [lib]
 name = "uw_game_channel"
 
@@ -16,11 +17,15 @@ name = "uw_game_channel"
 uw-pipe-proto = { path = "../uw-pipe-proto" }
 
 [target.'cfg(windows)'.dependencies]
-# `CreateEventW`, `CreateMutexW` and `CreateFileMappingW` take `SECURITY_ATTRIBUTES`, so
-# `Win32_Security` is needed even though they get null.
+# `CreateEventW`, `CreateMutexW`, `CreateFileMappingW` and `CreateFileW` take
+# `SECURITY_ATTRIBUTES`, so `Win32_Security` is needed even though they get null; `ReadFile` and
+# `WriteFile` need `Win32_System_IO` for `OVERLAPPED`.
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
     "Win32_System_Memory",
+    "Win32_System_Pipes",
     "Win32_System_Threading",
 ] }
