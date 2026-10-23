@@ -218,6 +218,23 @@ impl Helper {
         }
     }
 
+    /// Close the helper's stdin, as a host that exits or dies does.
+    fn close_stdin(&mut self) {
+        drop(self.stdin.take());
+    }
+
+    /// Wait up to `within` for the helper to exit by itself; its status, or `None` if it did not.
+    fn wait_exit(&mut self, within: Duration) -> Option<std::process::ExitStatus> {
+        let start = Instant::now();
+        while start.elapsed() < within {
+            if let Ok(Some(status)) = self.child.try_wait() {
+                return Some(status);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        None
+    }
+
     fn send_cmd(&mut self, cmd: &Cmd) {
         let line = cmd.to_line();
         self.send(&line);
@@ -540,4 +557,136 @@ fn ping_gets_pong_with_the_last_applied_seq() {
     helper.expect_all(&[Event::StateSet { request_id: 11, seq: 1 }, applied(1)], Duration::from_secs(10));
     helper.send_cmd(&Cmd::Ping { request_id: 12 });
     assert_eq!(helper.next_parsed(Duration::from_secs(10)), Event::Pong { request_id: 12, seen_seq: 1 });
+}
+
+/// Catches plan 1's final-review M2: a `status` that comes after its request timed out must be
+/// discarded, not taken as the reply to the next `load_overlay`. Also catches commands sent before
+/// the bootstrap connects being queued (and run later) instead of refused at once (design: no
+/// queueing while disconnected).
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn a_slow_overlay_start_times_out_and_its_late_status_is_discarded() {
+    let mut pfx = setup("slow");
+    // The overlay's start takes 6 s; the helper waits only 2 s for a status.
+    pfx.game = Some(
+        wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).env("UW_TEST_OVERLAY_START_DELAY_MS", "6000").spawn().unwrap(),
+    );
+    let overlay = to_wine_path(&win_artifact("uw_test_overlay.dll"));
+    let mut helper = start_helper(&pfx, &[], &[("UW_STATUS_TIMEOUT_MS", "2000")]);
+    // Sent while the helper still hooks: refused, and answered before `bootstrap_connected`.
+    helper.send_cmd(&Cmd::LoadOverlay { request_id: 7, path: overlay.clone() });
+    helper.send_cmd(&Cmd::SetState { request_id: 8, edit_mode: Some(true), visible: None });
+    helper.send_cmd(&Cmd::Ping { request_id: 9 });
+    let first: Vec<Event> = (0..4).map(|_| helper.next_parsed(Duration::from_secs(200))).collect();
+    assert_eq!(
+        first[..3],
+        [
+            Event::reply_error(7, "bootstrap_not_connected"),
+            Event::reply_error(8, "overlay_not_connected"),
+            Event::reply_error(9, "overlay_not_connected"),
+        ],
+        "all: {first:?}"
+    );
+    assert!(matches!(first[3], Event::BootstrapConnected { overlay_loaded: false, .. }), "{first:?}");
+
+    helper.send_cmd(&load(&overlay));
+    let timeout = Event::parse(&helper.next_event(Duration::from_secs(10))).unwrap();
+    assert_eq!(timeout, Event::reply_error(1, "status_timeout"));
+    // The start finishes about 4 s later; its `status` (request 1) is discarded.
+    assert!(
+        helper.wait_stderr("discarding a status for request 1", Duration::from_secs(15)),
+        "the late status was not discarded; stderr: {:?}",
+        helper.stderr_lines()
+    );
+    // The next request gets its own reply: the overlay did load, so `already_loaded`.
+    helper.send_cmd(&Cmd::LoadOverlay { request_id: 2, path: overlay });
+    let reply = Event::parse(&helper.next_event(Duration::from_secs(10))).unwrap();
+    assert_eq!(
+        reply,
+        Event::Status { request_id: 2, code: "already_loaded".into(), detail: 0, message: "overlay already loaded".into() }
+    );
+}
+
+/// Catches owner decision D1 breaking: a `ping` the overlay does not answer in time must get
+/// `overlay_not_responding` (and no other reply), its late `pong` must be discarded, and the next
+/// `ping` must be answered.
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn a_ping_the_overlay_does_not_answer_in_time_is_overlay_not_responding() {
+    let mut pfx = setup("pingslow");
+    // Every bell takes the overlay 5 s, and its worker answers no ping meanwhile; the helper
+    // waits 2 s for a pong.
+    pfx.game = Some(
+        wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).env("UW_TEST_OVERLAY_BELL_DELAY_MS", "5000").spawn().unwrap(),
+    );
+    let overlay = to_wine_path(&win_artifact("uw_test_overlay.dll"));
+    let mut helper = start_helper(&pfx, &[], &[("UW_PING_TIMEOUT_MS", "2000")]);
+    helper.expect_event("bootstrap_connected", Duration::from_secs(200));
+    helper.send_cmd(&load(&overlay));
+    helper.expect_all(&[ok(1), Event::OverlayConnected { module_version: OVERLAY_VERSION }], Duration::from_secs(30));
+
+    helper.send_cmd(&Cmd::SetState { request_id: 2, edit_mode: Some(true), visible: None });
+    assert_eq!(helper.next_parsed(Duration::from_secs(10)), Event::StateSet { request_id: 2, seq: 1 });
+    helper.send_cmd(&Cmd::Ping { request_id: 3 });
+    assert_eq!(helper.next_parsed(Duration::from_secs(10)), Event::reply_error(3, "overlay_not_responding"));
+    // The bell is applied about 3 s later; then the late pong comes and is discarded.
+    assert_eq!(helper.next_parsed(Duration::from_secs(10)), applied(1));
+    assert!(
+        helper.wait_stderr("discarding a pong for 3", Duration::from_secs(10)),
+        "the late pong was not discarded; stderr: {:?}",
+        helper.stderr_lines()
+    );
+    helper.send_cmd(&Cmd::Ping { request_id: 4 });
+    assert_eq!(helper.next_parsed(Duration::from_secs(10)), Event::Pong { request_id: 4, seen_seq: 1 });
+}
+
+/// Catches a state block from another layout being used or rewritten instead of refused (design
+/// "Messages and layouts": `version_mismatch`, "restart the game"), or the game hooked anyway.
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn a_foreign_state_block_is_version_mismatch() {
+    let mut pfx = setup("badblock");
+    pfx.game = Some(wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).arg("--bad-state-block").spawn().unwrap());
+    wait_game_in(&pfx, Duration::from_secs(180));
+    let mut helper = start_helper(&pfx, &[], &[]);
+    let event = Event::parse(&helper.next_event(Duration::from_secs(60))).unwrap();
+    assert_eq!(event, Event::error("version_mismatch"));
+    let status = helper.wait_exit(Duration::from_secs(10));
+    assert_eq!(status.and_then(|s| s.code()), Some(1), "stderr: {:?}", helper.stderr_lines());
+    assert!(
+        helper.wait_stderr("state block layout 2, not 1; restart the game", Duration::from_secs(2)),
+        "stderr: {:?}",
+        helper.stderr_lines()
+    );
+    assert!(!helper.stderr_lines().iter().any(|l| l.contains("hooked")), "the game was hooked anyway");
+}
+
+/// Catches a helper that outlives its host while it still waits for the game's window (design
+/// "Failures": it exits when its stdin closes, in every phase, so no orphan keeps the helper mutex).
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn closing_stdin_ends_the_helper_while_it_waits_for_a_window() {
+    let mut pfx = setup("stdinwait");
+    pfx.game = Some(wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).arg("--no-window").spawn().unwrap());
+    wait_game_in(&pfx, Duration::from_secs(180));
+    // With no window the helper would wait 120 s (the default) before `no_window`.
+    let mut helper = start_helper(&pfx, &[], &[]);
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(helper.child.try_wait().unwrap().is_none(), "the helper ended early: {:?}", helper.stderr_lines());
+    helper.close_stdin();
+    let status = helper.wait_exit(Duration::from_secs(10));
+    assert_eq!(status.and_then(|s| s.code()), Some(0), "stderr: {:?}", helper.stderr_lines());
+    assert!(helper.wait_stderr("stdin closed; exiting", Duration::from_secs(2)));
+}
+
+/// The same once the bootstrap is connected and the relay runs.
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn closing_stdin_ends_the_helper_after_it_connected() {
+    let mut pfx = setup("stdinrelay");
+    pfx.game = Some(wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).spawn().unwrap());
+    let mut helper = start_with_overlay(&pfx);
+    helper.close_stdin();
+    let status = helper.wait_exit(Duration::from_secs(10));
+    assert_eq!(status.and_then(|s| s.code()), Some(0), "stderr: {:?}", helper.stderr_lines());
 }

@@ -1,21 +1,23 @@
 #![cfg(unix)]
 //! The whole Linux chain under plain Wine: `uw-inject` finds the test game in a scratch prefix,
 //! starts `uw-helper64.exe` in that Wine session, the bootstrap connects, and the test overlay is
-//! loaded. A second `uw-inject` run (a client restart) reconnects without reloading. Ignored by
-//! default (needs Wine and the Windows artifacts).
+//! loaded. A second `uw-inject` run (a client restart) reconnects without reloading. A helper
+//! killed under a running `uw-inject` is restarted, and the overlay gets the reconciled state.
+//! Ignored by default (needs Wine and the Windows artifacts).
 //!
 //!   cargo build --release --target x86_64-pc-windows-gnu -p uw-test-game -p uw-bootstrap \
 //!       -p uw-test-overlay -p uw-helper
 //!   xvfb-run -a cargo test -p uw-inject --test wine_e2e -- --ignored --test-threads=1
 //! `UW_WINE`/`UW_WINESERVER` override the Wine binaries (defaults `/usr/bin/wine[server]`).
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::channel;
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant, SystemTime};
 
 use uw_host::discovery::find_pids;
+use uw_pipe_proto::jsonl::Event;
 
 fn wine() -> String {
     std::env::var("UW_WINE").unwrap_or_else(|_| "/usr/bin/wine".into())
@@ -200,4 +202,151 @@ fn uw_inject_connects_and_loads_the_overlay() {
     );
     assert!(!events2.iter().any(|e| e.contains(r#""event":"status""#)), "reloaded after a restart: {events2:?}");
     assert_eq!(marker_stamp(&fx.prefix), before, "the overlay marker was rewritten (a second load)");
+}
+
+/// The Linux pid of the `exe` (argv0 basename) running in `prefix`, if any.
+fn pid_in(prefix: &Path, exe: &str) -> Option<i32> {
+    let want = format!("WINEPREFIX={}", prefix.display());
+    find_pids(exe).into_iter().find(|pid| {
+        std::fs::read(format!("/proc/{pid}/environ"))
+            .map(|e| e.split(|&b| b == 0).any(|v| v == want.as_bytes()))
+            .unwrap_or(false)
+    })
+}
+
+/// A running `uw-inject` with its stdin open for commands and its events on a channel. Dropping
+/// it sends SIGTERM (its helper then exits on its own: its stdin closes).
+struct Inject {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    events: Receiver<String>,
+    seen: Vec<String>,
+}
+
+impl Inject {
+    fn start(fx: &Fixture) -> Inject {
+        let proton_root = Path::new(&wine()).parent().unwrap().parent().unwrap().to_path_buf();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_uw-inject"))
+            .args(["--exe", "uw-test-game.exe", "--pid"])
+            .arg(fx.game_pid.to_string())
+            .arg("--proton")
+            .arg(&proton_root)
+            .arg("--helper")
+            .arg(win_artifact("uw-helper64.exe"))
+            .arg("--bootstrap")
+            .arg(win_artifact("uw_bootstrap64.dll"))
+            .arg("--overlay")
+            .arg(win_artifact("uw_test_overlay.dll"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take().unwrap();
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Inject { child, stdin, events: rx, seen: Vec::new() }
+    }
+
+    fn send(&mut self, line: &str) {
+        let stdin = self.stdin.as_mut().expect("uw-inject stdin is open");
+        writeln!(stdin, "{line}").unwrap();
+        stdin.flush().unwrap();
+    }
+
+    /// The next event (all of them are kept in `seen` for failure messages).
+    fn next(&mut self, deadline: Instant) -> Event {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let line = self.events.recv_timeout(left).unwrap_or_else(|_| panic!("no event in time; saw {:#?}", self.seen));
+        self.seen.push(line.clone());
+        Event::parse(&line).unwrap_or_else(|e| panic!("not an event ({e}): {line}"))
+    }
+
+    /// Read events until `want` matches one; return it.
+    fn until(&mut self, within: Duration, want: impl Fn(&Event) -> bool) -> Event {
+        let deadline = Instant::now() + within;
+        loop {
+            let e = self.next(deadline);
+            if want(&e) {
+                return e;
+            }
+        }
+    }
+}
+
+impl Drop for Inject {
+    fn drop(&mut self) {
+        // SAFETY: signals our own child process.
+        unsafe { libc::kill(self.child.id() as i32, libc::SIGTERM) };
+        wait_bounded(&mut self.child, Duration::from_secs(10));
+    }
+}
+
+/// Read events until the overlay has applied a state: a `state_set` seq and then a bell with
+/// `applied_seq` equal to it, with the overlay's state file saying `expect`. Returns the seq.
+fn until_applied(inj: &mut Inject, fx: &Fixture, expect: &str, within: Duration) -> u64 {
+    let deadline = Instant::now() + within;
+    let mut last_set = None;
+    loop {
+        match inj.next(deadline) {
+            Event::StateSet { seq, .. } => last_set = Some(seq),
+            Event::Bell { applied_seq, .. } if Some(applied_seq) == last_set => {
+                let state = markers(&fx.prefix, "uw-test-state-")
+                    .first()
+                    .and_then(|p| std::fs::read_to_string(p).ok())
+                    .unwrap_or_default();
+                if state.contains(expect) {
+                    return applied_seq;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Catches the design's restart path breaking: a killed helper not restarted, the overlay not
+/// reconnecting, the desired state not pushed again (a change made while the helper was down is
+/// lost), the overlay loaded twice, or the game harmed.
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn a_killed_helper_is_restarted_and_the_overlay_gets_the_reconciled_state() {
+    let fx = start_game("restart");
+    let mut inj = Inject::start(&fx);
+    inj.until(Duration::from_secs(200), |e| matches!(e, Event::OverlayConnected { .. }));
+    // The reconcile push (visible) is applied first, then edit mode on (no request id: assigned).
+    until_applied(&mut inj, &fx, "visible=1", Duration::from_secs(30));
+    inj.send(r#"{"cmd":"set_state","edit_mode":true}"#);
+    let before = until_applied(&mut inj, &fx, "edit_mode=1", Duration::from_secs(30));
+
+    // Kill only the helper. While it is down, turn edit mode off: refused for now, remembered.
+    let helper = pid_in(&fx.prefix, "uw-helper64.exe").expect("the helper runs in the prefix");
+    // SAFETY: kills the test's own helper process.
+    unsafe { libc::kill(helper, libc::SIGKILL) };
+    let killed_at = inj.seen.len();
+    inj.send(r#"{"cmd":"set_state","edit_mode":false}"#);
+    inj.until(Duration::from_secs(30), |e| *e == Event::HelperRestarted { attempt: 1 });
+    let connected = inj.until(Duration::from_secs(60), |e| matches!(e, Event::BootstrapConnected { .. }));
+    assert!(
+        matches!(&connected, Event::BootstrapConnected { overlay_loaded: true, overlay_path: Some(p) } if p.ends_with("uw_test_overlay.dll")),
+        "{connected:?}"
+    );
+    // The overlay reconnects on its own; the host pushes the full state, and edit mode goes off.
+    inj.until(Duration::from_secs(30), |e| matches!(e, Event::OverlayConnected { .. }));
+    let after = until_applied(&mut inj, &fx, "edit_mode=0", Duration::from_secs(30));
+    // The game held the state block across the restart, so `seq` went on counting.
+    assert!(after > before, "seq {after} after the restart, {before} before");
+    // `ping` reaches the reconnected overlay and reports what it applied last.
+    inj.send(r#"{"cmd":"ping"}"#);
+    let pong = inj.until(Duration::from_secs(10), |e| matches!(e, Event::Pong { .. }));
+    assert!(matches!(pong, Event::Pong { seen_seq, .. } if seen_seq == after), "{pong:?}");
+    // The pinned bootstrap kept the overlay: no second load.
+    assert!(!inj.seen[killed_at..].iter().any(|l| l.contains(r#""event":"status""#)), "reloaded: {:#?}", inj.seen);
+    assert!(pid_in(&fx.prefix, "uw-test-game.exe").is_some(), "the game stopped");
 }
