@@ -1,4 +1,6 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 
 use uw_inject::driver::Driver;
 use uw_inject::{exe_matches, to_wine_path};
@@ -11,6 +13,7 @@ use uw_inject::discovery::{
 };
 
 // First lines of a real `compatdata/1422450/config_info` (Proton 11.0).
+#[cfg(unix)]
 const CONFIG_INFO: &str = "11.0-100
 /home/buga/.local/share/Steam/steamapps/common/Proton 11.0/files/share/fonts/
 /home/buga/.local/share/Steam/steamapps/common/Proton 11.0/files/lib/
