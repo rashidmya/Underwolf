@@ -1,13 +1,17 @@
-//! Linux launcher: find a running Proton game and drive the Wine-side helper.
+//! Linux launcher: a thin CLI on `uw-host` (design 2a).
 //!
 //!   uw-inject [--pid N] [--exe deadlock.exe] [--proton DIR] [--helper PATH]
 //!             [--bootstrap PATH] [--overlay PATH] [--fallback]
 //!
-//! Finds the game and its Wine session, starts `uw-helper64.exe` inside it, prints the helper's
-//! JSON-lines events, and — when an overlay is given — sends `load_overlay` once the bootstrap
-//! connects fresh (the `Driver`). Defaults: `deadlock.exe`; Proton from the prefix's `config_info`;
-//! helper and bootstrap from `~/.local/share/underwolf/`. Ctrl-C (SIGINT) or SIGTERM ends the
-//! helper too; the pinned bootstrap stays in the game for the next run.
+//! Finds the game and its Wine session, then hands over to `uw_host::host::Host`, which starts
+//! `uw-helper64.exe` in that session, restarts it if it dies, and keeps the overlay at the desired
+//! state (loaded, then every `set_state` it was given). JSON commands on stdin (`request_id`
+//! optional: assigned if absent), events on stdout, diagnostics on stderr. The `request_id` you
+//! send comes back on your reply; the host's own replies may use the same number. Exits 0 after
+//! `stopped {"reason":"game_exited"}` and 1 after any other stop. Defaults: `deadlock.exe`;
+//! Proton from the prefix's `config_info`; helper and bootstrap from `~/.local/share/underwolf/`.
+//! Ctrl-C (SIGINT) or SIGTERM exits at once: the helper's stdin closes with us, so it exits too
+//! (design "Failures"), and the pinned bootstrap stays in the game for the next run.
 
 #[cfg(not(unix))]
 fn main() {
@@ -26,34 +30,53 @@ fn main() {
     }
 }
 
-/// The running helper's pid, for the signal handler (0 = none yet).
+/// The request ids the user chose, by the id the host gave the command. Every command goes to the
+/// host with an id from `HostHandle::next_request_id`, never with the user's own, so a user's id
+/// cannot collide with one the host took for its reconcile commands (two pending commands would
+/// then share it in the host and the helper); the reply gets the user's id back.
 #[cfg(unix)]
-static HELPER_PID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+#[derive(Default)]
+struct UserIds(std::sync::Mutex<std::collections::HashMap<u32, u32>>);
 
-/// Ending the client ends the helper (design "Reconnect after a client restart"): on SIGINT or
-/// SIGTERM, kill the helper, then exit. The pinned bootstrap stays in the game. Only
-/// async-signal-safe calls (an atomic load, `kill`, `_exit`) happen here.
+#[cfg(unix)]
+impl UserIds {
+    /// Parse one stdin line into a command carrying `host_id`; remember the user's id, if any.
+    fn outgoing(&self, line: &str, host_id: u32) -> Result<uw_pipe_proto::jsonl::Command, String> {
+        let (cmd, user) = uw_pipe_proto::jsonl::Command::parse_with_id(line, host_id).map_err(|e| e.to_string())?;
+        if let Some(user) = user {
+            self.0.lock().unwrap().insert(host_id, user);
+        }
+        Ok(cmd)
+    }
+
+    /// Put the user's id back on a reply (once: the entry is forgotten).
+    fn incoming(&self, event: &mut uw_pipe_proto::jsonl::Event) {
+        if let Some(id) = event.request_id_mut()
+            && let Some(user) = self.0.lock().unwrap().remove(id)
+        {
+            *id = user;
+        }
+    }
+}
+
+/// On SIGINT or SIGTERM, exit at once. Only `_exit` (async-signal-safe) happens here; the kernel
+/// then closes the helper's stdin, and the helper exits on its own.
 #[cfg(unix)]
 extern "C" fn on_signal(_sig: libc::c_int) {
-    let pid = HELPER_PID.load(std::sync::atomic::Ordering::SeqCst);
-    // SAFETY: `kill` and `_exit` are async-signal-safe.
-    unsafe {
-        if pid > 0 {
-            libc::kill(pid, libc::SIGKILL);
-        }
-        libc::_exit(130);
-    }
+    // SAFETY: `_exit` is async-signal-safe.
+    unsafe { libc::_exit(130) };
 }
 
 #[cfg(unix)]
 fn run() -> Result<i32, String> {
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::BufRead;
     use std::path::PathBuf;
-    use std::process::Stdio;
+    use std::sync::Arc;
 
-    use uw_host::discovery::{helper_command, GameSession};
-    use uw_host::driver::{Desired, Driver};
-    use uw_host::{to_wine_path, RequestIds};
+    use uw_host::discovery::GameSession;
+    use uw_host::driver::Desired;
+    use uw_host::host::{Host, WineLaunch};
+    use uw_host::to_wine_path;
     use uw_pipe_proto::jsonl::Event;
 
     let mut pid: Option<i32> = None;
@@ -102,41 +125,81 @@ fn run() -> Result<i32, String> {
     }
     eprintln!("[uw-inject] {exe} pid {}; prefix {}", session.pid, session.prefix.display());
 
-    let mut cmd = helper_command(&session, &helper, &exe, &bootstrap, fallback);
-    if std::env::var_os("WINEDEBUG").is_none() {
-        cmd.env("WINEDEBUG", "-all");
-    }
-    let mut child = cmd
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("running the helper: {e}"))?;
-    HELPER_PID.store(child.id() as i32, std::sync::atomic::Ordering::SeqCst);
     let handler = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
-    // SAFETY: installs a handler that only makes async-signal-safe calls.
+    // SAFETY: installs a handler that only makes an async-signal-safe call.
     unsafe {
         libc::signal(libc::SIGINT, handler);
         libc::signal(libc::SIGTERM, handler);
     }
 
-    let mut stdin = child.stdin.take().unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let mut driver = Driver::new(Desired::new(overlay.as_deref().map(to_wine_path)), RequestIds::default());
-
-    for line in BufReader::new(stdout).lines() {
-        let line = line.map_err(|e| format!("reading the helper: {e}"))?;
-        let Ok(event) = Event::parse(&line) else {
-            continue;
-        };
-        println!("{line}");
-        if matches!(&event, Event::Error { code, .. } if code == "version_mismatch") {
-            eprintln!("[uw-inject] restart the game to load the new bootstrap");
+    let host = Host::start(
+        WineLaunch { session, exe, helper, bootstrap, fallback },
+        Desired::new(overlay.as_deref().map(to_wine_path)),
+    );
+    let commands = host.handle();
+    let user_ids = Arc::new(UserIds::default());
+    let ids = Arc::clone(&user_ids);
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            if line.trim().is_empty() {
+                continue;
+            }
+            match ids.outgoing(&line, commands.next_request_id()) {
+                Ok(cmd) => commands.send(cmd),
+                Err(e) => eprintln!("[uw-inject] bad command: {e}"),
+            }
         }
-        for cmd in driver.on_event(&event) {
-            writeln!(stdin, "{}", cmd.to_line()).map_err(|e| format!("writing to the helper: {e}"))?;
-            stdin.flush().ok();
+        // Our stdin closing does not stop us: Ctrl-C, a signal or a stop does.
+    });
+
+    let mut code = 1;
+    while let Some(mut event) = host.recv() {
+        user_ids.incoming(&mut event);
+        println!("{}", event.to_line());
+        match &event {
+            Event::Error { code, .. } if code == "version_mismatch" => {
+                eprintln!("[uw-inject] restart the game to load the new bootstrap or overlay");
+            }
+            Event::Stopped { reason } => code = if reason == "game_exited" { 0 } else { 1 },
+            _ => {}
         }
     }
-    let status = child.wait().map_err(|e| format!("waiting for the helper: {e}"))?;
-    Ok(status.code().unwrap_or(1))
+    Ok(code)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::UserIds;
+    use uw_pipe_proto::jsonl::{Command, Event};
+
+    /// Catches a user's id reaching the host and the helper: if it equals one the host assigned
+    /// (here 1, the host's own reconcile `load_overlay`), two pending commands would share it. The
+    /// reply must still carry the user's id.
+    #[test]
+    fn a_users_id_never_reaches_the_helper_and_comes_back_on_the_reply() {
+        let ids = UserIds::default();
+        let cmd = ids.outgoing(r#"{"cmd":"ping","request_id":1}"#, 2).unwrap();
+        assert_eq!(cmd, Command::Ping { request_id: 2 });
+        // The host's own reply keeps its id; the user's comes back as 1, once.
+        let mut host_reply = Event::Status { request_id: 1, code: "ok".into(), detail: 0, message: String::new() };
+        ids.incoming(&mut host_reply);
+        assert_eq!(host_reply.request_id(), Some(1));
+        let mut pong = Event::Pong { request_id: 2, seen_seq: 0 };
+        ids.incoming(&mut pong);
+        assert_eq!(pong, Event::Pong { request_id: 1, seen_seq: 0 });
+        let mut again = Event::Pong { request_id: 2, seen_seq: 0 };
+        ids.incoming(&mut again);
+        assert_eq!(again.request_id(), Some(2));
+    }
+
+    #[test]
+    fn a_command_without_an_id_keeps_the_hosts() {
+        let ids = UserIds::default();
+        assert_eq!(ids.outgoing(r#"{"cmd":"ping"}"#, 5).unwrap(), Command::Ping { request_id: 5 });
+        let mut error = Event::reply_error(5, "overlay_not_connected");
+        ids.incoming(&mut error);
+        assert_eq!(error, Event::reply_error(5, "overlay_not_connected"));
+        assert!(ids.outgoing("not json", 6).is_err());
+    }
 }

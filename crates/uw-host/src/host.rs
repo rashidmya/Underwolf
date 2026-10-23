@@ -56,6 +56,25 @@ pub struct Host {
     ids: RequestIds,
 }
 
+/// Sends commands to a running `Host` from another thread (the `Host` itself receives).
+#[derive(Clone)]
+pub struct HostHandle {
+    inputs: Sender<Input>,
+    ids: RequestIds,
+}
+
+impl HostHandle {
+    /// A fresh request id, for a command that has none.
+    pub fn next_request_id(&self) -> u32 {
+        self.ids.next()
+    }
+
+    /// As `Host::send`.
+    pub fn send(&self, cmd: HelperCommand) {
+        let _ = self.inputs.send(Input::User(cmd));
+    }
+}
+
 impl Host {
     /// Start supervising; the first helper starts at once.
     pub fn start(launch: impl Launch, desired: Desired) -> Host {
@@ -74,6 +93,11 @@ impl Host {
     /// A fresh request id, for a command that has none.
     pub fn next_request_id(&self) -> u32 {
         self.ids.next()
+    }
+
+    /// A handle to send commands from another thread.
+    pub fn handle(&self) -> HostHandle {
+        HostHandle { inputs: self.inputs.clone(), ids: self.ids.clone() }
     }
 
     /// Send a command (it updates the desired state, then goes to the helper, or fails at once
