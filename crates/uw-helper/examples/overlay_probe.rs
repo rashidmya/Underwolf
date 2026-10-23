@@ -59,7 +59,7 @@ mod win {
     fn game_pid() -> Option<u32> {
         // SAFETY: the snapshot is closed before returning; `e` is zeroed with `dwSize` set, as `Process32FirstW`/`NextW` require.
         unsafe {
-            let snap =CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
             if snap == INVALID_HANDLE_VALUE {
                 return None;
             }
