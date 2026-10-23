@@ -10,6 +10,10 @@ library) and 2b (game-data channel relay); the overlay gets its own pipe (option
 `OWClient` connects separately from its bootstrap); the differences from Overwolf listed below are
 accepted.
 
+Owner decisions after the plan review (2026-10-23): a `ping` the overlay does not answer within
+15 s is answered `overlay_not_responding`; `hook_failed` and `bootstrap_timeout` stop `uw-host`
+(no restart), like `already_running` and `version_mismatch`.
+
 ## Goal
 
 The Linux side and the in-game overlay exchange commands, doorbells and shared state through
@@ -129,13 +133,26 @@ The first message on the overlay pipe must be `overlay_hello`; a header version 
 |---|---|
 | `load_overlay {path}` | `status {request_id, code, detail, message}` |
 | `set_state {edit_mode?, visible?}` | `state_set {request_id, seq}`. If nothing changed: the current `seq`, no bump, no bell. |
-| `ping` | `pong {request_id, seen_seq}`, or `error {request_id, code: "overlay_not_connected"}` |
+| `ping` | `pong {request_id, seen_seq}`; or `error {request_id, code}`: `overlay_not_connected` (no overlay), `overlay_not_responding` (no `pong` within 15 s; a later `pong` is discarded) |
 
 Unsolicited events: `bootstrap_connected {overlay_loaded, overlay_path}`,
 `overlay_connected {module_version}`, `overlay_disconnected`, `bell {bits, applied_seq}` (unknown
 bits named `bit<N>`), `bootstrap_disconnected`, `error {code}`, `game_exited`.
 `uw-host` adds its own: `helper_restarted {attempt}`, `helper_protocol_error {line}`,
 `overlay_timeout`, `stopped {reason}`.
+
+Error codes (`error {request_id?, code, detail?}`; `request_id` when it answers a command):
+- Replies: `overlay_not_connected`, `overlay_not_responding`, `bootstrap_not_connected`
+  (`load_overlay` with no bootstrap), `state_busy`, `status_timeout`, `path_too_long`,
+  `version_mismatch`.
+- From the helper, unsolicited: `already_running`, `no_window`, `hook_failed` (`detail`: the
+  `GetLastError`), `bootstrap_timeout`, `version_mismatch`, `pipe_error`, `channel_failed` (an
+  object or the overlay pipe could not be created).
+- From `uw-host`: `game_not_found`, `no_wine_session`, `helper_start_failed`; and a command still
+  pending when its helper exits is answered `bootstrap_not_connected` or `overlay_not_connected`.
+- `uw-host` stops (`stopped {reason}`, no restart) on `already_running`, `version_mismatch`,
+  `hook_failed`, `bootstrap_timeout`, `game_exited` and a helper it cannot start; after any other
+  helper exit it restarts the helper.
 
 No queueing while disconnected: commands that need the overlay fail with
 `overlay_not_connected`, and `uw-host` pushes the full desired state on the next
@@ -156,10 +173,11 @@ No queueing while disconnected: commands that need the overlay fail with
 |---|---|
 | `status ok` but no `overlay_connected` within 10 s | `uw-host`: `overlay_timeout`. The overlay keeps retrying. |
 | Overlay pipe drops | `overlay_disconnected`; the helper listens again; the overlay reconnects. |
-| Helper exits while the game runs | `uw-host` restarts it after 1, 2, 4, 8 s, then every 10 s; the delay resets after 60 s of uptime. The marker makes the new helper skip the hook; both clients reconnect; `uw-host` reconciles. |
+| Helper exits while the game runs | `uw-host` restarts it after 1, 2, 4, 8 s, then every 10 s; the delay resets after 60 s of uptime. This includes a helper that exited after `no_window`, `channel_failed` or `pipe_error`. The marker makes the new helper skip the hook; both clients reconnect; `uw-host` reconciles. |
 | `uw-host` exits or dies | The helper exits when its stdin closes, in every phase, so no orphan holds the helper mutex. |
 | Game exits | `game_exited`, helper exit 0; `uw-host` emits `stopped` and doesn't restart. |
-| `already_running`, `version_mismatch` | Reported once; `uw-host` emits `stopped`, no restart loop. |
+| `already_running`, `version_mismatch`, `hook_failed`, `bootstrap_timeout` | Reported once; `uw-host` emits `stopped`, no restart loop (for the hook errors, each restart would set a new hook on the game's UI thread). |
+| `ping` not answered within 15 s | `error {request_id, code: "overlay_not_responding"}`; a `pong` that comes later is discarded, so the command still gets exactly one reply. |
 | State lock not acquired within 100 ms (helper or overlay worker) | That command fails with `state_busy`. Game threads never wait. |
 | Lock returns `WAIT_ABANDONED` | Treated as acquired (the other side died holding it); the header is re-checked before use. |
 | Unknown type or bad message on the overlay pipe | `pipe_error`; the connection is dropped and the helper listens again. |
