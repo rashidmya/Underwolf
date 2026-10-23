@@ -78,7 +78,7 @@
 
 ## Task 1: Gate: the channel objects between two Wine processes
 
-The design's open risk ("Lock-free atomics on a Wine shared mapping across processes … not yet proven"). This task builds the real pieces minimally and proves them under plain Wine: the object names, the mask region and state block layouts (`uw-pipe-proto`), and the objects module (`uw-game-channel::objects`, `create` for the helper and `open` for the game). Two probe programs, examples in `uw-game-channel`, use the real module from two Wine processes in one prefix, as the helper and the game will: doorbell round trips through the state block, a lost-update check on the mask, the one-guard-per-thread rule of `Objects::lock` (the Win32 mutex is recursive, so a "held" flag returns `Busy` for a second guard), and an abandoned lock (the helper probe exits holding it with a broken header: the game probe must get it as acquired and see the header re-checked, design "Failures"). Nothing here is thrown away: the layouts and objects are what Tasks 6-9 use, and the probes stay as a Wine test. **If the gate fails, stop and report to the owner.**
+The design's open risk ("Lock-free atomics on a Wine shared mapping across processes … not yet proven"). This task builds the real pieces minimally and proves them under plain Wine: the object names, the mask region and state block layouts (`uw-pipe-proto`), and the objects module (`uw-game-channel::objects`, `create` for the helper and `open` for the game). Two probe programs, examples in `uw-game-channel`, use the real module from two Wine processes in one prefix, as the helper and the game will: doorbell round trips through the state block, a lost-update check on the mask, the one-guard-per-thread rule of `Objects::lock` (the Win32 mutex is recursive, so a "held" flag returns `Busy` for a second guard), and an abandoned lock (the helper probe exits holding it with a broken header: the game probe must get it as acquired and see the header re-checked, design "Failures"). The last two phases wait for their bit in a bounded loop that ignores a wake-up with an empty mask: phase 2 can leave a doorbell signalled after its bit was already taken (a sender's `SetEvent` lands after the receiver's swap), as the real relay and worker also allow (both skip an empty take). Nothing here is thrown away: the layouts and objects are what Tasks 6-9 use, and the probes stay as a Wine test. **If the gate fails, stop and report to the owner.**
 
 **Files:**
 - Modify: `crates/uw-pipe-proto/src/lib.rs`, `crates/uw-pipe-proto/src/names.rs`
@@ -947,6 +947,24 @@ mod win {
     const ABANDON_BIT: u64 = 1 << 40;
     const WAIT_MS: u32 = 5000;
 
+    /// Wait for `bit` on `bell-game`, OR-ing what each wake-up takes. A wake-up that takes nothing
+    /// is a stale signal and is ignored: in phase 2 a sender's `SetEvent` can land after the
+    /// receiver already swapped its bit out, leaving the event signalled with an empty mask.
+    fn wait_for_bit(o: &Objects, bit: u64) -> u64 {
+        let mut seen = 0;
+        for _ in 0..10 {
+            // SAFETY: waits on the bell-game event handle `o` owns.
+            if unsafe { WaitForSingleObject(o.bell_game(), WAIT_MS) } != WAIT_OBJECT_0 {
+                break;
+            }
+            seen |= o.take_to_game();
+            if seen & bit != 0 {
+                break;
+            }
+        }
+        seen
+    }
+
     pub fn main() -> i32 {
         // SAFETY: no arguments.
         let pid = unsafe { GetCurrentProcessId() };
@@ -1052,8 +1070,7 @@ mod win {
         o.ring_host(READY_BIT);
 
         // 4. The helper probe exits holding the lock, with the header broken.
-        // SAFETY: waits on the bell-game event handle `o` owns.
-        if unsafe { WaitForSingleObject(o.bell_game(), WAIT_MS) } != WAIT_OBJECT_0 || o.take_to_game() != ABANDON_BIT {
+        if wait_for_bit(&o, ABANDON_BIT) != ABANDON_BIT {
             eprintln!("[game_probe] phase 4: no abandon bell");
             return 12;
         }
@@ -1121,6 +1138,24 @@ mod win {
     const READY_BIT: u64 = 1 << 41;
     const ABANDON_BIT: u64 = 1 << 40;
     const WAIT_MS: u32 = 5000;
+
+    /// Wait for `bit` on `bell-host`, OR-ing what each wake-up takes. A wake-up that takes nothing
+    /// is a stale signal and is ignored: in phase 2 a sender's `SetEvent` can land after this probe
+    /// already swapped its bit out, leaving the event signalled with an empty mask.
+    fn wait_for_bit(o: &Objects, bit: u64) -> u64 {
+        let mut seen = 0;
+        for _ in 0..10 {
+            // SAFETY: waits on the bell-host event handle `o` owns.
+            if unsafe { WaitForSingleObject(o.bell_host(), WAIT_MS) } != WAIT_OBJECT_0 {
+                break;
+            }
+            seen |= o.take_to_host();
+            if seen & bit != 0 {
+                break;
+            }
+        }
+        seen
+    }
 
     pub fn main() -> i32 {
         let Some(pid) = std::env::args().nth(1).and_then(|a| a.parse::<u32>().ok()) else {
@@ -1197,8 +1232,7 @@ mod win {
         }
 
         // 3. Abandon the lock, with the header broken.
-        // SAFETY: waits on the bell-host event handle `o` owns.
-        if unsafe { WaitForSingleObject(o.bell_host(), WAIT_MS) } != WAIT_OBJECT_0 || o.take_to_host() != READY_BIT {
+        if wait_for_bit(&o, READY_BIT) != READY_BIT {
             eprintln!("[helper_probe] phase 3: no ready bell");
             return 12;
         }
@@ -7832,8 +7866,8 @@ with:
 //! Finds the game and its Wine session, then hands over to `uw_host::host::Host`, which starts
 //! `uw-helper64.exe` in that session, restarts it if it dies, and keeps the overlay at the desired
 //! state (loaded, then every `set_state` it was given). JSON commands on stdin (`request_id`
-//! optional: assigned if absent; a given one travels as an id of the host's own and comes back on
-//! the reply), events on stdout, diagnostics on stderr. Exits 0 after
+//! optional: assigned if absent), events on stdout, diagnostics on stderr. The `request_id` you
+//! send comes back on your reply; the host's own replies may use the same number. Exits 0 after
 //! `stopped {"reason":"game_exited"}` and 1 after any other stop. Defaults: `deadlock.exe`;
 //! Proton from the prefix's `config_info`; helper and bootstrap from `~/.local/share/underwolf/`.
 //! Ctrl-C (SIGINT) or SIGTERM exits at once: the helper's stdin closes with us, so it exits too
@@ -7856,9 +7890,10 @@ fn main() {
     }
 }
 
-/// The request ids the user chose, by the host's id for the command (plan review M3). Every
-/// command goes to the host with an id from `HostHandle::next_request_id`, so a user's id can never
-/// collide with one the host took for its own reconcile commands; the reply gets the user's back.
+/// The request ids the user chose, by the id the host gave the command. Every command goes to the
+/// host with an id from `HostHandle::next_request_id`, never with the user's own, so a user's id
+/// cannot collide with one the host took for its reconcile commands (two pending commands would
+/// then share it in the host and the helper); the reply gets the user's id back.
 #[cfg(unix)]
 #[derive(Default)]
 struct UserIds(std::sync::Mutex<std::collections::HashMap<u32, u32>>);
@@ -7998,9 +8033,9 @@ mod tests {
     use super::UserIds;
     use uw_pipe_proto::jsonl::{Command, Event};
 
-    /// Catches plan review M3: a user's id equal to one the host assigned (here 1, the host's own
-    /// reconcile `load_overlay`) must not reach the helper, or two pending commands would share
-    /// it; the reply must still carry the user's id.
+    /// Catches a user's id reaching the host and the helper: if it equals one the host assigned
+    /// (here 1, the host's own reconcile `load_overlay`), two pending commands would share it. The
+    /// reply must still carry the user's id.
     #[test]
     fn a_users_id_never_reaches_the_helper_and_comes_back_on_the_reply() {
         let ids = UserIds::default();
