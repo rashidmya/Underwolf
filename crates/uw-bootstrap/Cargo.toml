@@ -6,10 +6,10 @@ license.workspace = true
 publish.workspace = true
 
 # The pinned in-game bootstrap: a thread-hook procedure Wine loads into the game. On the first
-# call it pins itself and starts one worker thread, then always `CallNextHookEx`. `DllMain` does
-# nothing (it also runs in the helper). Built as `uw_bootstrap64.dll` for x86_64-pc-windows-gnu.
-# Task 5 grows the worker to connect the pipe and load the overlay. `lib` (rlib) is needed so the
-# crate's `state` unit tests can link it on Linux; `cdylib` is the DLL.
+# call it pins itself and, if the pin held, starts one worker thread, then always `CallNextHookEx`.
+# The worker connects the helper's pipe and loads the overlay. `DllMain` does nothing (it also runs
+# in the helper). Built as `uw_bootstrap64.dll` for x86_64-pc-windows-gnu. `lib` (rlib) is needed
+# so the crate's `state` unit tests can link it on Linux; `cdylib` is the DLL.
 [lib]
 name = "uw_bootstrap64"
 crate-type = ["lib", "cdylib"]

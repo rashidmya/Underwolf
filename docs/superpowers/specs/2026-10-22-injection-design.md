@@ -59,9 +59,12 @@ Linux: uw-inject ──spawns with the game's wine──▶ uw-helper64.exe (Win
 4. **Hook (helper).** Take `Local\underwolf-helper-<pid>` (a second helper for the same game exits
    with `already_running`). Create the pipe server first, then `LoadLibraryW` the bootstrap into
    the helper itself (to get its module handle and hook procedure address), call
-   `SetWindowsHookExW(WH_GETMESSAGE, proc, module, ui_thread)`, and post a few `WM_NULL` messages
-   to the UI thread (`PostThreadMessageW`) so its next `GetMessage`/`PeekMessage` runs the hook.
-   Wine then loads the bootstrap into the game and calls the procedure there.
+   `SetWindowsHookExW(WH_GETMESSAGE, proc, module, ui_thread)`, then wake the UI thread so its
+   message pump runs the hook: post a few `WM_NULL` messages to it (`PostThreadMessageW`, picked
+   up by its next `GetMessage`/`PeekMessage`) and send one `WM_NULL` to its main window
+   (`SendNotifyMessageW`), because the fallback `WH_CALLWNDPROC` fires only on sent messages. Both
+   are standard no-op messages, delivered by the game's own pump; the helper repeats them every
+   500 ms while it waits. Wine then loads the bootstrap into the game and calls the procedure there.
 5. **Bootstrap start (game process, game's UI thread).** On the first call only (atomic flag):
    pin the module (`GetModuleHandleExW(FROM_ADDRESS | PIN)`), start one worker thread, then
    `CallNextHookEx` and return. Every later call is just `CallNextHookEx`. Nothing else runs on the
