@@ -287,3 +287,20 @@ for the host and the Windows target.
   (`version_mismatch` says so).
 - Splitting `uw-helper64.rs` touches plan 1's reviewed code; plan 1's Wine suite must stay green.
 - Proton: only Proton 11.0 tested.
+
+## Live check (owner)
+
+2026-10-23, Deadlock ClientVersion 6819, Proton 11.0, Hideout, a fresh game session. **Pass.**
+
+- Connect: `[uw-helper64] hooked WH_GETMESSAGE thread=308`, then `bootstrap_connected`
+  (`overlay_loaded: false`), `status ok` "overlay started", `overlay_connected`
+  (`module_version: 1`), `state_set` seq 1, and `bell` `state_applied` with `applied_seq` 1.
+- Edit mode on, then off: `state_set` seq 2 and 3, each answered by `state_applied` with the same
+  `applied_seq`. `ping` got `pong` with `seen_seq` 3. The test overlay's state file read
+  `seq=3 edit_mode=0 visible=1`.
+- Helper killed: back after 2 s. `helper_restarted` attempt 1, then `bootstrap_connected`
+  (`overlay_loaded: true`, with `overlay_path`), `overlay_connected`, and the reconciled
+  `state_set` with seq 3, which was unchanged, so no bell. `pong` with `seen_seq` 3. There was
+  one `status` event in total (no second load), and the new helper skipped the hook.
+- Stop: SIGTERM to `uw-inject`; the helper exited because its stdin closed.
+- The game process (pid 1641867) kept running throughout. The owner saw no hitch.
