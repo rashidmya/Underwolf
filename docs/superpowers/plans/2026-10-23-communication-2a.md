@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust (edition 2024, rustc 1.96.1). Targets `x86_64-unknown-linux-gnu` (host crates, all unit tests) and `x86_64-pc-windows-gnu` (helper, bootstrap, `uw-game-channel`, test overlay, test game). `windows-sys = "0.61.2"`. `serde`/`serde_json`, `libc`. Wine tests: system Wine 11.20 (`/usr/bin/wine`) under `xvfb-run -a`, `--test-threads=1`, each run bounded by `timeout`.
 
-**Base:** `main` at `c683b7d` (plan 1 merged with its final-review fixes). Every snippet below was written against the code in `crates/` now, and every task was built and run in a scratch clone before this plan was written: unit tests, host and Windows clippy, and the Wine suites (gate 1, helper 13, `uw-inject` 2), twice, with no processes or prefixes left behind. The counts in the expected output come from that run.
+**Base:** `main` at `2673388`: `crates/` as plan 1 left it (`c683b7d`, with its final-review fixes) and the design with the owner's decisions after the plan review (a `ping` timeout, `overlay_not_responding`; `hook_failed` and `bootstrap_timeout` stop `uw-host`). Every snippet below was written against the code in `crates/` now, and every task was built and run in a scratch clone before this plan was written: unit tests and host and Windows clippy at every task, and the Wine suites (gate 1, helper 14, `uw-inject` 2), twice on the final tree, with no processes or prefixes left behind. The counts in the expected output come from that run.
 
 ---
 
@@ -21,6 +21,8 @@
   Plan 1's names (pipes, Toolhelp, hooks) are unchanged.
 - **`AtomicU64::from_ptr`** is stable since Rust 1.75, so the mask words are plain `AtomicU64`s on the mapped view (offsets 0 and 8 of a page-aligned view are 8-byte aligned).
 - **Cross-process atomics on a Wine mapping** (the design's open risk) are what Task 1 proves. In the planner's scratch run under Wine 11.20 the gate passed: 200 doorbell round trips and 2 × 2000 lost-update sends, with no loss. Making the masks non-atomic (load, yield, store) made it fail at once (`lost-update check stalled`). Task 1 still runs it first, as the gate.
+- **Wine reports an abandoned mutex.** A process that exits holding the state lock leaves it abandoned: the next waiter gets `WAIT_ABANDONED` (the gate's last phase checks this; with the header re-check removed it fails). Win32 mutexes are recursive, so `Objects::lock` keeps a "held" flag to hand out one guard at a time.
+- **`ERROR_MORE_DATA` (234)** is what a message-mode read returns for a message larger than the buffer; the pipe server reports it as an oversized message (`pipe_error`).
 - **`read -r`** in the fake-helper `sh` scripts (Task 4): plain `read` turns `\\` into `\` and would mangle the JSON.
 
 ## File map
@@ -38,7 +40,7 @@
 | `crates/uw-game-channel/examples/{game,helper}_probe.rs` | new, Windows | The gate's two probe programs |
 | `crates/uw-game-channel/tests/wine_objects.rs` | new, ignored | The gate: both probes in one Wine prefix |
 | `crates/uw-helper/src/decide.rs` | lib | + `create_channel` before `create_pipe`, `ChannelError`, `Outcome::ChannelFailed`, event mapping changes |
-| `crates/uw-helper/src/pending.rs` | new | `load_overlay` requests awaiting `status` (late replies discarded) |
+| `crates/uw-helper/src/pending.rs` | new | Requests awaiting their reply, with deadlines: `load_overlay` (`status`) and `ping` (`pong`); late replies discarded |
 | `crates/uw-helper/src/bin/uw-helper64/main.rs` | bin, Windows | Arguments, stdin reader start, `decide::run`, hand-over to the relay |
 | `crates/uw-helper/src/bin/uw-helper64/win32.rs` | bin, Windows | The real `Win32` (moved from plan 1's single file) + `Channel` (objects and overlay pipe) |
 | `crates/uw-helper/src/bin/uw-helper64/pipe_server.rs` | bin, Windows | One overlapped pipe server for both pipes (`poll`, `accept_hello`, `write`) |
@@ -47,7 +49,7 @@
 | `crates/uw-helper/tests/{decide,pending,wine_e2e}.rs` | tests | Fake-`Win32` logic; pending; the helper-level Wine scenarios |
 | `crates/uw-host/src/{lib,discovery,driver,supervisor,host}.rs` | new, Linux | Discovery (moved), desired state and reconcile, the supervisor state machine, the process runtime |
 | `crates/uw-host/tests/{cli,discovery,driver,supervisor,host}.rs` | tests | Moved discovery tests + Task 3 N1, the supervisor against a scripted fake helper, the runtime against `sh` fake helpers |
-| `crates/uw-inject/src/bin/uw-inject.rs` | bin, Linux | Thin CLI on `uw-host` (its lib, `discovery.rs` and `driver.rs` move out) |
+| `crates/uw-inject/src/bin/uw-inject.rs` | bin, Linux | Thin CLI on `uw-host` (its lib, `discovery.rs` and `driver.rs` move out); maps user request ids to the host's and back (`UserIds`, unit-tested in the bin) |
 | `crates/uw-inject/tests/wine_e2e.rs` | test, ignored | Plan 1's chain test + the helper-restart scenario |
 | `crates/uw-test-overlay/src/lib.rs` | test DLL | Starts the channel; writes `uw-test-state-<pid>.txt` and acknowledges each bell; optional slow start |
 | `crates/uw-test-game/src/main.rs` | test exe | + `--bad-state-block` |
@@ -55,13 +57,15 @@
 ## Decisions the design leaves open (reviewers: check these)
 
 - **One objects module, two constructors.** The objects' Win32 code lives once, in `uw-game-channel::objects` (as Spike 3's producer and consumer shared `gep-channel/src/win.rs`): `Objects::create` is called only by the helper, `Objects::open` only by the game. The helper's "objects" job (design code layout) is `win32::Channel`, which creates and holds them. Both helper pipes use one `PipeServer` (`pipe_server.rs`).
-- **Error codes the design does not name.** `bootstrap_not_connected` (`load_overlay` with no bootstrap, the twin of the design's `overlay_not_connected`); `channel_failed` (an object or the overlay pipe could not be created; helper-local like plan 1's `pipe_error`); `helper_start_failed` (`uw-host` could not spawn the helper; stops the host). A command still pending when its helper dies is answered with the same `*_not_connected` code, so every command gets exactly one reply.
+- **Error codes.** Beyond the design's first draft: `bootstrap_not_connected` (`load_overlay` with no bootstrap, the twin of `overlay_not_connected`); `channel_failed` (an object or the overlay pipe could not be created; helper-local like plan 1's `pipe_error`); `helper_start_failed` (`uw-host` could not spawn the helper; stops the host); and the owner's `overlay_not_responding`. The design's error-code list now names them all. A command still pending when its helper dies is answered with the same `*_not_connected` code, and a `ping` without its `pong` in time with `overlay_not_responding`, so every command gets exactly one reply.
+- **Commands before the connect are refused, not queued.** The stdin reader runs from the start, so commands can arrive while the helper still hooks; right after `decide::run` returns, before `bootstrap_connected` goes out, the helper answers every queued command (`bootstrap_not_connected`, `overlay_not_connected`). `uw-host`'s reconcile commands, sent in answer to `bootstrap_connected`, are not affected.
+- **User request ids are mapped.** `uw-inject` sends every command with an id from the host's counter and puts the user's own id back on the reply, so a user's id can never collide with one the host took for its reconcile commands.
 - **Desired state default:** overlay visible, not in edit mode (`Desired::new`). The first `overlay_connected` therefore rings `show`.
 - **`set_state` needs the overlay** (it is one of "the commands that need the overlay"): with none connected it fails with `overlay_not_connected`, and the desired state is pushed on the next `overlay_connected`.
 - **A bell is not a command.** If the state lock is busy when a bell is read (helper or worker), the bits are put back and the bell rung again, so the next pass retries; only `set_state` fails with `state_busy`.
 - **The worker keeps the objects and `seen_seq` across reconnects** and drops the old objects only after the new ones are open, so the game holds the state block across a helper restart (the design's `ERROR_ALREADY_EXISTS` path) and `seq` keeps counting.
 - **`uw-inject`'s stdin closing does not stop it** (plan 1 usage without stdin keeps working); SIGINT/SIGTERM `_exit` at once and the helper exits on its own because its stdin closes (no kill).
-- **Test aids:** the gate probes (examples), `UW_STATUS_TIMEOUT_MS` (helper, like plan 1's `UW_*_TIMEOUT_MS`), `UW_TEST_OVERLAY_START_DELAY_MS` and the state file (test overlay). The state file's stem `uw-test-state-` is not `uw-test-overlay-`, so plan 1's single-marker checks still hold.
+- **Test aids:** the gate probes (examples), `UW_STATUS_TIMEOUT_MS` and `UW_PING_TIMEOUT_MS` (helper, like plan 1's `UW_*_TIMEOUT_MS`), `UW_TEST_OVERLAY_START_DELAY_MS`, `UW_TEST_OVERLAY_BELL_DELAY_MS` and the state file (test overlay). The state file's stem `uw-test-state-` is not `uw-test-overlay-`, so plan 1's single-marker checks still hold.
 
 ## Conventions for every task
 
@@ -74,7 +78,7 @@
 
 ## Task 1: Gate: the channel objects between two Wine processes
 
-The design's open risk ("Lock-free atomics on a Wine shared mapping across processes … not yet proven"). This task builds the real pieces minimally and proves them under plain Wine: the object names, the mask region and state block layouts (`uw-pipe-proto`), and the objects module (`uw-game-channel::objects`, `create` for the helper and `open` for the game). Two probe programs, examples in `uw-game-channel`, use the real module from two Wine processes in one prefix, as the helper and the game will. Nothing here is thrown away: the layouts and objects are what Tasks 6-9 use, and the probes stay as a Wine test. **If the gate fails, stop and report to the owner.**
+The design's open risk ("Lock-free atomics on a Wine shared mapping across processes … not yet proven"). This task builds the real pieces minimally and proves them under plain Wine: the object names, the mask region and state block layouts (`uw-pipe-proto`), and the objects module (`uw-game-channel::objects`, `create` for the helper and `open` for the game). Two probe programs, examples in `uw-game-channel`, use the real module from two Wine processes in one prefix, as the helper and the game will: doorbell round trips through the state block, a lost-update check on the mask, the one-guard-per-thread rule of `Objects::lock` (the Win32 mutex is recursive, so a "held" flag returns `Busy` for a second guard), and an abandoned lock (the helper probe exits holding it with a broken header: the game probe must get it as acquired and see the header re-checked, design "Failures"). Nothing here is thrown away: the layouts and objects are what Tasks 6-9 use, and the probes stay as a Wine test. **If the gate fails, stop and report to the owner.**
 
 **Files:**
 - Modify: `crates/uw-pipe-proto/src/lib.rs`, `crates/uw-pipe-proto/src/names.rs`
@@ -511,7 +515,7 @@ pub mod objects;
 //! through `StateGuard`, which holds the state lock.
 
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use uw_pipe_proto::bells::{MASK_REGION_SIZE, TO_GAME_OFFSET, TO_HOST_OFFSET};
 use uw_pipe_proto::names::{bell_game_name, bell_host_name, bells_name, state_lock_name, state_name};
@@ -574,7 +578,8 @@ fn win32(call: &str, name: &str) -> ObjectsError {
 /// Why `Objects::lock` did not return a guard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockError {
-    /// Not acquired within the timeout (design: `state_busy`).
+    /// Not acquired within the timeout (design: `state_busy`), or this thread already holds a
+    /// `StateGuard` from the same `Objects`.
     Busy,
     /// Acquired from an owner that died holding it (`WAIT_ABANDONED`), and the header no longer
     /// checks out. The lock is released again.
@@ -642,6 +647,9 @@ pub struct Objects {
     lock: Handle,
     _state_mapping: Handle,
     state: View,
+    /// A `StateGuard` is alive. The Win32 mutex is recursive, so without this a second `lock` on
+    /// the thread that holds it would hand out a second guard (two aliasing `bytes_mut`).
+    held: AtomicBool,
 }
 
 // SAFETY: kernel handles may be used from any thread; the masks are only touched through
@@ -733,6 +741,7 @@ impl Objects {
             lock,
             _state_mapping: state_mapping,
             state,
+            held: AtomicBool::new(false),
         };
         if existed {
             let g = o.lock_raw(LOCK_TIMEOUT_MS).ok_or(ObjectsError::Busy)?;
@@ -762,6 +771,7 @@ impl Objects {
             lock,
             _state_mapping: state_mapping,
             state,
+            held: AtomicBool::new(false),
         };
         {
             let g = o.lock(LOCK_TIMEOUT_MS)?;
@@ -815,14 +825,14 @@ impl Objects {
 
     /// Take the state lock within `timeout_ms` (0 for game threads other than the worker). A lock
     /// whose owner died holding it counts as acquired, after the header is re-checked (design
-    /// "Failures").
+    /// "Failures"). One guard at a time: while this thread holds one, `lock` returns `Busy`.
     pub fn lock(&self, timeout_ms: u32) -> Result<StateGuard<'_>, LockError> {
         // SAFETY: waits on our mutex handle.
         let r = unsafe { WaitForSingleObject(self.lock.0, timeout_ms) };
         match r {
-            WAIT_OBJECT_0 => Ok(StateGuard { o: self, _not_send: PhantomData }),
+            WAIT_OBJECT_0 => self.guard(),
             WAIT_ABANDONED => {
-                let g = StateGuard { o: self, _not_send: PhantomData };
+                let g = self.guard()?;
                 match state::check_header(g.bytes()) {
                     Ok(()) => Ok(g),
                     Err(h) => Err(LockError::BadHeader(h)), // `g` drops here: released
@@ -836,7 +846,18 @@ impl Objects {
     fn lock_raw(&self, timeout_ms: u32) -> Option<StateGuard<'_>> {
         // SAFETY: waits on our mutex handle.
         let r = unsafe { WaitForSingleObject(self.lock.0, timeout_ms) };
-        (r == WAIT_OBJECT_0 || r == WAIT_ABANDONED).then_some(StateGuard { o: self, _not_send: PhantomData })
+        if r == WAIT_OBJECT_0 || r == WAIT_ABANDONED { self.guard().ok() } else { None }
+    }
+
+    /// The mutex was just acquired: hand out the one guard, or undo a recursive acquire.
+    fn guard(&self) -> Result<StateGuard<'_>, LockError> {
+        if self.held.swap(true, Ordering::Acquire) {
+            // This thread already holds a guard (only the owner can acquire a held mutex).
+            // SAFETY: releases the extra, recursive acquisition made just now.
+            unsafe { ReleaseMutex(self.lock.0) };
+            return Err(LockError::Busy);
+        }
+        Ok(StateGuard { o: self, _not_send: PhantomData })
     }
 }
 
@@ -862,6 +883,8 @@ impl StateGuard<'_> {
 
 impl Drop for StateGuard<'_> {
     fn drop(&mut self) {
+        // Clear the flag before the release, so the next owner finds it clear.
+        self.o.held.store(false, Ordering::Release);
         // SAFETY: releases the mutex this thread acquired for this guard.
         unsafe { ReleaseMutex(self.o.lock.0) };
     }
@@ -873,15 +896,20 @@ impl Drop for StateGuard<'_> {
 `crates/uw-game-channel/examples/game_probe.rs` (complete file):
 
 ```rust
-//! Gate probe, game side (plan 2a Task 1). Run under Wine next to `helper_probe`, in the same
-//! prefix: it prints `pid <windows pid>`, opens the objects the helper probe creates for that pid
-//! (`Objects::open`, as the in-game worker will), then
+//! Gate probe, game side. Run under Wine next to `helper_probe`, in the same prefix: it prints
+//! `pid <windows pid>`, opens the objects the helper probe creates for that pid (`Objects::open`,
+//! as the in-game worker will), then
 //!   1. answers `ROUNDS` doorbell round trips: each `bell-game` must carry the round's bit, the
 //!      state block (read under the lock) the helper's new `edit_mode` and `seq`; it writes
 //!      `applied_seq` and rings `state_applied`;
 //!   2. runs a lost-update check: two threads OR their own bit into `to_host` at the same time,
 //!      each again only after the helper acknowledged the last one. A bit lost by a non-atomic OR
-//!      or swap is never acknowledged, so its thread times out.
+//!      or swap is never acknowledged, so its thread times out;
+//!   3. checks that a second `lock` on the thread that holds a guard is `Busy` (the Win32 mutex is
+//!      recursive), then rings `READY_BIT`;
+//!   4. waits for the helper probe to exit while it holds the lock with a broken header: the next
+//!      `lock` must get the abandoned mutex as acquired and re-check the header (`BadHeader`), and
+//!      the one after it, a plain acquire, must succeed.
 //!
 //! Exit 0 and `ok` on stdout when every check passed; otherwise a nonzero code and the reason.
 
@@ -904,9 +932,9 @@ mod win {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use uw_game_channel::objects::{Objects, LOCK_TIMEOUT_MS};
+    use uw_game_channel::objects::{LockError, Objects, LOCK_TIMEOUT_MS};
     use uw_pipe_proto::bells::{to_game, to_host};
-    use uw_pipe_proto::state;
+    use uw_pipe_proto::state::{self, HeaderError};
     use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
     use windows_sys::Win32::System::Threading::{GetCurrentProcessId, WaitForSingleObject};
 
@@ -914,6 +942,9 @@ mod win {
     const ROUNDS: u64 = 200;
     const SENDS: usize = 2000;
     const SENDER_BITS: [u64; 2] = [1 << 32, 1 << 33];
+    /// game -> helper: phase 3 is done. helper -> game: it holds the lock and is exiting.
+    const READY_BIT: u64 = 1 << 41;
+    const ABANDON_BIT: u64 = 1 << 40;
     const WAIT_MS: u32 = 5000;
 
     pub fn main() -> i32 {
@@ -1003,6 +1034,44 @@ mod win {
                 return 8;
             }
         }
+
+        // 3. One guard at a time per thread.
+        let Ok(g) = o.lock(LOCK_TIMEOUT_MS) else {
+            eprintln!("[game_probe] phase 3: state lock busy");
+            return 9;
+        };
+        if !matches!(o.lock(0), Err(LockError::Busy)) {
+            eprintln!("[game_probe] a second lock on the same thread was granted");
+            return 10;
+        }
+        drop(g);
+        if o.lock(0).is_err() {
+            eprintln!("[game_probe] the lock was not free after the guard dropped");
+            return 11;
+        }
+        o.ring_host(READY_BIT);
+
+        // 4. The helper probe exits holding the lock, with the header broken.
+        // SAFETY: waits on the bell-game event handle `o` owns.
+        if unsafe { WaitForSingleObject(o.bell_game(), WAIT_MS) } != WAIT_OBJECT_0 || o.take_to_game() != ABANDON_BIT {
+            eprintln!("[game_probe] phase 4: no abandon bell");
+            return 12;
+        }
+        match o.lock(WAIT_MS) {
+            Err(LockError::BadHeader(HeaderError::BadMagic)) => {}
+            other => {
+                eprintln!("[game_probe] abandoned lock: {:?}, want BadHeader(BadMagic)", other.map(|_| ()));
+                return 13;
+            }
+        }
+        // That lock released it again; a plain acquire does not re-check the header.
+        match o.lock(LOCK_TIMEOUT_MS) {
+            Ok(g) if state::check_header(g.bytes()) == Err(HeaderError::BadMagic) => {}
+            other => {
+                eprintln!("[game_probe] lock after the abandon: {:?}", other.map(|_| ()));
+                return 14;
+            }
+        }
         println!("ok");
         0
     }
@@ -1012,13 +1081,15 @@ mod win {
 `crates/uw-game-channel/examples/helper_probe.rs` (complete file):
 
 ```rust
-//! Gate probe, helper side (plan 2a Task 1). `helper_probe <game windows pid>`, run under Wine in
-//! the prefix where `game_probe` runs. It creates the objects for that pid (`Objects::create`, as
-//! the helper will), then
+//! Gate probe, helper side. `helper_probe <game windows pid>`, run under Wine in the prefix where
+//! `game_probe` runs. It creates the objects for that pid (`Objects::create`, as the helper will),
+//! then
 //!   1. drives `ROUNDS` round trips: toggle `edit_mode` with `state::apply` under the lock, ring
 //!      the changed bit, wait for `state_applied`, and read back `applied_seq == seq`;
 //!   2. serves the lost-update check: swap `to_host`, count each sender's bit, acknowledge it.
-//!      Every send must be counted exactly once.
+//!      Every send must be counted exactly once;
+//!   3. once `game_probe` rings `READY_BIT`, takes the lock, breaks the header's magic, rings
+//!      `ABANDON_BIT` and exits without releasing the lock (the mutex is abandoned).
 //!
 //! Exit 0 and `ok` on stdout when every check passed; otherwise a nonzero code and the reason.
 
@@ -1035,6 +1106,8 @@ fn main() {
 
 #[cfg(windows)]
 mod win {
+    use std::io::Write;
+
     use uw_game_channel::objects::{Objects, LOCK_TIMEOUT_MS};
     use uw_pipe_proto::bells::{to_game, to_host};
     use uw_pipe_proto::state;
@@ -1045,6 +1118,8 @@ mod win {
     const ROUNDS: u64 = 200;
     const SENDS: usize = 2000;
     const SENDER_BITS: [u64; 2] = [1 << 32, 1 << 33];
+    const READY_BIT: u64 = 1 << 41;
+    const ABANDON_BIT: u64 = 1 << 40;
     const WAIT_MS: u32 = 5000;
 
     pub fn main() -> i32 {
@@ -1120,8 +1195,23 @@ mod win {
                 o.ring_game(ack);
             }
         }
+
+        // 3. Abandon the lock, with the header broken.
+        // SAFETY: waits on the bell-host event handle `o` owns.
+        if unsafe { WaitForSingleObject(o.bell_host(), WAIT_MS) } != WAIT_OBJECT_0 || o.take_to_host() != READY_BIT {
+            eprintln!("[helper_probe] phase 3: no ready bell");
+            return 12;
+        }
+        let Ok(mut g) = o.lock(LOCK_TIMEOUT_MS) else {
+            eprintln!("[helper_probe] phase 3: state lock busy");
+            return 13;
+        };
+        g.bytes_mut()[0] = b'X';
+        o.ring_game(ABANDON_BIT);
         println!("ok rounds={ROUNDS} sends={counts:?}");
-        0
+        let _ = std::io::stdout().flush();
+        // `exit` runs no destructors: `g` is never dropped, so the mutex is abandoned.
+        std::process::exit(0)
     }
 }
 ```
@@ -1133,8 +1223,9 @@ mod win {
 //! The plan 2a gate under plain Wine (system `/usr/bin/wine`, not Proton): two Wine processes in
 //! one scratch prefix share the channel objects. `game_probe.exe` opens them as the in-game worker
 //! will, `helper_probe.exe` creates them as the helper will; between them they prove the named
-//! events, the mask region's lock-free atomics (with a lost-update check) and the state block
-//! across processes. See the two examples for what each checks.
+//! events, the mask region's lock-free atomics (with a lost-update check), the state block, the
+//! one-guard rule, and an abandoned lock (taken as acquired, header re-checked) across processes.
+//! See the two examples for what each checks.
 //!
 //! Ignored by default (needs Wine and the Windows artifacts). Build and run:
 //!   cargo build --release --target x86_64-pc-windows-gnu -p uw-game-channel --examples
@@ -1221,7 +1312,9 @@ fn drain(child: &mut Child) -> String {
 }
 
 /// Catches the design's open risk: events, the mask atomics or the state block not shared
-/// between two Wine processes, a doorbell lost, or a bit lost to a non-atomic OR or swap.
+/// between two Wine processes, a doorbell lost, or a bit lost to a non-atomic OR or swap. Also
+/// catches a second guard on one thread, and an abandoned lock that is not taken as acquired or
+/// whose header is not re-checked (design "Failures").
 #[test]
 #[ignore = "needs Wine and the x86_64-pc-windows-gnu examples"]
 fn the_channel_objects_work_between_two_wine_processes() {
@@ -1281,7 +1374,7 @@ ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep; ls 
 ```
 Expected: `the_channel_objects_work_between_two_wine_processes ... ok`, `test result: ok. 1 passed` (about 7 s, most of it booting the prefix); the leftover check prints nothing.
 
-**If it fails, STOP.** Do not go on to Task 2: report to the owner that named events, the mask atomics or the state block do not work between two Wine processes, with the test's output (it prints both probes' stdout and stderr). The design's doorbell scheme depends on this.
+**If it fails, STOP.** Do not go on to Task 2: report to the owner that named events, the mask atomics, the state block or its lock do not work between two Wine processes as the design needs, with the test's output (it prints both probes' stdout and stderr). The design's doorbell scheme depends on this.
 
 - [ ] **Step 9: Commit**
 
@@ -1836,7 +1929,7 @@ git commit -m "channel: overlay pipe messages, the overlay pipe name and bit nam
 
 ## Task 3: JSON lines with request ids, the new commands and events
 
-Design "Linux ↔ helper (JSON lines)" and "Plan 1 items": every command carries a `request_id` that its one reply echoes; `set_state` and `ping`; `state_set`, `pong`, `overlay_connected`, `overlay_disconnected`, `bell`, `bootstrap_disconnected`, `game_exited` (now an event of its own, not an `error`); `bootstrap_connected` carries `overlay_path` (plan 1 final review M3); `uw-host`'s four events. The change ripples into plan 1's users, which are updated minimally here so that plan 1's behaviour and both Wine suites still hold:
+Design "Linux ↔ helper (JSON lines)" and "Plan 1 items": every command carries a `request_id` that its one reply echoes; `set_state` and `ping`; `state_set`, `pong`, `overlay_connected`, `overlay_disconnected`, `bell`, `bootstrap_disconnected`, `game_exited` (now an event of its own, not an `error`); `bootstrap_connected` carries `overlay_path` (plan 1 final review M3); `uw-host`'s four events; `Command::parse_with_id` (the CLI's stdin: the command always gets an id of the host's, the user's own id comes back to be put on the reply) and `Event::request_id`/`request_id_mut`. The change ripples into plan 1's users, which are updated minimally here so that plan 1's behaviour and both Wine suites still hold:
 - `decide`: the new `bootstrap_connected` and `game_exited` mapping.
 - The helper relay: the command's `request_id` is the pipe request id (the bootstrap already echoes it); a failed write is reported as `bootstrap_disconnected` with a `bootstrap_not_connected` reply, not `game_exited` (design "Plan 1 items"); `set_state` and `ping` fail with `overlay_not_connected` (the overlay pipe comes in Task 6-7).
 - `uw-inject`'s `Driver`: numbers its `load_overlay`.
@@ -1881,19 +1974,34 @@ fn a_command_without_a_request_id_is_rejected_by_parse() {
     assert!(Command::parse(r#"{"cmd":"ping"}"#).is_err());
 }
 
-/// Catches `uw-inject` dropping a given id or failing to assign a missing one.
+/// Catches `uw-inject` sending a user's id on to the helper (it could collide with an id the host
+/// assigned), losing it (the reply could not carry it back), or accepting one that is not a u32.
 #[test]
-fn parse_assigning_fills_only_a_missing_request_id() {
-    let mut calls = 0;
-    let c = Command::parse_assigning(r#"{"cmd":"ping"}"#, || {
-        calls += 1;
-        41
-    })
-    .unwrap();
-    assert_eq!((c, calls), (Command::Ping { request_id: 41 }, 1));
-    let c = Command::parse_assigning(r#"{"cmd":"ping","request_id":7}"#, || panic!("not needed")).unwrap();
-    assert_eq!(c, Command::Ping { request_id: 7 });
-    assert!(Command::parse_assigning("not json", || 1).is_err());
+fn parse_with_id_gives_the_host_id_and_returns_the_users() {
+    assert_eq!(Command::parse_with_id(r#"{"cmd":"ping"}"#, 41).unwrap(), (Command::Ping { request_id: 41 }, None));
+    assert_eq!(
+        Command::parse_with_id(r#"{"cmd":"ping","request_id":7}"#, 41).unwrap(),
+        (Command::Ping { request_id: 41 }, Some(7))
+    );
+    assert!(Command::parse_with_id(r#"{"cmd":"ping","request_id":-1}"#, 41).is_err());
+    assert!(Command::parse_with_id("not json", 41).is_err());
+}
+
+/// Catches a reply whose id cannot be read or replaced, or an unsolicited event taken for a reply.
+#[test]
+fn replies_expose_their_request_id() {
+    let mut e = Event::Pong { request_id: 3, seen_seq: 0 };
+    *e.request_id_mut().unwrap() = 9;
+    assert_eq!(e, Event::Pong { request_id: 9, seen_seq: 0 });
+    let mut e = Event::reply_error(4, "state_busy");
+    *e.request_id_mut().unwrap() = 8;
+    assert_eq!(e, Event::reply_error(8, "state_busy"));
+    assert_eq!(Event::StateSet { request_id: 5, seq: 1 }.request_id(), Some(5));
+    let status = Event::Status { request_id: 6, code: "ok".into(), detail: 0, message: String::new() };
+    assert_eq!(status.request_id(), Some(6));
+    assert_eq!(Event::error("no_window").request_id(), None);
+    assert!(Event::error("no_window").request_id_mut().is_none());
+    assert_eq!(Event::GameExited.request_id(), None);
 }
 
 #[test]
@@ -1961,7 +2069,7 @@ fn unknown_command_is_an_error() {
 - [ ] **Step 2: Run them to see them fail**
 
 Run: `cargo test -p uw-pipe-proto --test jsonl`
-Expected: does not compile: `Command::LoadOverlay` has no field `request_id`, no variants `SetState`, `Ping`, `StateSet`, `Pong`, …, no `reply_error`, `request_id()` or `parse_assigning`.
+Expected: does not compile: `Command::LoadOverlay` has no field `request_id`, no variants `SetState`, `Ping`, `StateSet`, `Pong`, …, no `reply_error`, `request_id()`, `parse_with_id` or `request_id_mut`.
 
 - [ ] **Step 3: Replace `jsonl.rs` and update the crate docs**
 
@@ -2051,6 +2159,29 @@ impl Event {
         Event::Error { request_id: Some(request_id), code: code.to_string(), detail: None }
     }
 
+    /// The `request_id` a reply answers (`status`, `state_set`, `pong`, or an `error` that
+    /// answers a command); `None` for an unsolicited event.
+    pub fn request_id(&self) -> Option<u32> {
+        match self {
+            Event::Status { request_id, .. } | Event::StateSet { request_id, .. } | Event::Pong { request_id, .. } => {
+                Some(*request_id)
+            }
+            Event::Error { request_id, .. } => *request_id,
+            _ => None,
+        }
+    }
+
+    /// As `request_id`, to put another id on the reply (the `uw-inject` CLI maps its user's ids).
+    pub fn request_id_mut(&mut self) -> Option<&mut u32> {
+        match self {
+            Event::Status { request_id, .. } | Event::StateSet { request_id, .. } | Event::Pong { request_id, .. } => {
+                Some(request_id)
+            }
+            Event::Error { request_id, .. } => request_id.as_mut(),
+            _ => None,
+        }
+    }
+
     pub fn to_line(&self) -> String {
         serde_json::to_string(self).expect("Event serializes")
     }
@@ -2075,16 +2206,20 @@ impl Command {
         serde_json::from_str(line.trim())
     }
 
-    /// Parse a command whose `request_id` may be missing (the `uw-inject` CLI's stdin, design:
-    /// "request ids optional, assigned if absent"); a missing one comes from `assign`.
-    pub fn parse_assigning(line: &str, assign: impl FnOnce() -> u32) -> Result<Command, serde_json::Error> {
+    /// Parse a line of the `uw-inject` CLI's stdin, where `request_id` is optional (design:
+    /// "request ids optional, assigned if absent"). The command always gets `id`, an id the host
+    /// assigned, so a user's id can never collide with one of the host's own; the user's id, if the
+    /// line had one, is returned so the reply can carry it back.
+    pub fn parse_with_id(line: &str, id: u32) -> Result<(Command, Option<u32>), serde_json::Error> {
         let mut v: serde_json::Value = serde_json::from_str(line.trim())?;
-        if let Some(obj) = v.as_object_mut()
-            && !obj.contains_key("request_id")
-        {
-            obj.insert("request_id".into(), assign().into());
+        let mut user = None;
+        if let Some(obj) = v.as_object_mut() {
+            if let Some(given) = obj.get("request_id") {
+                user = Some(serde_json::from_value::<u32>(given.clone())?);
+            }
+            obj.insert("request_id".into(), id.into());
         }
-        serde_json::from_value(v)
+        Ok((serde_json::from_value(v)?, user))
     }
 }
 ```
@@ -2118,7 +2253,7 @@ pub mod bells;
 
 
 Run: `cargo test -p uw-pipe-proto`
-Expected: names 2, `bells` 3, `jsonl` 7, `pipe` 19, `state` 5, all pass. (`cargo build -p uw-helper -p uw-inject` fails now; the next steps fix it.)
+Expected: names 2, `bells` 3, `jsonl` 8, `pipe` 19, `state` 5, all pass. (`cargo build -p uw-helper -p uw-inject` fails now; the next steps fix it.)
 
 - [ ] **Step 4: Update `decide` and its tests**
 
@@ -2226,6 +2361,9 @@ fn game_exited_maps_to_its_json_event() {
 }
 ```
 
+
+Run: `cargo test -p uw-helper --test decide`
+Expected: `27 passed` (the relay changes in Step 5 do not affect this: on Linux the bin's relay is not compiled, it is `cfg(windows)`).
 
 - [ ] **Step 5: Update the helper's relay**
 
@@ -2603,7 +2741,7 @@ git commit -m "channel: JSON lines with request ids, the new commands and events
 
 ## Task 4: `uw-host`: discovery moved, desired state, the supervisor, the runtime
 
-The new Linux library (design "Components and flow", "Failures"). Discovery and the helper launch move from `uw-inject` (with plan 1's Task 3 review N1: the two fixes get their own tests). `driver.rs` (moved) becomes the reconcile policy: a desired state (overlay path, `edit_mode`, `visible`), `load_overlay` when `bootstrap_connected` says none is loaded, a full `set_state` on every `overlay_connected`. `supervisor.rs` is a pure state machine on a millisecond clock (request ids, restarts after 1, 2, 4, 8 s then every 10 s with a reset after 60 s of uptime, the stop rules, `overlay_timeout`, `helper_protocol_error`), unit-tested against a scripted fake helper. `host.rs` runs it with real processes through a `Launch` trait; its tests use `sh` scripts as fake helpers. `uw-inject` loses its library and imports from `uw-host`; its CLI is rewritten on the runtime in Task 10.
+The new Linux library (design "Components and flow", "Failures"). Discovery and the helper launch move from `uw-inject` (with plan 1's Task 3 review N1: the two fixes get their own tests). `driver.rs` (moved) becomes the reconcile policy: a desired state (overlay path, `edit_mode`, `visible`), `load_overlay` when `bootstrap_connected` says none is loaded, a full `set_state` on every `overlay_connected`. `supervisor.rs` is a pure state machine on a millisecond clock (request ids, restarts after 1, 2, 4, 8 s then every 10 s with a reset after 60 s of uptime, the stop rules, `overlay_timeout`, `helper_protocol_error`), unit-tested against a scripted fake helper. The stop rule follows the owner's decision: `game_exited`, `already_running`, `version_mismatch`, `hook_failed`, `bootstrap_timeout` and a failed start stop the host; `no_window`, `channel_failed` and `pipe_error` (and any other exit) restart the helper. `host.rs` runs it with real processes through a `Launch` trait; its tests use `sh` scripts as fake helpers. `uw-inject` loses its library and imports from `uw-host`; its CLI is rewritten on the runtime in Task 10.
 
 **Files:**
 - Move: `crates/uw-inject/src/discovery.rs` → `crates/uw-host/src/discovery.rs`; `crates/uw-inject/src/driver.rs` → `crates/uw-host/src/driver.rs`; `crates/uw-inject/tests/discovery.rs` → `crates/uw-host/tests/discovery.rs`; `crates/uw-inject/tests/cli.rs` → `crates/uw-host/tests/cli.rs`
@@ -3016,8 +3154,8 @@ fn request_ids_are_shared_and_replies_clear_their_commands() {
     assert_eq!(f.user(set), vec![emit(Event::reply_error(3, "overlay_not_connected"))]);
 }
 
-/// Catches a wrong back-off (1, 2, 4, 8 s, then every 10 s) or a delay that never resets after a
-/// helper stayed up 60 s.
+/// Catches a wrong back-off (1, 2, 4, 8 s, then every 10 s), a delay that never resets after a
+/// helper stayed up 60 s, or one that resets earlier (or counts from the last exit, not the start).
 #[test]
 fn restarts_back_off_and_reset_after_a_minute_of_uptime() {
     let mut f = Fake::started();
@@ -3031,7 +3169,14 @@ fn restarts_back_off_and_reset_after_a_minute_of_uptime() {
         t += delay;
         assert_eq!(f.at(t), vec![emit(Event::HelperRestarted { attempt }), Action::StartHelper]);
     }
-    // This helper stays up a minute: the next delay is the first one again.
+    // This helper stays up 1 ms short of a minute: no reset, the delay stays at 10 s.
+    t += 59_999;
+    f.now = t;
+    assert_eq!(f.exits(), vec![]);
+    assert_eq!(f.sup.next_deadline(), Some(t + 10_000));
+    t += 10_000;
+    assert_eq!(f.at(t), vec![emit(Event::HelperRestarted { attempt: 7 }), Action::StartHelper]);
+    // This one stays up a minute: the next delay is the first one again.
     t += 60_000;
     f.now = t;
     assert_eq!(f.exits(), vec![]);
@@ -3078,14 +3223,17 @@ fn reconcile_after_reconnect_loads_only_when_needed_and_pushes_the_desired_state
     );
 }
 
-/// Catches a restart loop after `game_exited`, `already_running`, `version_mismatch` or a failed
-/// start (design: reported once, then `stopped`, no restart).
+/// Catches a restart loop after `game_exited`, `already_running`, `version_mismatch`,
+/// `hook_failed`, `bootstrap_timeout` or a failed start (design: reported once, then `stopped`,
+/// no restart).
 #[test]
 fn the_stop_rules_end_the_host_without_a_restart() {
     for (event, reason) in [
         (Event::GameExited, "game_exited"),
         (Event::error("already_running"), "already_running"),
         (Event::error("version_mismatch"), "version_mismatch"),
+        (Event::Error { request_id: None, code: "hook_failed".into(), detail: Some(1428) }, "hook_failed"),
+        (Event::error("bootstrap_timeout"), "bootstrap_timeout"),
     ] {
         let mut f = Fake::started();
         assert_eq!(
@@ -3108,14 +3256,16 @@ fn the_stop_rules_end_the_host_without_a_restart() {
     assert_eq!(f.sup.next_deadline(), None);
 }
 
-/// Catches any other helper failure stopping the host: the design restarts it.
+/// Catches the other helper failures stopping the host: the design restarts the helper.
 #[test]
 fn other_helper_errors_are_reported_and_the_helper_restarted() {
-    let mut f = Fake::started();
-    assert_eq!(f.says(Event::error("no_window")), vec![emit(Event::error("no_window"))]);
-    f.now = 100;
-    f.exits();
-    assert_eq!(f.at(1_100), vec![emit(Event::HelperRestarted { attempt: 1 }), Action::StartHelper]);
+    for code in ["no_window", "channel_failed", "pipe_error"] {
+        let mut f = Fake::started();
+        assert_eq!(f.says(Event::error(code)), vec![emit(Event::error(code))], "{code}");
+        f.now = 100;
+        f.exits();
+        assert_eq!(f.at(1_100), vec![emit(Event::HelperRestarted { attempt: 1 }), Action::StartHelper], "{code}");
+    }
 }
 
 /// Catches an unparseable helper line being dropped silently (plan 1 deferred minor).
@@ -3196,7 +3346,7 @@ fn a_fake_helper_is_driven_restarted_and_stopped() {
     let host = Host::start(
         Scripts(vec![
             // Connect, echo the first command back (not an event: a protocol error), then die.
-            r#"echo '{"event":"bootstrap_connected","overlay_loaded":false}'; read -r line; echo "got $line"; exit 1"#,
+            r#"echo '{"event":"bootstrap_connected","overlay_loaded":false}'; read -r line; printf 'got %s\n' "$line"; exit 1"#,
             // Report the game gone, then wait for stdin to close.
             r#"echo '{"event":"game_exited"}'; read -r line; exit 0"#,
         ]),
@@ -3335,8 +3485,8 @@ impl Driver {
 //!   or `overlay_not_connected` (`set_state`, `ping`) — no queueing while disconnected;
 //! - a helper that exits while the game runs is restarted after 1, 2, 4, 8 s, then every 10 s;
 //!   the delay resets once a helper has been up 60 s (`helper_restarted {attempt}`);
-//! - `game_exited`, `already_running`, `version_mismatch` and a failed start stop the host for
-//!   good (`stopped {reason}`), with no restart;
+//! - `game_exited`, `already_running`, `version_mismatch`, `hook_failed`, `bootstrap_timeout` and
+//!   a failed start stop the host for good (`stopped {reason}`), with no restart;
 //! - `status ok` without `overlay_connected` within 10 s is `overlay_timeout`;
 //! - a stdout line that is not an event is `helper_protocol_error {line}`;
 //! - after every (re)connect the `Driver` reconciles the desired state.
@@ -3353,6 +3503,9 @@ pub const RESTART_DELAYS_MS: [u64; 4] = [1_000, 2_000, 4_000, 8_000];
 pub const RESTART_DELAY_MAX_MS: u64 = 10_000;
 /// A helper up this long resets the restart delay to the first one.
 pub const UPTIME_RESET_MS: u64 = 60_000;
+/// Helper errors that stop the host instead of a restart (design "Failures"): a restart would
+/// only fail again, and for the hook errors would set a new hook on the game's UI thread.
+pub const STOP_CODES: [&str; 4] = ["already_running", "version_mismatch", "hook_failed", "bootstrap_timeout"];
 
 /// Something that happened to the host. Time passing is `Supervisor::tick`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3410,17 +3563,6 @@ fn not_connected(cmd: &Command) -> Event {
         Command::SetState { .. } | Command::Ping { .. } => "overlay_not_connected",
     };
     Event::reply_error(cmd.request_id(), code)
-}
-
-/// The request id an event answers, if it is a reply.
-fn reply_to(event: &Event) -> Option<u32> {
-    match event {
-        Event::Status { request_id, .. } | Event::StateSet { request_id, .. } | Event::Pong { request_id, .. } => {
-            Some(*request_id)
-        }
-        Event::Error { request_id, .. } => *request_id,
-        _ => None,
-    }
 }
 
 impl Supervisor {
@@ -3523,7 +3665,7 @@ impl Supervisor {
     }
 
     fn on_event(&mut self, event: Event, now: u64) -> Vec<Action> {
-        if let Some(id) = reply_to(&event) {
+        if let Some(id) = event.request_id() {
             self.pending.retain(|c| c.request_id() != id);
         }
         match &event {
@@ -3540,7 +3682,7 @@ impl Supervisor {
         let mut out = vec![Action::Emit(event.clone())];
         match &event {
             Event::GameExited => out.extend(self.stop("game_exited")),
-            Event::Error { code, .. } if code == "already_running" || code == "version_mismatch" => {
+            Event::Error { code, .. } if STOP_CODES.contains(&code.as_str()) => {
                 out.extend(self.stop(code));
             }
             _ if !self.is_stopped() => {
@@ -4718,7 +4860,7 @@ git commit -m "channel: split uw-helper64 by job (no behaviour change)"
 
 ## Task 6: The helper creates the channel before hooking, and exits when stdin closes
 
-Design flow step 2 ("The helper creates (in order) the doorbell events, the mask region, the state block, the overlay pipe, then the bootstrap pipe, and hooks") and "Failures" ("The helper exits when its stdin closes, in every phase"). `decide` gains `Win32::create_channel`, called right before `create_pipe` on both paths; a foreign state block is `version_mismatch` before any pipe or hook; another failure is `channel_failed`. The real helper creates `uw_game_channel::objects::Objects` and the overlay `PipeServer` (held in `win32::Channel`; served from Task 7, hence the temporary `allow(dead_code)`), and a stdin reader thread now runs from the start and exits the process when stdin closes.
+Design flow step 2 ("The helper creates (in order) the doorbell events, the mask region, the state block, the overlay pipe, then the bootstrap pipe, and hooks") and "Failures" ("The helper exits when its stdin closes, in every phase"). `decide` gains `Win32::create_channel`, called right before `create_pipe` on both paths; a foreign state block is `version_mismatch` before any pipe or hook; another failure is `channel_failed`. The real helper creates `uw_game_channel::objects::Objects` and the overlay `PipeServer` (held in `win32::Channel`; served from Task 7, hence the temporary `allow(dead_code)`), and a stdin reader thread now runs from the start and exits the process when stdin closes. Commands that arrive while the helper still hooks are not queued (design: "No queueing while disconnected"): right after `decide::run` returns, before `bootstrap_connected` goes out, `Commands::refuse_queued` answers each with `bootstrap_not_connected` (`load_overlay`) or `overlay_not_connected` (`set_state`, `ping`). Task 11's slow-start test checks it.
 
 **Files:**
 - Modify: `crates/uw-helper/src/decide.rs`, `crates/uw-helper/tests/decide.rs`, `crates/uw-helper/Cargo.toml`
@@ -5138,10 +5280,28 @@ uw-pipe-proto = { path = "../uw-pipe-proto" }
 use std::io::BufRead;
 use std::sync::mpsc::{channel, Receiver};
 
-use uw_pipe_proto::jsonl::Command;
+use uw_pipe_proto::jsonl::{Command, Event};
+
+use crate::relay::emit;
 
 pub(crate) struct Commands {
     pub(crate) rx: Receiver<Command>,
+}
+
+impl Commands {
+    /// Answer every command that came before the bootstrap connected, at once (design: no
+    /// queueing while disconnected): `load_overlay` needs the bootstrap, `set_state` and `ping`
+    /// the overlay. `main` calls this before `bootstrap_connected` goes out, so the host's
+    /// reconcile commands, sent in answer to it, reach the relay.
+    pub(crate) fn refuse_queued(&self) {
+        while let Ok(cmd) = self.rx.try_recv() {
+            let code = match cmd {
+                Command::LoadOverlay { .. } => "bootstrap_not_connected",
+                Command::SetState { .. } | Command::Ping { .. } => "overlay_not_connected",
+            };
+            emit(&Event::reply_error(cmd.request_id(), code));
+        }
+    }
 }
 
 pub(crate) fn spawn_stdin_reader() -> Commands {
@@ -5424,7 +5584,7 @@ with:
 ```
 
 
-In `crates/uw-helper/src/bin/uw-helper64/main.rs`, make these 4 edits, in order (each "replace" block is exact and occurs once):
+In `crates/uw-helper/src/bin/uw-helper64/main.rs`, make these 5 edits, in order (each "replace" block is exact and occurs once):
 
 1. Replace:
 
@@ -5490,6 +5650,25 @@ with:
 4. Replace:
 
 ```rust
+    };
+    let outcome = run(&mut w, &cfg);
+    relay::emit(&outcome.to_event());
+    match outcome {
+```
+
+with:
+
+```rust
+    };
+    let outcome = run(&mut w, &cfg);
+    commands.refuse_queued();
+    relay::emit(&outcome.to_event());
+    match outcome {
+```
+
+5. Replace:
+
+```rust
             let pid = w.pid;
             if let Some(pipe) = w.pipe.as_mut() {
                 relay::relay(pipe, pid);
@@ -5539,10 +5718,10 @@ git commit -m "channel: the helper creates the channel before hooking and exits 
 ## Task 7: The helper's relay loop over commands, `bell-host` and both pipes
 
 Design "Components and flow" (steps 3-6), "Threads" ("waits on its pipes and `bell-host` in one loop"), "Failures" and "Plan 1 items". After the bootstrap's first `hello`, one `WaitForMultipleObjects` loop serves:
-- **commands** (the stdin reader now signals an event): `load_overlay` to the bootstrap pipe, tracked in `Pending` until its `status` (a `status` whose id is not pending is discarded: plan 1 final review M2); `set_state` under the state lock (100 ms, else `state_busy`) with `state::apply`, then `ring_game` with the changed bits and `state_set`; `ping` to the overlay pipe, answered by its `pong`;
+- **commands** (the stdin reader now signals an event): `load_overlay` to the bootstrap pipe, tracked in `Pending` until its `status` (a `status` whose id is not pending is discarded: plan 1 final review M2); `set_state` under the state lock (100 ms, else `state_busy`) with `state::apply`, then `ring_game` with the changed bits and `state_set`; `ping` to the overlay pipe, answered by its `pong`, or after the ping timeout (15 s, `UW_PING_TIMEOUT_MS` in tests) by `overlay_not_responding`, its late `pong` discarded (owner decision D1; pings are a second `Pending`);
 - **`bell-host`**: swap `to_host`, read `applied_seq` under the lock, emit `bell`;
 - **the bootstrap pipe**: replies, its drop (`bootstrap_disconnected`; pending loads fail with `bootstrap_not_connected`) and its reconnect `hello` (`bootstrap_connected` again);
-- **the overlay pipe**: the first message must be a supported `overlay_hello` (`overlay_connected`, else `version_mismatch` or `pipe_error` and the connection is dropped), then `pong`s; an unknown type or bad message is `pipe_error` and the helper listens again; its drop is `overlay_disconnected`.
+- **the overlay pipe**: the first message must be a supported `overlay_hello` (`overlay_connected`, else `version_mismatch` or `pipe_error` and the connection is dropped), then `pong`s; an unknown type or bad message, an oversized one included (`PipeEvent::Oversized`, from `ERROR_MORE_DATA`), is `pipe_error` and the helper listens again; its drop is `overlay_disconnected`.
 
 `PipeServer` is rewritten around a non-blocking `poll` (one connect or read always pending on its event; writes on their own event), which also serves `decide`'s `wait_hello` slices.
 
@@ -5591,6 +5770,20 @@ fn requests_time_out_and_resolve_independently() {
     assert_eq!(p.drain(), vec![3, 4]);
     assert_eq!(p.next_deadline(), None);
 }
+
+/// Catches owner decision D1 breaking at the bookkeeping level: a ping past its deadline expires
+/// once (one `overlay_not_responding`), and its late `pong` is then discarded, while a ping still
+/// in time is answered.
+#[test]
+fn a_ping_past_its_deadline_expires_once_and_its_late_pong_is_discarded() {
+    let mut pings = Pending::new();
+    pings.add(10, 15_000);
+    pings.add(11, 30_000);
+    assert_eq!(pings.expire(15_000), vec![10]);
+    assert_eq!(pings.expire(15_001), Vec::<u32>::new(), "expired once");
+    assert!(!pings.take(10), "the late pong is discarded");
+    assert!(pings.take(11));
+}
 ```
 
 Run: `cargo test -p uw-helper --test pending`
@@ -5601,10 +5794,10 @@ Expected: does not compile: unresolved import `uw_helper::pending`.
 `crates/uw-helper/src/pending.rs` (complete file):
 
 ```rust
-//! `load_overlay` requests the relay sent to the bootstrap and is waiting on (design 2a "Plan 1
-//! items", late reply). Each has its own deadline; a `status` whose id is not pending (a late
-//! reply to a request that already timed out, or a stray one) is discarded, so the next request
-//! gets its own reply.
+//! Requests the relay sent and is waiting on: `load_overlay`s awaiting their `status` (design 2a
+//! "Plan 1 items", late reply) and `ping`s awaiting their `pong` (owner decision D1). Each has its
+//! own deadline; a reply whose id is not pending (a late reply to a request that already timed
+//! out, or a stray one) is discarded, so every command gets exactly one reply.
 
 #[derive(Debug, Default)]
 pub struct Pending {
@@ -5660,7 +5853,7 @@ pub mod pending;
 ```
 
 Run: `cargo test -p uw-helper --test pending --test decide`
-Expected: `pending` 2, `decide` 30, all pass.
+Expected: `pending` 3, `decide` 30, all pass.
 
 - [ ] **Step 3: Replace the pipe server, the stdin reader and the relay**
 
@@ -5679,8 +5872,8 @@ use uw_helper::decide::{hello_wait_from_bytes, HelloWait};
 use uw_pipe_proto::pipe::{HEADER_LEN, MAX_PAYLOAD};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, HANDLE,
-    INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+    CloseHandle, GetLastError, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, ERROR_MORE_DATA, ERROR_PIPE_CONNECTED,
+    HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
@@ -5695,7 +5888,7 @@ use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED
 
 use crate::{wait_ms, wide};
 
-/// How long one pipe write may take, and the default `status` timeout.
+/// How long one pipe write may take, and the default `status` and `ping` timeouts.
 pub(crate) const RELAY_TIMEOUT_MS: u64 = 15_000;
 
 pub(crate) fn now_ms() -> u64 {
@@ -5710,8 +5903,11 @@ pub(crate) enum PipeEvent {
     Connected,
     /// One whole message from the client.
     Message(Vec<u8>),
-    /// The client left, or sent an oversized message; the server listens again.
+    /// The client left; the server listens again.
     Disconnected,
+    /// The client sent a message over the frame limit (header + `MAX_PAYLOAD`): a bad message
+    /// (design: `pipe_error`). The client is dropped and the server listens again.
+    Oversized,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5724,12 +5920,17 @@ enum State {
     Reading,
     /// A read failed to start: the client is gone; the next `poll` reports `Disconnected`.
     Broken,
+    /// A read completed at once with more data than `buf` holds; the next `poll` reports
+    /// `Oversized`.
+    Overflowed,
 }
 
 /// How the operation on `ov` stands.
 enum Io {
     Pending,
     Done(u32),
+    /// A read whose message is larger than `buf` (`ERROR_MORE_DATA`).
+    TooLarge,
     Failed,
 }
 
@@ -5838,7 +6039,7 @@ impl PipeServer {
                         return Some(PipeEvent::Connected);
                     }
                     // The client connected and left already: accept again.
-                    Io::Failed => self.reset(),
+                    Io::TooLarge | Io::Failed => self.reset(),
                 },
                 State::Reading => match self.result() {
                     Io::Pending => return None,
@@ -5847,7 +6048,11 @@ impl PipeServer {
                         self.start_read();
                         return Some(PipeEvent::Message(msg));
                     }
-                    // A zero-length message, a closed client, or an oversized message.
+                    Io::TooLarge => {
+                        self.reset();
+                        return Some(PipeEvent::Oversized);
+                    }
+                    // A zero-length message or a closed client.
                     Io::Done(_) | Io::Failed => {
                         self.reset();
                         return Some(PipeEvent::Disconnected);
@@ -5856,6 +6061,10 @@ impl PipeServer {
                 State::Broken => {
                     self.reset();
                     return Some(PipeEvent::Disconnected);
+                }
+                State::Overflowed => {
+                    self.reset();
+                    return Some(PipeEvent::Oversized);
                 }
             }
         }
@@ -5884,7 +6093,8 @@ impl PipeServer {
         loop {
             match self.wait(deadline.saturating_sub(now_ms())) {
                 Some(PipeEvent::Message(bytes)) => return hello_wait_from_bytes(&bytes),
-                Some(PipeEvent::Connected | PipeEvent::Disconnected) => continue,
+                // A client that left, or sent an oversized first message, is dropped: accept again.
+                Some(PipeEvent::Connected | PipeEvent::Disconnected | PipeEvent::Oversized) => continue,
                 None => return HelloWait::Timeout,
             }
         }
@@ -5933,7 +6143,11 @@ impl PipeServer {
             let ok = ReadFile(self.pipe, self.buf.as_mut_ptr(), self.buf.len() as u32, std::ptr::null_mut(), &mut *self.ov);
             if ok != 0 { 0 } else { GetLastError() }
         };
-        self.state = if err == 0 || err == ERROR_IO_PENDING { State::Reading } else { State::Broken };
+        self.state = match err {
+            0 | ERROR_IO_PENDING => State::Reading,
+            ERROR_MORE_DATA => State::Overflowed,
+            _ => State::Broken,
+        };
     }
 
     fn result(&self) -> Io {
@@ -5943,7 +6157,11 @@ impl PipeServer {
             if GetOverlappedResult(self.pipe, &*self.ov, &mut n, 0) != 0 {
                 return Io::Done(n);
             }
-            if GetLastError() == ERROR_IO_INCOMPLETE { Io::Pending } else { Io::Failed }
+            match GetLastError() {
+                ERROR_IO_INCOMPLETE => Io::Pending,
+                ERROR_MORE_DATA => Io::TooLarge,
+                _ => Io::Failed,
+            }
         }
     }
 
@@ -5994,15 +6212,33 @@ impl Drop for PipeServer {
 use std::io::BufRead;
 use std::sync::mpsc::{channel, Receiver};
 
-use uw_pipe_proto::jsonl::Command;
+use uw_pipe_proto::jsonl::{Command, Event};
 
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::System::Threading::{CreateEventW, SetEvent};
+
+use crate::relay::emit;
 
 pub(crate) struct Commands {
     pub(crate) rx: Receiver<Command>,
     /// Signalled after each command is queued; never closed (it lives as long as the process).
     pub(crate) event: HANDLE,
+}
+
+impl Commands {
+    /// Answer every command that came before the bootstrap connected, at once (design: no
+    /// queueing while disconnected): `load_overlay` needs the bootstrap, `set_state` and `ping`
+    /// the overlay. `main` calls this before `bootstrap_connected` goes out, so the host's
+    /// reconcile commands, sent in answer to it, reach the relay.
+    pub(crate) fn refuse_queued(&self) {
+        while let Ok(cmd) = self.rx.try_recv() {
+            let code = match cmd {
+                Command::LoadOverlay { .. } => "bootstrap_not_connected",
+                Command::SetState { .. } | Command::Ping { .. } => "overlay_not_connected",
+            };
+            emit(&Event::reply_error(cmd.request_id(), code));
+        }
+    }
 }
 
 pub(crate) fn spawn_stdin_reader() -> Result<Commands, String> {
@@ -6047,7 +6283,9 @@ pub(crate) fn spawn_stdin_reader() -> Result<Commands, String> {
 //!
 //! Every command gets one reply carrying its `request_id`. No queueing while disconnected:
 //! `load_overlay` needs the bootstrap (`bootstrap_not_connected`), `set_state` and `ping` need the
-//! overlay (`overlay_not_connected`).
+//! overlay (`overlay_not_connected`). A `load_overlay` without its `status` in time is
+//! `status_timeout`, a `ping` without its `pong` in time `overlay_not_responding`; a reply that
+//! comes after that is discarded.
 
 use std::io::Write;
 
@@ -6087,6 +6325,7 @@ struct Relay<'a> {
     bootstrap: &'a mut PipeServer,
     overlay: &'a mut PipeServer,
     status_timeout_ms: u64,
+    ping_timeout_ms: u64,
     /// The bootstrap sent its `hello` on the current connection.
     bootstrap_up: bool,
     /// A client connected to the bootstrap pipe and its `hello` is next.
@@ -6094,25 +6333,33 @@ struct Relay<'a> {
     overlay_up: bool,
     overlay_hello_due: bool,
     loads: Pending,
-    /// Pings sent to the overlay, by request id (the ping's nonce).
-    pings: Vec<u32>,
+    /// Pings sent to the overlay, by request id (the ping's nonce), with their deadlines.
+    pings: Pending,
 }
 
 /// Run the relay until the process exits (stdin closes, or the game exits). On entry the bootstrap
 /// is connected and its `hello` has been taken and reported.
-pub(crate) fn run(pid: u32, commands: &Commands, channel: &mut Channel, bootstrap: &mut PipeServer, status_timeout_ms: u64) {
+pub(crate) fn run(
+    pid: u32,
+    commands: &Commands,
+    channel: &mut Channel,
+    bootstrap: &mut PipeServer,
+    status_timeout_ms: u64,
+    ping_timeout_ms: u64,
+) {
     spawn_game_watcher(pid);
     let mut r = Relay {
         objects: &channel.objects,
         bootstrap,
         overlay: &mut channel.overlay,
         status_timeout_ms,
+        ping_timeout_ms,
         bootstrap_up: true,
         bootstrap_hello_due: false,
         overlay_up: false,
         overlay_hello_due: false,
         loads: Pending::new(),
-        pings: Vec::new(),
+        pings: Pending::new(),
     };
     loop {
         r.serve_bootstrap();
@@ -6124,8 +6371,13 @@ pub(crate) fn run(pid: u32, commands: &Commands, channel: &mut Channel, bootstra
         for id in r.loads.expire(now_ms()) {
             emit(&Event::reply_error(id, "status_timeout"));
         }
+        // Owner decision D1 (design "Failures"): a ping the overlay does not answer in time.
+        for id in r.pings.expire(now_ms()) {
+            emit(&Event::reply_error(id, "overlay_not_responding"));
+        }
         let handles = [commands.event, r.objects.bell_host(), r.bootstrap.event(), r.overlay.event()];
-        let timeout = r.loads.next_deadline().map_or(MAX_WAIT_MS, |d| d.saturating_sub(now_ms()).min(MAX_WAIT_MS));
+        let next = [r.loads.next_deadline(), r.pings.next_deadline()].into_iter().flatten().min();
+        let timeout = next.map_or(MAX_WAIT_MS, |d| d.saturating_sub(now_ms()).min(MAX_WAIT_MS));
         // SAFETY: waits on four handles this process owns; the result only says "something may be
         // ready", and every source is polled at the top of the loop.
         unsafe { WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, wait_ms(timeout)) };
@@ -6176,7 +6428,7 @@ impl Relay<'_> {
                 if !self.overlay_up {
                     emit(&Event::reply_error(request_id, "overlay_not_connected"));
                 } else if self.overlay.write(&encode_overlay(&OverlayMessage::Ping { nonce: request_id })) {
-                    self.pings.push(request_id);
+                    self.pings.add(request_id, now_ms().saturating_add(self.ping_timeout_ms));
                 } else {
                     emit(&Event::reply_error(request_id, "overlay_not_connected"));
                     self.drop_overlay();
@@ -6244,6 +6496,10 @@ impl Relay<'_> {
                         self.drop_bootstrap();
                     }
                 },
+                PipeEvent::Oversized => {
+                    emit(&Event::error("pipe_error"));
+                    self.bootstrap_lost();
+                }
                 PipeEvent::Disconnected => self.bootstrap_lost(),
             }
         }
@@ -6273,10 +6529,10 @@ impl Relay<'_> {
                 }
                 PipeEvent::Message(bytes) => match decode_overlay(&bytes) {
                     Ok(OverlayMessage::Pong { nonce, seen_seq }) => {
-                        if let Some(i) = self.pings.iter().position(|&p| p == nonce) {
-                            self.pings.remove(i);
+                        if self.pings.take(nonce) {
                             emit(&Event::Pong { request_id: nonce, seen_seq });
                         } else {
+                            // A late pong to a ping that already got `overlay_not_responding`.
                             eprintln!("[uw-helper64] discarding a pong for {nonce}: not pending");
                         }
                     }
@@ -6286,6 +6542,12 @@ impl Relay<'_> {
                         self.drop_overlay();
                     }
                 },
+                // An oversized message is a bad message too (design "Failures"): `pipe_error`;
+                // the pipe server already dropped it and listens again.
+                PipeEvent::Oversized => {
+                    emit(&Event::error("pipe_error"));
+                    self.overlay_lost();
+                }
                 PipeEvent::Disconnected => self.overlay_lost(),
             }
         }
@@ -6318,7 +6580,7 @@ impl Relay<'_> {
         }
         self.overlay_up = false;
         self.overlay_hello_due = false;
-        for id in self.pings.drain(..) {
+        for id in self.pings.drain() {
             emit(&Event::reply_error(id, "overlay_not_connected"));
         }
     }
@@ -6415,7 +6677,7 @@ with:
         window_poll_ms: defaults.window_poll_ms,
     };
     let outcome = run(&mut w, &cfg);
-    relay::emit(&outcome.to_event());
+    commands.refuse_queued();
 ```
 
 with:
@@ -6423,10 +6685,11 @@ with:
 ```rust
         window_poll_ms: defaults.window_poll_ms,
     };
-    // The slow-overlay test shortens the `status` timeout the same way.
+    // The slow-overlay tests shorten the `status` and `ping` timeouts the same way.
     let status_timeout_ms = env_ms("UW_STATUS_TIMEOUT_MS", pipe_server::RELAY_TIMEOUT_MS);
+    let ping_timeout_ms = env_ms("UW_PING_TIMEOUT_MS", pipe_server::RELAY_TIMEOUT_MS);
     let outcome = run(&mut w, &cfg);
-    relay::emit(&outcome.to_event());
+    commands.refuse_queued();
 ```
 
 4. Replace:
@@ -6446,7 +6709,7 @@ with:
         Outcome::Connected { .. } => {
             let pid = w.pid;
             if let (Some(channel), Some(pipe)) = (w.channel.as_mut(), w.pipe.as_mut()) {
-                relay::run(pid, &commands, channel, pipe, status_timeout_ms);
+                relay::run(pid, &commands, channel, pipe, status_timeout_ms, ping_timeout_ms);
             }
             0
 ```
@@ -6976,7 +7239,7 @@ git commit -m "channel: the in-game worker in uw-game-channel"
 
 ## Task 9: Test overlay on the channel, `--bad-state-block`, and the first end-to-end tests
 
-Design "Components and flow" (`uw-test-overlay`: "Uses `uw-game-channel`; applies state and rings `state_applied`"; `uw-test-game`: `--bad-state-block`). The test overlay starts the worker (module version 1) and, on each bell, writes `uw-test-state-<pid>.txt` and acknowledges the `seq`; `UW_TEST_OVERLAY_START_DELAY_MS` slows its start (used in Task 11). The test game's `--bad-state-block` holds a state block with a layout v2 header. The tests first: the overlay connecting, `set_state` → `state_applied` with `applied_seq == seq`, and `ping` → `pong` (design "Testing" 2, first three scenarios). Plan 1's bootstrap-level helper tests now see the overlay's own `overlay_connected` in parallel with the bootstrap's events, so their `next_event` skips the overlay's connect and disconnect events.
+Design "Components and flow" (`uw-test-overlay`: "Uses `uw-game-channel`; applies state and rings `state_applied`"; `uw-test-game`: `--bad-state-block`). The test overlay starts the worker (module version 1) and, on each bell, writes `uw-test-state-<pid>.txt` and acknowledges the `seq`; `UW_TEST_OVERLAY_START_DELAY_MS` slows its start and `UW_TEST_OVERLAY_BELL_DELAY_MS` every bell (both used in Task 11). The test game's `--bad-state-block` holds a state block with a layout v2 header. The tests first: the overlay connecting, `set_state` → `state_applied` with `applied_seq == seq`, and `ping` → `pong` (design "Testing" 2, first three scenarios). Plan 1's bootstrap-level helper tests now see the overlay's own `overlay_connected` in parallel with the bootstrap's events, so their `next_event` skips the overlay's connect and disconnect events.
 
 **Files:**
 - Modify: `crates/uw-helper/tests/wine_e2e.rs`
@@ -7244,8 +7507,9 @@ windows-sys = { version = "0.61.2", features = [
 //! acknowledges that `seq` (`applied`), which rings `state_applied`. It ignores `StartParams` (it
 //! reads its own pid), which is enough for the tests; the real overlay (plan 3) reads them.
 //!
-//! `UW_TEST_OVERLAY_START_DELAY_MS` in the game's environment makes `uw_overlay_start` take that
-//! long (the late-reply test).
+//! In the game's environment, `UW_TEST_OVERLAY_START_DELAY_MS` makes `uw_overlay_start` take that
+//! long (the late-reply test), and `UW_TEST_OVERLAY_BELL_DELAY_MS` makes every bell take that long
+//! to apply: the worker answers no `ping` meanwhile (the ping-timeout test).
 
 #[cfg(windows)]
 mod win {
@@ -7266,16 +7530,25 @@ mod win {
         std::panic::catch_unwind(run).unwrap_or(2)
     }
 
+    /// A delay in ms from the environment variable `name`, if set.
+    fn env_delay(name: &str) -> Option<std::time::Duration> {
+        std::env::var(name).ok().and_then(|v| v.parse().ok()).map(std::time::Duration::from_millis)
+    }
+
     fn run() -> u32 {
-        if let Some(ms) = std::env::var("UW_TEST_OVERLAY_START_DELAY_MS").ok().and_then(|v| v.parse().ok()) {
-            std::thread::sleep(std::time::Duration::from_millis(ms));
+        if let Some(d) = env_delay("UW_TEST_OVERLAY_START_DELAY_MS") {
+            std::thread::sleep(d);
         }
+        let bell_delay = env_delay("UW_TEST_OVERLAY_BELL_DELAY_MS");
         // SAFETY: no arguments.
         let pid = unsafe { GetCurrentProcessId() };
         if !write_temp(&format!("uw-test-overlay-{pid}.txt"), &format!("overlay started in pid {pid}\n")) {
             return 1;
         }
         let started = uw_game_channel::start(MODULE_VERSION, move |link, _bits, state| {
+            if let Some(d) = bell_delay {
+                std::thread::sleep(d);
+            }
             let text = format!("seq={} edit_mode={} visible={}\n", state.seq, state.edit_mode as u8, state.visible as u8);
             write_temp(&format!("uw-test-state-{pid}.txt"), &text);
             if let Err(e) = link.applied(state.seq) {
@@ -7471,7 +7744,7 @@ git commit -m "channel: test overlay on the channel, --bad-state-block, first en
 
 ## Task 10: `uw-inject` becomes a thin CLI on `uw-host`
 
-Design "Components and flow" (`uw-inject`: "CLI on `uw-host`: JSON commands on stdin (request ids optional, assigned if absent), events on stdout"). The CLI finds the game (printing plan 1's `game_not_found` / `no_wine_session` on failure), starts `Host` with a `WineLaunch`, sends each stdin line through `Command::parse_assigning`, and prints every event. `Host` gets a `HostHandle` so a stdin thread can send while the main thread receives.
+Design "Components and flow" (`uw-inject`: "CLI on `uw-host`: JSON commands on stdin (request ids optional, assigned if absent), events on stdout"). The CLI finds the game (printing plan 1's `game_not_found` / `no_wine_session` on failure), starts `Host` with a `WineLaunch`, sends each stdin line, and prints every event. Every command goes out with an id from `HostHandle::next_request_id` (`UserIds::outgoing`, via `Command::parse_with_id`), and a reply gets the user's own id back (`UserIds::incoming`), so a user's id cannot collide with one the host took for its reconcile commands. `Host` gets a `HostHandle` so a stdin thread can send while the main thread receives.
 
 **Files:**
 - Modify: `crates/uw-host/src/host.rs`
@@ -7559,7 +7832,8 @@ with:
 //! Finds the game and its Wine session, then hands over to `uw_host::host::Host`, which starts
 //! `uw-helper64.exe` in that session, restarts it if it dies, and keeps the overlay at the desired
 //! state (loaded, then every `set_state` it was given). JSON commands on stdin (`request_id`
-//! optional: assigned if absent), events on stdout, diagnostics on stderr. Exits 0 after
+//! optional: assigned if absent; a given one travels as an id of the host's own and comes back on
+//! the reply), events on stdout, diagnostics on stderr. Exits 0 after
 //! `stopped {"reason":"game_exited"}` and 1 after any other stop. Defaults: `deadlock.exe`;
 //! Proton from the prefix's `config_info`; helper and bootstrap from `~/.local/share/underwolf/`.
 //! Ctrl-C (SIGINT) or SIGTERM exits at once: the helper's stdin closes with us, so it exits too
@@ -7582,6 +7856,34 @@ fn main() {
     }
 }
 
+/// The request ids the user chose, by the host's id for the command (plan review M3). Every
+/// command goes to the host with an id from `HostHandle::next_request_id`, so a user's id can never
+/// collide with one the host took for its own reconcile commands; the reply gets the user's back.
+#[cfg(unix)]
+#[derive(Default)]
+struct UserIds(std::sync::Mutex<std::collections::HashMap<u32, u32>>);
+
+#[cfg(unix)]
+impl UserIds {
+    /// Parse one stdin line into a command carrying `host_id`; remember the user's id, if any.
+    fn outgoing(&self, line: &str, host_id: u32) -> Result<uw_pipe_proto::jsonl::Command, String> {
+        let (cmd, user) = uw_pipe_proto::jsonl::Command::parse_with_id(line, host_id).map_err(|e| e.to_string())?;
+        if let Some(user) = user {
+            self.0.lock().unwrap().insert(host_id, user);
+        }
+        Ok(cmd)
+    }
+
+    /// Put the user's id back on a reply (once: the entry is forgotten).
+    fn incoming(&self, event: &mut uw_pipe_proto::jsonl::Event) {
+        if let Some(id) = event.request_id_mut()
+            && let Some(user) = self.0.lock().unwrap().remove(id)
+        {
+            *id = user;
+        }
+    }
+}
+
 /// On SIGINT or SIGTERM, exit at once. Only `_exit` (async-signal-safe) happens here; the kernel
 /// then closes the helper's stdin, and the helper exits on its own.
 #[cfg(unix)]
@@ -7594,12 +7896,13 @@ extern "C" fn on_signal(_sig: libc::c_int) {
 fn run() -> Result<i32, String> {
     use std::io::BufRead;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     use uw_host::discovery::GameSession;
     use uw_host::driver::Desired;
     use uw_host::host::{Host, WineLaunch};
     use uw_host::to_wine_path;
-    use uw_pipe_proto::jsonl::{Command, Event};
+    use uw_pipe_proto::jsonl::Event;
 
     let mut pid: Option<i32> = None;
     let mut exe = "deadlock.exe".to_string();
@@ -7659,13 +7962,15 @@ fn run() -> Result<i32, String> {
         Desired::new(overlay.as_deref().map(to_wine_path)),
     );
     let commands = host.handle();
+    let user_ids = Arc::new(UserIds::default());
+    let ids = Arc::clone(&user_ids);
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {
             let Ok(line) = line else { break };
             if line.trim().is_empty() {
                 continue;
             }
-            match Command::parse_assigning(&line, || commands.next_request_id()) {
+            match ids.outgoing(&line, commands.next_request_id()) {
                 Ok(cmd) => commands.send(cmd),
                 Err(e) => eprintln!("[uw-inject] bad command: {e}"),
             }
@@ -7674,7 +7979,8 @@ fn run() -> Result<i32, String> {
     });
 
     let mut code = 1;
-    while let Some(event) = host.recv() {
+    while let Some(mut event) = host.recv() {
+        user_ids.incoming(&mut event);
         println!("{}", event.to_line());
         match &event {
             Event::Error { code, .. } if code == "version_mismatch" => {
@@ -7686,6 +7992,42 @@ fn run() -> Result<i32, String> {
     }
     Ok(code)
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::UserIds;
+    use uw_pipe_proto::jsonl::{Command, Event};
+
+    /// Catches plan review M3: a user's id equal to one the host assigned (here 1, the host's own
+    /// reconcile `load_overlay`) must not reach the helper, or two pending commands would share
+    /// it; the reply must still carry the user's id.
+    #[test]
+    fn a_users_id_never_reaches_the_helper_and_comes_back_on_the_reply() {
+        let ids = UserIds::default();
+        let cmd = ids.outgoing(r#"{"cmd":"ping","request_id":1}"#, 2).unwrap();
+        assert_eq!(cmd, Command::Ping { request_id: 2 });
+        // The host's own reply keeps its id; the user's comes back as 1, once.
+        let mut host_reply = Event::Status { request_id: 1, code: "ok".into(), detail: 0, message: String::new() };
+        ids.incoming(&mut host_reply);
+        assert_eq!(host_reply.request_id(), Some(1));
+        let mut pong = Event::Pong { request_id: 2, seen_seq: 0 };
+        ids.incoming(&mut pong);
+        assert_eq!(pong, Event::Pong { request_id: 1, seen_seq: 0 });
+        let mut again = Event::Pong { request_id: 2, seen_seq: 0 };
+        ids.incoming(&mut again);
+        assert_eq!(again.request_id(), Some(2));
+    }
+
+    #[test]
+    fn a_command_without_an_id_keeps_the_hosts() {
+        let ids = UserIds::default();
+        assert_eq!(ids.outgoing(r#"{"cmd":"ping"}"#, 5).unwrap(), Command::Ping { request_id: 5 });
+        let mut error = Event::reply_error(5, "overlay_not_connected");
+        ids.incoming(&mut error);
+        assert_eq!(error, Event::reply_error(5, "overlay_not_connected"));
+        assert!(ids.outgoing("not json", 6).is_err());
+    }
+}
 ```
 
 - [ ] **Step 3: Unit tests and both clippies**
@@ -7696,7 +8038,7 @@ cargo test -p uw-host -p uw-inject
 cargo clippy -p uw-host -p uw-inject --all-targets -- -D warnings
 cargo clippy --target x86_64-pc-windows-gnu -p uw-host -p uw-inject --all-targets -- -D warnings
 ```
-Expected: `uw-host` `cli` 3, `discovery` 14, `driver` 4, `host` 3, `supervisor` 8; both clippies clean.
+Expected: `uw-host` `cli` 3, `discovery` 14, `driver` 4, `host` 3, `supervisor` 8; `uw-inject`'s bin unit tests 2 (`a_users_id_never_reaches_the_helper_and_comes_back_on_the_reply`, `a_command_without_an_id_keeps_the_hosts`); both clippies clean.
 
 - [ ] **Step 4: Plan 1's chain test through the new CLI**
 
@@ -7723,9 +8065,11 @@ Design "Testing" 2. With Task 9's three, every scenario is covered:
 - a slow overlay start → `status_timeout`, the late `status` is discarded, and the next `load_overlay` gets its own reply (`a_slow_overlay_start_times_out_and_its_late_status_is_discarded`);
 - `--bad-state-block` → `version_mismatch`, exit 1, no hook (`a_foreign_state_block_is_version_mismatch`);
 - closing the helper's stdin → it exits, while it waits for a window and after it connected (`closing_stdin_ends_the_helper_…`);
-- kill the helper → `uw-host` restarts it, the overlay reconnects and applies the reconciled state, no reload, `seq` keeps counting, `ping` still answers, the game survives (`a_killed_helper_is_restarted_and_the_overlay_gets_the_reconciled_state`, through `uw-inject`).
+- kill the helper → `uw-host` restarts it, the overlay reconnects and applies the reconciled state, no reload, `seq` keeps counting, `ping` still answers, the game survives (`a_killed_helper_is_restarted_and_the_overlay_gets_the_reconciled_state`, through `uw-inject`);
+- the owner's decision D1: a `ping` the overlay does not answer in time → `overlay_not_responding`, its late `pong` discarded, the next `ping` answered (`a_ping_the_overlay_does_not_answer_in_time_is_overlay_not_responding`; the test overlay's bell delay keeps its worker busy);
+- commands sent before the bootstrap connects are refused at once, their replies ahead of `bootstrap_connected` (checked at the start of the slow-start test).
 
-These exercise code from Tasks 6-10, so they pass on their first run; Step 3 checks that the late-reply test bites.
+These exercise code from Tasks 6-10, so they pass on their first run; Step 3 checks that they bite.
 
 **Files:**
 - Modify: `crates/uw-helper/tests/wine_e2e.rs`, `crates/uw-inject/tests/wine_e2e.rs`
@@ -7781,7 +8125,9 @@ with:
 }
 
 /// Catches plan 1's final-review M2: a `status` that comes after its request timed out must be
-/// discarded, not taken as the reply to the next `load_overlay`.
+/// discarded, not taken as the reply to the next `load_overlay`. Also catches commands sent before
+/// the bootstrap connects being queued (and run later) instead of refused at once (design: no
+/// queueing while disconnected).
 #[test]
 #[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
 fn a_slow_overlay_start_times_out_and_its_late_status_is_discarded() {
@@ -7792,7 +8138,21 @@ fn a_slow_overlay_start_times_out_and_its_late_status_is_discarded() {
     );
     let overlay = to_wine_path(&win_artifact("uw_test_overlay.dll"));
     let mut helper = start_helper(&pfx, &[], &[("UW_STATUS_TIMEOUT_MS", "2000")]);
-    helper.expect_event("bootstrap_connected", Duration::from_secs(200));
+    // Sent while the helper still hooks: refused, and answered before `bootstrap_connected`.
+    helper.send_cmd(&Cmd::LoadOverlay { request_id: 7, path: overlay.clone() });
+    helper.send_cmd(&Cmd::SetState { request_id: 8, edit_mode: Some(true), visible: None });
+    helper.send_cmd(&Cmd::Ping { request_id: 9 });
+    let first: Vec<Event> = (0..4).map(|_| helper.next_parsed(Duration::from_secs(200))).collect();
+    assert_eq!(
+        first[..3],
+        [
+            Event::reply_error(7, "bootstrap_not_connected"),
+            Event::reply_error(8, "overlay_not_connected"),
+            Event::reply_error(9, "overlay_not_connected"),
+        ],
+        "all: {first:?}"
+    );
+    assert!(matches!(first[3], Event::BootstrapConnected { overlay_loaded: false, .. }), "{first:?}");
 
     helper.send_cmd(&load(&overlay));
     let timeout = Event::parse(&helper.next_event(Duration::from_secs(10))).unwrap();
@@ -7810,6 +8170,39 @@ fn a_slow_overlay_start_times_out_and_its_late_status_is_discarded() {
         reply,
         Event::Status { request_id: 2, code: "already_loaded".into(), detail: 0, message: "overlay already loaded".into() }
     );
+}
+
+/// Catches owner decision D1 breaking: a `ping` the overlay does not answer in time must get
+/// `overlay_not_responding` (and no other reply), its late `pong` must be discarded, and the next
+/// `ping` must be answered.
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn a_ping_the_overlay_does_not_answer_in_time_is_overlay_not_responding() {
+    let mut pfx = setup("pingslow");
+    // Every bell takes the overlay 5 s, and its worker answers no ping meanwhile; the helper
+    // waits 2 s for a pong.
+    pfx.game = Some(
+        wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).env("UW_TEST_OVERLAY_BELL_DELAY_MS", "5000").spawn().unwrap(),
+    );
+    let overlay = to_wine_path(&win_artifact("uw_test_overlay.dll"));
+    let mut helper = start_helper(&pfx, &[], &[("UW_PING_TIMEOUT_MS", "2000")]);
+    helper.expect_event("bootstrap_connected", Duration::from_secs(200));
+    helper.send_cmd(&load(&overlay));
+    helper.expect_all(&[ok(1), Event::OverlayConnected { module_version: OVERLAY_VERSION }], Duration::from_secs(30));
+
+    helper.send_cmd(&Cmd::SetState { request_id: 2, edit_mode: Some(true), visible: None });
+    assert_eq!(helper.next_parsed(Duration::from_secs(10)), Event::StateSet { request_id: 2, seq: 1 });
+    helper.send_cmd(&Cmd::Ping { request_id: 3 });
+    assert_eq!(helper.next_parsed(Duration::from_secs(10)), Event::reply_error(3, "overlay_not_responding"));
+    // The bell is applied about 3 s later; then the late pong comes and is discarded.
+    assert_eq!(helper.next_parsed(Duration::from_secs(10)), applied(1));
+    assert!(
+        helper.wait_stderr("discarding a pong for 3", Duration::from_secs(10)),
+        "the late pong was not discarded; stderr: {:?}",
+        helper.stderr_lines()
+    );
+    helper.send_cmd(&Cmd::Ping { request_id: 4 });
+    assert_eq!(helper.next_parsed(Duration::from_secs(10)), Event::Pong { request_id: 4, seen_seq: 1 });
 }
 
 /// Catches a state block from another layout being used or rewritten instead of refused (design
@@ -8092,24 +8485,33 @@ Run:
 cargo build --release --target x86_64-pc-windows-gnu -p uw-test-game -p uw-bootstrap -p uw-test-overlay -p uw-helper
 cargo build -p uw-inject --bin uw-inject
 cargo clippy -p uw-helper -p uw-inject --all-targets -- -D warnings
+cargo clippy --target x86_64-pc-windows-gnu -p uw-helper -p uw-inject --all-targets -- -D warnings
 timeout 900 xvfb-run -a cargo test -p uw-helper --test wine_e2e -- --ignored --test-threads=1
 timeout 600 xvfb-run -a cargo test -p uw-inject --test wine_e2e -- --ignored --test-threads=1
 ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep; ls -d /tmp/uw-inject-* 2>/dev/null
 ```
-Expected: clippy clean; helper `13 passed` (about 60 s), `uw-inject` `2 passed` (about 12 s); no leftovers.
+Expected: both clippies clean (the edited test files are `#![cfg(unix)]`, so Windows clippy only confirms they compile out); helper `14 passed` (about 70 s), `uw-inject` `2 passed` (about 12 s); no leftovers.
 
-- [ ] **Step 3: Check that the late-reply test bites, then restore**
+- [ ] **Step 3: Check that the new tests bite, then restore**
 
-In `crates/uw-helper/src/bin/uw-helper64/relay.rs`, replace `                        if self.loads.take(request_id) {` with `                        if { self.loads.take(request_id); true } {` (every `status` is forwarded, as before plan 2a). Run:
+Three mutations, each run on its own and then undone with `git checkout`:
+1. In `crates/uw-helper/src/bin/uw-helper64/relay.rs`, replace `                        if self.loads.take(request_id) {` with `                        if { self.loads.take(request_id); true } {` (every `status` is forwarded, as before plan 2a).
+2. In the same file, delete the three lines `        for id in r.pings.expire(now_ms()) {`, `            emit(&Event::reply_error(id, "overlay_not_responding"));`, `        }` (no ping timeout).
+3. In `crates/uw-helper/src/bin/uw-helper64/main.rs`, delete the line `    commands.refuse_queued();` (commands queued until the relay runs).
+
+For each, run:
 ```bash
 cargo build --release --target x86_64-pc-windows-gnu -p uw-test-game -p uw-bootstrap -p uw-test-overlay -p uw-helper
-timeout 600 xvfb-run -a cargo test -p uw-helper --test wine_e2e -- --ignored --test-threads=1 a_slow_overlay_start
-git checkout -- crates/uw-helper/src/bin/uw-helper64/relay.rs
+timeout 600 xvfb-run -a cargo test -p uw-helper --test wine_e2e -- --ignored --test-threads=1 a_slow_overlay_start a_ping_the_overlay
+git checkout -- crates/uw-helper/src/bin/uw-helper64/relay.rs crates/uw-helper/src/bin/uw-helper64/main.rs
+```
+Then rebuild and run the two tests once more, and the leftover check:
+```bash
 cargo build --release --target x86_64-pc-windows-gnu -p uw-test-game -p uw-bootstrap -p uw-test-overlay -p uw-helper
-timeout 600 xvfb-run -a cargo test -p uw-helper --test wine_e2e -- --ignored --test-threads=1 a_slow_overlay_start
+timeout 600 xvfb-run -a cargo test -p uw-helper --test wine_e2e -- --ignored --test-threads=1 a_slow_overlay_start a_ping_the_overlay
 ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep; ls -d /tmp/uw-inject-* 2>/dev/null
 ```
-Expected: the first run FAILS (`the late status was not discarded`, or the next event is request 1's late `status` instead of request 2's reply); after the restore it passes; no leftovers.
+Expected: mutation 1 fails `a_slow_overlay_start…` with `the late status was not discarded`; mutation 2 fails `a_ping_the_overlay…` with `left: Bell { … applied_seq: 1 }`, `right: Error { request_id: Some(3), code: "overlay_not_responding", … }`; mutation 3 fails `a_slow_overlay_start…` with `left: [BootstrapConnected { … }, …]` (request 7 was queued and run, not refused). After the restore both pass; `git status` shows only this task's test files; no leftovers.
 
 - [ ] **Step 4: Commit**
 
@@ -8189,7 +8591,7 @@ EOF
 
 - [ ] **Step 3: Run it (controller, owner in the Hideout)**
 
-Deadlock must not still run plan 1's test overlay (a game session from plan 1's live check): then `bootstrap_connected` says `overlay_loaded: true` and `overlay_connected` never comes (the script's first wait times out). Ask the owner to restart the game, and run the script again.
+**Restart the game before any re-run of this script.** The expected output assumes a game session that no overlay has touched yet: in a session where plan 1's test overlay runs, `bootstrap_connected` says `overlay_loaded: true` and `overlay_connected` never comes; after an earlier run of this script, the state block already says `visible=1`, so the first reconcile rings nothing and the first wait (and every `seq` below) is off. In either case, ask the owner to restart Deadlock and run the script again.
 
 Run: `bash target/uw-2a-live-check.sh`
 
@@ -8255,7 +8657,7 @@ Expected: prints nothing, exit 0.
 - [ ] **Step 2: All unit tests**
 
 Run: `cargo test -p uw-pipe-proto -p uw-game-channel -p uw-helper -p uw-host -p uw-inject -p uw-bootstrap`
-Expected, all passing: `uw-pipe-proto` names 2, `bells` 3, `jsonl` 7, `pipe` 19, `state` 5; `uw-helper` `decide` 30, `pending` 2; `uw-host` `cli` 3, `discovery` 14, `driver` 4, `host` 3, `supervisor` 8; `uw-bootstrap` `state` 3. Ignored Wine tests: `uw-game-channel` 1, `uw-helper` 13, `uw-inject` 2.
+Expected, all passing: `uw-pipe-proto` names 2, `bells` 3, `jsonl` 8, `pipe` 19, `state` 5; `uw-helper` `decide` 30, `pending` 3; `uw-host` `cli` 3, `discovery` 14, `driver` 4, `host` 3, `supervisor` 8; `uw-inject` bin unit tests 2; `uw-bootstrap` `state` 3. Ignored Wine tests: `uw-game-channel` 1, `uw-helper` 14, `uw-inject` 2.
 
 - [ ] **Step 3: Clippy, host and Windows**
 
@@ -8280,7 +8682,7 @@ timeout 600 xvfb-run -a cargo test -p uw-inject --test wine_e2e -- --ignored --t
 ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep; ls -d /tmp/uw-inject-* 2>/dev/null
 git status --short
 ```
-Expected: gate `1 passed`, helper `13 passed`, `uw-inject` `2 passed`; the leftover check prints nothing; the tree is clean.
+Expected: gate `1 passed`, helper `14 passed`, `uw-inject` `2 passed`; the leftover check prints nothing; the tree is clean.
 
 - [ ] **Step 5: The live check passed**
 
@@ -8295,13 +8697,13 @@ Confirm Task 12's result is recorded in the design doc as a pass. With Steps 1-5
 - Flow steps 1-6: discovery and launch (Task 4, `WineLaunch`); objects, overlay pipe, bootstrap pipe, then hook (Task 6); the overlay's hello, objects, `overlay_connected` (Tasks 7, 8); `set_state` under the lock, `seq` bump, OR the bits, ring `bell-game`, the worker's swap and locked read (Tasks 1, 7, 8); game → host bits, `applied_seq` and `state_applied` (Tasks 7, 8, 9); `ping`/`pong` with the last applied `seq` (Tasks 7, 8).
 - Threads: one stdin reader, the game watcher and one wait loop in the helper (Tasks 6, 7); only the worker waits in the game (Task 8).
 - Reconcile after every (re)connect (Task 4 `driver`/`supervisor`; Wine: Task 11 restart test).
-- Messages and layouts: names with per-kind suffixes (Task 1, uniqueness test), the overlay pipe flags (Task 7, `PipeServer::create`, the same as the bootstrap's), "the game side only opens" (Task 1 `Objects::open`, used only by the worker), bits v1 and `bit<N>` (Tasks 1, 2), layout v1 offsets and the `ERROR_ALREADY_EXISTS` check without rewriting (Tasks 1, 9, 11), overlay messages and the first-message rule (Tasks 2, 7), the JSON commands, replies, unsolicited and `uw-host` events (Task 3), no queueing while disconnected (Tasks 4, 7).
+- Messages and layouts: names with per-kind suffixes (Task 1, uniqueness test), the overlay pipe flags (Task 7, `PipeServer::create`, the same as the bootstrap's), "the game side only opens" (Task 1 `Objects::open`, used only by the worker), bits v1 and `bit<N>` (Tasks 1, 2), layout v1 offsets and the `ERROR_ALREADY_EXISTS` check without rewriting (Tasks 1, 9, 11), overlay messages and the first-message rule (Tasks 2, 7), the JSON commands, replies, unsolicited and `uw-host` events and the error codes (Task 3), no queueing while disconnected (Tasks 4, 6, 7: also for commands that arrive while the helper still hooks), request ids optional on the CLI and never colliding with the host's (Tasks 3, 10).
 - Plan 1 items: late reply discarded (Tasks 7, 11), `overlay_path` (Task 3), a failed write is `bootstrap_disconnected` (Tasks 3, 7), `helper_protocol_error` (Task 4), the two Task 3 N1 tests (Task 4).
-- Failures table: `overlay_timeout` (Task 4, unit); overlay pipe drop and reconnect (Tasks 7, 8, 11); helper restart back-off and reset, marker skip, reconnect, reconcile (Tasks 4, 11); stdin close in every phase (Tasks 6, 11); game exit stops `uw-host` (Tasks 4, 7); `already_running`/`version_mismatch` stop (Task 4); `state_busy` at 100 ms (Task 7, `set_state`); `WAIT_ABANDONED` with the header re-check (Task 1, `Objects::lock`); `pipe_error` and listen again (Task 7).
+- Failures table: `overlay_timeout` (Task 4, unit); overlay pipe drop and reconnect (Tasks 7, 8, 11); helper restart back-off and reset, marker skip, reconnect, reconcile (Tasks 4, 11); stdin close in every phase (Tasks 6, 11); game exit stops `uw-host` (Tasks 4, 7); `already_running`/`version_mismatch`/`hook_failed`/`bootstrap_timeout` stop, `no_window`/`channel_failed`/`pipe_error` restart (Task 4, owner decision D2); a `ping` not answered in time is `overlay_not_responding`, its late `pong` discarded (Tasks 7, 11, owner decision D1); `state_busy` at 100 ms (Task 7, `set_state`); `WAIT_ABANDONED` taken as acquired with the header re-checked, and one guard per thread (Task 1, `Objects::lock`, proven in the gate); `pipe_error` (an oversized message too) and listen again (Task 7).
 - Testing 1 (unit), 2 (Wine: Tasks 1, 9, 11), 3 (Task 12); "Done when" (Task 13). The open risk is Task 1, a gate.
 
 **2. Placeholder scan.** No TBD/TODO, no "similar to Task N", no step without its code; every run step names its command and expected result. Long files are given whole; small changes are exact replace blocks that occur once in the file as the previous task left it (they were generated from, and checked against, the scratch clone).
 
-**3. Type and name consistency.** `Objects`/`ObjectsError`/`LockError`/`StateGuard`/`LOCK_TIMEOUT_MS` (Task 1) are what Tasks 6-9 use; `OverlayMessage`/`OverlayFirst`/`check_overlay_first`/`bit_names`/`to_game`/`to_host` (Tasks 1-2) match the relay and worker; `Command`/`Event`/`reply_error`/`parse_assigning` (Task 3) match the helper, `uw-host` and `uw-inject`; `ChannelError`/`Outcome::ChannelFailed`/`Win32::create_channel` (Task 6) match the fake and `RealWin32`; `Pending` (Task 7); `Desired`/`Driver`/`Supervisor`/`Input`/`Action`/`Host`/`HostHandle`/`Launch`/`WineLaunch`/`RequestIds` (Tasks 4, 10); file names `uw-test-overlay-<pid>.txt`, `uw-test-state-<pid>.txt`; module version 1; prefixes `uw-inject-<tag>-<pid>`.
+**3. Type and name consistency.** `Objects`/`ObjectsError`/`LockError`/`StateGuard`/`LOCK_TIMEOUT_MS` (Task 1) are what Tasks 6-9 use; `OverlayMessage`/`OverlayFirst`/`check_overlay_first`/`bit_names`/`to_game`/`to_host` (Tasks 1-2) match the relay and worker; `Command`/`Event`/`reply_error`/`parse_with_id`/`request_id`/`request_id_mut` (Task 3) match the helper, `uw-host` and `uw-inject`; `ChannelError`/`Outcome::ChannelFailed`/`Win32::create_channel` (Task 6) match the fake and `RealWin32`; `Pending` (Task 7, for loads and pings), `PipeEvent::Oversized`, `Commands::refuse_queued`; `Desired`/`Driver`/`Supervisor`/`STOP_CODES`/`Input`/`Action`/`Host`/`HostHandle`/`Launch`/`WineLaunch`/`RequestIds` (Tasks 4, 10), `UserIds` (Task 10); file names `uw-test-overlay-<pid>.txt`, `uw-test-state-<pid>.txt`; module version 1; prefixes `uw-inject-<tag>-<pid>`.
 
 **Not in this plan, by the design:** the game-data channel (2b), the hotkey table and widget list (layout v2) and input routing (plan 3), a native Windows host, unloading an overlay, a game-thread API beyond the lock-free ring (plan 3's hooks).
