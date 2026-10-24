@@ -6,14 +6,23 @@
 //! - `hello`: the 24-byte hello block (magic, format version, producer pid, `producer_id`).
 //! - `schema`: the info store's categories of keys, each key with a maximum value length.
 //! - `info`: the info store (header, schema, per-key timestamps and value slots).
+//! - `ring`: the event ring (header, 30 records).
+//! - `resume`: where event delivery starts and resumes, as pure arithmetic on seqs.
 
 mod hello;
 mod info;
+mod resume;
+mod ring;
 mod schema;
 
 pub use hello::{HELLO_MAGIC, HELLO_SIZE, Hello, read_hello, write_hello};
 pub use info::{
     INFO_HEADER_SIZE, INFO_MAGIC, InfoLayout, InfoReader, InfoValue, info_init, info_set,
+};
+pub use resume::{BadResumePoint, CatchUp, RING_SLOTS, ResumePoint, catch_up, start_after};
+pub use ring::{
+    Drained, MAX_EVENT_DATA, MAX_EVENT_NAME, RECORD_SIZE, RING_HEADER_SIZE, RING_MAGIC, RING_SIZE,
+    RingEvent, RingHead, RingReader, read_ring_head, ring_init, ring_push, ring_set_dropped,
 };
 pub use schema::{
     MAX_CATEGORIES, MAX_KEYS, MAX_NAME_LEN, MAX_VALUE_LEN, Schema, SchemaCategory, SchemaError,
@@ -56,6 +65,9 @@ impl std::fmt::Display for ReadError {
 }
 impl std::error::Error for ReadError {}
 
+fn rd_u16(b: &[u8], at: usize) -> u16 {
+    u16::from_le_bytes([b[at], b[at + 1]])
+}
 fn rd_u32(b: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
 }
@@ -63,6 +75,9 @@ fn rd_u64(b: &[u8], at: usize) -> u64 {
     let mut x = [0u8; 8];
     x.copy_from_slice(&b[at..at + 8]);
     u64::from_le_bytes(x)
+}
+fn wr_u16(b: &mut [u8], at: usize, v: u16) {
+    b[at..at + 2].copy_from_slice(&v.to_le_bytes());
 }
 fn wr_u32(b: &mut [u8], at: usize, v: u32) {
     b[at..at + 4].copy_from_slice(&v.to_le_bytes());
