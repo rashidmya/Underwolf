@@ -89,16 +89,23 @@ mod win {
         if started.is_err() { 3 } else { 0 }
     }
 
-    /// Create the test producer, retrying while the old objects still exist (a helper holds them
-    /// until it sees `disconnect`), and commit its first values.
+    /// Create the test producer, retrying every 100 ms while the old objects still exist (a
+    /// helper holds them until it sees `disconnect`), and commit its first values. It runs on the
+    /// producer's own thread, never on a game thread.
     fn create_producer(ticks: u64, last_seq: Option<u64>) -> Producer {
         let schema = Schema::new(vec![SchemaCategory::new("test", &[("ticks", 32), ("last_seq", 32)])])
             .expect("the test schema fits");
+        let mut last_error = String::new();
         let mut p = loop {
             match Producer::create(DATA_CHANNEL, schema.clone()) {
                 Ok(p) => break p,
                 Err(e) => {
-                    eprintln!("[uw-test-overlay] data channel: {e}; retrying");
+                    // Logged once per distinct error, as the helper logs its open errors.
+                    let e = e.to_string();
+                    if e != last_error {
+                        eprintln!("[uw-test-overlay] data channel: {e}; retrying");
+                        last_error = e;
+                    }
                     std::thread::sleep(FLUSH);
                 }
             }

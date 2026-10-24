@@ -257,6 +257,16 @@ fn the_resume_point_follows_data_connected_and_each_data_event() {
     f.says(data_connected(88, 40));
     assert_eq!(f.sup.data_resume(1), Some(ResumePoint { producer_id: 88, seq: 40 }));
     assert_eq!(f.sup.data_resume(2), None);
+    // Each channel has its own point: channel 2's events leave channel 1's alone.
+    f.says(Event::DataConnected {
+        channel: 2,
+        producer_id: 99,
+        from_seq: 50,
+        schema: vec![SchemaCategory::new("test", &[("ticks", 32)])],
+    });
+    f.says(Event::DataEvent { channel: 2, seq: 51, name: "tick".into(), data: "51".into(), ts: 51_000 });
+    assert_eq!(f.sup.data_resume(1), Some(ResumePoint { producer_id: 88, seq: 40 }));
+    assert_eq!(f.sup.data_resume(2), Some(ResumePoint { producer_id: 99, seq: 51 }));
 }
 
 /// Catches a restarted helper started without `--data-resume` (it would start at the write head

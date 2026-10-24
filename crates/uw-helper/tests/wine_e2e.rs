@@ -14,7 +14,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -218,10 +218,15 @@ impl Helper {
         seen
     }
 
-    /// No event at all within `d`.
+    /// No event at all within `d`, from a helper still running: a helper gone (its stdout closed)
+    /// fails the check instead of passing it.
     fn expect_quiet(&self, d: Duration) {
-        if let Ok(line) = self.events.recv_timeout(d) {
-            panic!("expected no event, got {line}");
+        match self.events.recv_timeout(d) {
+            Ok(line) => panic!("expected no event, got {line}"),
+            Err(RecvTimeoutError::Disconnected) => {
+                panic!("expected no event, but the helper is gone; stderr: {:?}", self.stderr_lines())
+            }
+            Err(RecvTimeoutError::Timeout) => {}
         }
     }
 
@@ -261,10 +266,14 @@ impl Helper {
         while self.data.try_recv().is_ok() {}
     }
 
-    /// No game-data event within `d`.
+    /// No game-data event within `d`, from a helper still running (as `expect_quiet`).
     fn expect_data_quiet(&self, d: Duration) {
-        if let Ok(line) = self.data.recv_timeout(d) {
-            panic!("expected no data event, got {line}");
+        match self.data.recv_timeout(d) {
+            Ok(line) => panic!("expected no data event, got {line}"),
+            Err(RecvTimeoutError::Disconnected) => {
+                panic!("expected no data event, but the helper is gone; stderr: {:?}", self.stderr_lines())
+            }
+            Err(RecvTimeoutError::Timeout) => {}
         }
     }
 
