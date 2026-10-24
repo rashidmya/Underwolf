@@ -11,11 +11,13 @@
 //!    read both on a timeout, because a signal can be missed while a lock attempt times out. A
 //!    read that a busy lock skipped is retried on the next pass, whatever wakes it
 //!    (`uw_helper::data_pass`).
-//! 4. On `disconnect`, emit `data_disconnected`, close everything and go back to 1.
+//! 4. On `disconnect`, read both regions once more (what the producer wrote just before it went),
+//!    then emit `data_disconnected`, close everything and go back to 1.
 //!
 //! A version or a layout that does not fit is reported once per producer (`error
 //! data_version_mismatch` / `data_bad_layout`, `detail`: the channel id); then the thread stops
-//! reading and waits for `disconnect`.
+//! reading and waits for `disconnect`. A panic in the thread exits the helper with code 3, so
+//! `uw-host` restarts it with `--data-resume`.
 
 use uw_game_channel::data::{ConsumeError, Consumer, OpenError, Wake};
 use uw_helper::data_pass::{Owed, Woke};
@@ -30,12 +32,24 @@ use crate::relay::emit;
 const RETRY_MS: u32 = 1000;
 /// The longest wait for a bell; a timeout reads both regions anyway.
 const WAIT_MS: u32 = 1000;
+/// The helper's exit code when the data thread panics (its other exits use 0, 1 and 2).
+const PANIC_EXIT: i32 = 3;
 
 /// Start the data thread for channel `channel` of the game `pid`. `resume` is `--data-resume`.
 pub(crate) fn spawn(pid: u32, channel: u32, resume: Option<ResumePoint>) {
     let started = std::thread::Builder::new()
         .name("uw-data".into())
-        .spawn(move || run(pid, channel, resume));
+        .spawn(move || {
+            // A panic would end the data relay for the rest of the helper's life: exit instead,
+            // so `uw-host` restarts the helper with `--data-resume` (design 2b "Failures"). The
+            // panic message is on stderr already.
+            if std::panic::catch_unwind(move || run(pid, channel, resume)).is_err() {
+                eprintln!("[uw-helper64] the data thread (uw-data) panicked; exiting {PANIC_EXIT}");
+                // Take stdout first, so the exit never cuts a line the relay is writing.
+                let _whole_lines = std::io::stdout().lock();
+                std::process::exit(PANIC_EXIT);
+            }
+        });
     if let Err(e) = started {
         eprintln!("[uw-helper64] starting the data thread: {e}");
     }
@@ -119,49 +133,66 @@ fn relay(c: &mut Consumer, channel: u32, point: &mut ResumePoint) -> Result<(), 
     let mut owed = Owed::default();
     loop {
         let woke = match c.wait(WAIT_MS) {
-            Wake::Disconnect => return Ok(()),
+            // The producer is gone, but the views stay valid while `c` holds the handles: read
+            // both regions once more, so what it wrote just before it went (say, while this
+            // thread was blocked in `emit()`) still comes. A lock busy here is skipped as on any
+            // pass, and nothing is owed after it.
+            Wake::Disconnect => return read(c, channel, point, &mut owed, (true, true)),
             Wake::Info => Woke::InfoBell,
             Wake::Events => Woke::EventsBell,
             Wake::Timeout => Woke::Timeout,
         };
-        let (read_info, read_events) = owed.reads(woke);
-        if read_info {
-            match c.changes() {
-                Ok(values) => {
-                    owed.info = false;
-                    values.into_iter().for_each(|v| emit(&info(channel, v)));
-                }
-                // A busy lock: skip, and read again on the next pass, whatever wakes it.
-                Err(ConsumeError::Busy) => owed.info = true,
-                Err(ConsumeError::Read(e)) => return Err(e),
+        let reads = owed.reads(woke);
+        read(c, channel, point, &mut owed, reads)?;
+    }
+}
+
+/// One pass's reads, `(info, events)`: emit the changed keys, then `data_lost` (if events were
+/// lost) and the events. A read that a busy lock skipped is marked in `owed`.
+fn read(
+    c: &mut Consumer,
+    channel: u32,
+    point: &mut ResumePoint,
+    owed: &mut Owed,
+    (read_info, read_events): (bool, bool),
+) -> Result<(), ReadError> {
+    if read_info {
+        match c.changes() {
+            Ok(values) => {
+                owed.info = false;
+                values.into_iter().for_each(|v| emit(&info(channel, v)));
             }
-        }
-        if read_events {
-            match c.drain() {
-                Ok(d) => {
-                    owed.events = false;
-                    if d.lost > 0 {
-                        emit(&Event::DataLost {
-                            channel,
-                            events: d.lost,
-                        });
-                    }
-                    for e in d.events {
-                        point.seq = e.seq;
-                        emit(&Event::DataEvent {
-                            channel,
-                            seq: e.seq,
-                            name: e.name,
-                            data: e.data,
-                            ts: e.ts,
-                        });
-                    }
-                }
-                Err(ConsumeError::Busy) => owed.events = true,
-                Err(ConsumeError::Read(e)) => return Err(e),
-            }
+            // A busy lock: skip, and read again on the next pass, whatever wakes it.
+            Err(ConsumeError::Busy) => owed.info = true,
+            Err(ConsumeError::Read(e)) => return Err(e),
         }
     }
+    if read_events {
+        match c.drain() {
+            Ok(d) => {
+                owed.events = false;
+                if d.lost > 0 {
+                    emit(&Event::DataLost {
+                        channel,
+                        events: d.lost,
+                    });
+                }
+                for e in d.events {
+                    point.seq = e.seq;
+                    emit(&Event::DataEvent {
+                        channel,
+                        seq: e.seq,
+                        name: e.name,
+                        data: e.data,
+                        ts: e.ts,
+                    });
+                }
+            }
+            Err(ConsumeError::Busy) => owed.events = true,
+            Err(ConsumeError::Read(e)) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 /// Read nothing more from this producer: only wait for its `disconnect`.

@@ -1166,6 +1166,55 @@ fn a_burst_while_the_host_reads_slowly_loses_nothing_unannounced() {
     }
 }
 
+/// Catches a producer's last writes lost when it goes away while the helper cannot read (design
+/// 2b flow step 6: on `disconnect` the helper reads both regions once more before
+/// `data_disconnected`). The host stops reading, so the burst after a state fills the helper's
+/// stdout and the data thread blocks in `emit()`; meanwhile the producer flushes its last ticks
+/// and goes away. At the next wait `disconnect` wins the tie with both bells, so without that
+/// last read neither the last tick nor the last `ticks` would come.
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn a_producer_gone_while_the_host_reads_slowly_still_delivers_its_last_event() {
+    let mut pfx = setup("datalast");
+    // The producer goes away 6.5 s after it starts, half a second after its sixth tick.
+    pfx.game = Some(
+        wine_cmd(&pfx, &win_artifact("uw-test-game.exe"))
+            .env("UW_TEST_OVERLAY_BURST", "300")
+            .env("UW_TEST_OVERLAY_DATA_RESTART_MS", "6500")
+            .spawn()
+            .unwrap(),
+    );
+    let mut helper = start_with_overlay(&pfx);
+    expect_test_producer(&helper);
+    let gate = Arc::clone(&helper.stdout_gate);
+    {
+        // Stop reading until the producer is surely gone: it started before `data_connected`, so
+        // 8 s from here is past its 6.5 s.
+        let _paused = gate.lock().unwrap();
+        helper.send_cmd(&Cmd::SetState { request_id: 2, edit_mode: Some(true), visible: None });
+        std::thread::sleep(Duration::from_secs(8));
+    }
+    let seen = data_until(&helper, Duration::from_secs(60), |e| *e == Event::DataDisconnected { channel: 1 });
+    // The last few, each event's data cut short (a burst event's is 1000 bytes).
+    let tail: Vec<String> = seen[seen.len().saturating_sub(8)..]
+        .iter()
+        .map(|e| match e {
+            Event::DataEvent { seq, name, data, .. } => format!("{name} #{seq} {data:.8}"),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    let last_event = seen.iter().rev().find_map(|e| match e {
+        Event::DataEvent { name, data, .. } => Some((name.as_str(), data.as_str())),
+        _ => None,
+    });
+    assert!(last_event == Some(("tick", "6")), "the last event must be tick 6; the tail: {tail:?}");
+    let last_ticks = seen.iter().rev().find_map(|e| match e {
+        Event::Info { key, value, .. } if key == "ticks" => Some(value.as_deref()),
+        _ => None,
+    });
+    assert_eq!(last_ticks, Some(Some("6")), "the last ticks must be 6; the tail: {tail:?}");
+}
+
 /// Catches a busy info lock stalling the data thread or ending it (design 2b "Failures": a lock
 /// busy for more than 100 ms is skipped and retried on the next pass), and a value committed
 /// meanwhile being lost (design "A busy lock": the producer keeps the newest value and writes it
