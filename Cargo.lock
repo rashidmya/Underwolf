@@ -642,6 +642,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "uw-input"
+version = "0.0.0"
+dependencies = [
+ "uw-pipe-proto",
+]
+
+[[package]]
 name = "uw-pipe-proto"
 version = "0.0.0"
 dependencies = [
