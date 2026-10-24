@@ -484,8 +484,9 @@ fn open_mapping(name: &str) -> Result<Mapping, Win32Error> {
 
 impl Consumer {
     /// Open channel `channel` of the game `pid` once its producer is ready: `connect` must exist
-    /// and be set (design flow step 2). Then every other object is opened, and the three
-    /// mappings are mapped read-only. Nothing is checked yet: see `attach`.
+    /// and be set (design flow step 2). Then every other object is opened, the three mappings
+    /// are mapped read-only, and `connect` must still be set. Nothing is checked yet: see
+    /// `attach`.
     pub fn open(pid: u32, channel: u32) -> Result<Consumer, OpenError> {
         let name = |o| data_name(pid, channel, o);
         let connect = match open_event(&name(DataObject::Connect)) {
@@ -497,16 +498,33 @@ impl Consumer {
         if unsafe { WaitForSingleObject(connect.0, 0) } != WAIT_OBJECT_0 {
             return Err(OpenError::NotReady);
         }
+        let hello = open_mapping(&name(DataObject::Hello))?;
+        let info = open_mapping(&name(DataObject::Info))?;
+        let events = open_mapping(&name(DataObject::Events))?;
+        let info_lock = open_mutex(&name(DataObject::InfoLock))?;
+        let events_lock = open_mutex(&name(DataObject::EventsLock))?;
+        let disconnect = open_event(&name(DataObject::Disconnect))?;
+        let info_bell = open_event(&name(DataObject::InfoBell))?;
+        let events_bell = open_event(&name(DataObject::EventsBell))?;
+        // Poll `connect` again. Its producer may have dropped while the objects above were
+        // opened, and a new producer may have created some of them since (its own create then
+        // fails at `connect`, which we still hold). `Producer::drop` resets `connect` before any
+        // of its objects closes, so a `connect` still set here proves that every object opened
+        // above belongs to that producer. If it is not set, drop them all and retry later.
+        // SAFETY: polls our event handle without waiting.
+        if unsafe { WaitForSingleObject(connect.0, 0) } != WAIT_OBJECT_0 {
+            return Err(OpenError::NotReady);
+        }
         Ok(Consumer {
             game_pid: pid,
-            hello: open_mapping(&name(DataObject::Hello))?,
-            info: open_mapping(&name(DataObject::Info))?,
-            events: open_mapping(&name(DataObject::Events))?,
-            info_lock: open_mutex(&name(DataObject::InfoLock))?,
-            events_lock: open_mutex(&name(DataObject::EventsLock))?,
-            disconnect: open_event(&name(DataObject::Disconnect))?,
-            info_bell: open_event(&name(DataObject::InfoBell))?,
-            events_bell: open_event(&name(DataObject::EventsBell))?,
+            hello,
+            info,
+            events,
+            info_lock,
+            events_lock,
+            disconnect,
+            info_bell,
+            events_bell,
             _connect: connect,
             reader: None,
             ring: None,
