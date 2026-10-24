@@ -1,0 +1,56 @@
+import { strict as assert } from 'node:assert';
+import { test } from 'node:test';
+import { ProductionInput, productionOptions, BUTTONS } from './production-input';
+const state = (epoch = 1) => JSON.stringify({ event: 'input_state', state: { epoch, active: true, width: 800, height: 600 } });
+const batch = (records: unknown[], first_seq = 1) => JSON.stringify({ event: 'input_batch', batch: { epoch: 1, first_seq, records } });
+const key = { kind: 1, flags: 1, a: 65, b: 30, c: 0, d: 0, modifiers: 0 };
+const tick = () => new Promise<void>(resolve => setImmediate(resolve));
+test('production mode excludes old capture and requires explicit command', () => {
+  assert.deepEqual(productionOptions(['--capture', 'production', '--input-command', '/tmp/launch']), { command: '/tmp/launch' });
+  assert.throws(() => productionOptions(['--capture', 'production', '--capture', 'win32', '--input-command', '/tmp/launch']));
+  assert.throws(() => productionOptions(['--capture', 'production']));
+});
+test('key down does not synthesize a character; epoch clears held state', async () => {
+  const applied: any[] = [];
+  const r = new ProductionInput(async e => { applied.push(e); }, () => {}, reason => assert.fail(reason));
+  r.consume(state()); await tick();
+  r.consume(batch([key])); await tick();
+  assert.deepEqual([...r.heldKeys], [65]);
+  assert.equal(applied.flatMap(e => e.records ?? []).filter(e => e.kind === 2).length, 0);
+  r.consume(state(2)); await tick();
+  assert.deepEqual([...r.heldKeys], []);
+  assert.deepEqual(BUTTONS, ['left', 'middle', 'right', 'back', 'forward']);
+});
+test('challenge waits for surface consumption, including idle challenges', async () => {
+  let resume: (() => void) | undefined;
+  const sent: any[] = [];
+  const r = new ProductionInput(async () => new Promise<void>(resolve => { resume = resolve; }), e => { sent.push(e); }, reason => assert.fail(reason));
+  r.consume(state());
+  r.consume(JSON.stringify({ event: 'input_challenge', challenge: { epoch: 1, nonce: 1, through_seq: 0 } }));
+  assert.equal(sent.length, 0);
+  resume!(); await tick();
+  assert.equal(sent.length, 0);
+  resume!(); await tick();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].cmd, 'input_ack');
+});
+test('overflow and unsafe integer progress close the receiver', () => {
+  let failed = 0;
+  const r = new ProductionInput(() => new Promise(() => {}), () => {}, () => { failed++; });
+  r.consume(state());
+  for (let i = 1; i <= 66; i++) r.consume(batch([key], i));
+  assert.equal(failed, 1);
+  const q = new ProductionInput(async () => {}, () => {}, () => { failed++; });
+  q.consume(state(Number.MAX_SAFE_INTEGER + 1));
+  assert.equal(failed, 2);
+});
+test('disconnect invalidates queued idle challenges and same-epoch state', async () => {
+  const sent: unknown[] = [];
+  const r = new ProductionInput(async () => {}, e => sent.push(e), reason => assert.fail(reason));
+  r.consume(state()); await tick();
+  r.consume('{"event":"overlay_disconnected"}');
+  r.consume(state());
+  r.consume('{"event":"input_challenge","challenge":{"epoch":1,"nonce":2,"through_seq":0}}');
+  await tick();
+  assert.equal(sent.length, 0);
+});

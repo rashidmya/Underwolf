@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Production input test surface</title>
+<style>
+body{margin:0;padding:24px;background:rgba(12,20,29,.94);color:#e7edf6;font:17px system-ui}h1{font-size:22px;margin:0 0 12px}p{margin:8px 0}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:100px;overflow:hidden;background:#202e3e;padding:12px}#pointer{position:absolute;width:8px;height:8px;border:2px solid #75ddbe;border-radius:50%;pointer-events:none;display:none}
+</style>
+<h1>Production input · test surface</h1><p id="mode">Waiting for input session</p>
+<p id="keys">Keys: —</p><p id="buttons">Buttons: —</p><p id="wheel">Wheel: 0, 0</p><pre id="text">Text: </pre>
+<p>Ctrl+Tab toggles capture. This surface tests event delivery.</p><div id="pointer"></div>
+<script>
+const keys=new Set(),buttons=new Set(),labels=['left','middle','right','back','forward'];let text='',epoch=0,width=0,height=0;
+const el=id=>document.getElementById(id);
+function reset(){keys.clear();buttons.clear();el('keys').textContent='Keys: —';el('buttons').textContent='Buttons: —';}
+window.underwolfConsume=event=>{
+ if(event.type==='reset'){reset();el('mode').textContent='Disconnected';return;}
+ if(event.type==='state'){
+  const s=event.state;if(s.epoch!==epoch||s.width!==width||s.height!==height||!s.active)reset();
+  epoch=s.epoch;width=s.width;height=s.height;el('mode').textContent=`${s.active?'Capturing':'Passthrough'} · epoch ${epoch} · ${width} × ${height}`;return;
+ }
+ if(event.type==='records')for(const r of event.records){
+  if(r.kind===1){if(r.flags&1)keys.add(r.a);else keys.delete(r.a);el('keys').textContent='Keys: '+([...keys].join(', ')||'—');}
+  if(r.kind===2){text=(text+String.fromCodePoint(r.a)).slice(-200);el('text').textContent='Text: '+text;}
+  if(r.kind===4){if(r.flags&1)buttons.add(labels[r.a]);else buttons.delete(labels[r.a]);el('buttons').textContent='Buttons: '+([...buttons].join(', ')||'—');}
+  if(r.kind===5)el('wheel').textContent=`Wheel: ${r.a}, ${r.b}`;
+  // A coordinate readout avoids drawing a second cursor over the OS cursor.
+  if(r.kind===3)el('pointer').dataset.position=`${Math.round(r.a*innerWidth/Math.max(1,event.width))},${Math.round(r.b*innerHeight/Math.max(1,event.height))}`;
+ }
+ // executeJavaScript resolves only after this synchronous handler applies all records.
+};
+</script></html>

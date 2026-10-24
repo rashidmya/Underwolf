@@ -5,9 +5,11 @@
   "license": "MIT",
   "main": "dist/main.js",
   "scripts": {
-    "build:native": "cargo build --release -p uw-spike-osr-bridge --features node --manifest-path ../../Cargo.toml && cp ../../target/release/libuw_spike_osr_bridge.so native/osr_bridge.node",
+    "build:native": "cargo build --release -p uw-spike-osr-bridge --features node --manifest-path ../../Cargo.toml && mkdir -p native && cp ../../target/release/libuw_spike_osr_bridge.so native/osr_bridge.node",
     "build": "npm run build:native && tsc",
-    "start": "npm run build --silent && electron --ozone-platform=x11 ."
+    "start": "npm run build --silent && electron --ozone-platform=x11 .",
+    "test:production-input": "tsc && node --test dist/production-input.test.js",
+    "test:production-smoke": "tsc && electron --ozone-platform=x11 dist/production-smoke.js"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

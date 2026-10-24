@@ -26,6 +26,8 @@
 
 import { app, BrowserWindow, ipcMain, screen } from 'electron';
 import { spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
+import { ProductionInput, productionOptions } from './production-input';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -72,6 +74,7 @@ const SOCKET = path.join(os.homedir(), '.cache', 'underwolf-spike', 'overlay.soc
 const TITLE_BAR = 24;
 
 const SIZES: Record<string, { width: number; height: number }> = {
+  'production-input': { width: 640, height: 400 },
   solid: { width: 400, height: 300 },
   animated: { width: 400, height: 300 },
   static: { width: 300, height: 200 },
@@ -89,7 +92,7 @@ interface Widget {
   win?: BrowserWindow;
 }
 
-type Capture = 'wine' | 'surface' | 'win32';
+type Capture = 'wine' | 'surface' | 'win32' | 'production';
 
 function parseArgs(argv: string[]): { consumer: boolean; capture: Capture; widgets: string[]; gep?: string } {
   const widgets: string[] = [];
@@ -103,7 +106,7 @@ function parseArgs(argv: string[]): { consumer: boolean; capture: Capture; widge
     else if (argv[i] === '--widget' && argv[i + 1]) widgets.push(argv[++i]);
     else if (argv[i] === '--capture' && argv[i + 1]) {
       const c = argv[++i];
-      capture = c === 'surface' ? 'surface' : c === 'win32' ? 'win32' : 'wine';
+      capture = c === 'production' ? 'production' : c === 'surface' ? 'surface' : c === 'win32' ? 'win32' : 'wine';
     }
   }
   return { consumer, capture, widgets: widgets.length ? widgets : ['animated'], gep };
@@ -468,7 +471,13 @@ function onWin32Inputs() {
 // ---- Startup ---------------------------------------------------------------------------------
 
 app.whenReady().then(() => {
-  const { consumer, capture, widgets: names, gep } = parseArgs(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  const production = productionOptions(argv);
+  const { consumer, capture, widgets: selected, gep } = parseArgs(argv);
+  const names = production ? ['production-input'] : selected;
+  if (production && process.env.UW_SPIKE_CAPTURE !== 'win32') {
+    throw Error('production mode requires UW_SPIKE_CAPTURE=win32 on host and game; use the layer for drawing only');
+  }
   captureMode = capture;
   bridge.startServer(SOCKET);
   if (capture === 'win32') {
@@ -488,7 +497,30 @@ app.whenReady().then(() => {
     widgets.push(w);
     startWidget(w, consumer);
   }
-  createSurface();
+  if (production) {
+    const child = spawn(production.command, [], { stdio: ['pipe', 'pipe', 'inherit'] });
+    console.log(`[production-input] launcher pid ${child.pid}; receiver pid ${process.pid}`);
+    let paused = false;
+    let resume: (() => void) | undefined;
+    // Test controls deliberately stop consumption, not just logging.
+    process.on('SIGUSR1', () => { paused = true; });
+    process.on('SIGUSR2', () => { paused = false; resume?.(); resume = undefined; });
+    const receiver = new ProductionInput(async event => {
+      if (paused) await new Promise<void>(resolve => { resume = resolve; });
+      const win = widgets[0].win!;
+      await win.webContents.executeJavaScript(`window.underwolfConsume(${JSON.stringify(event)})`, false);
+    }, command => {
+      if (!child.stdin.write(JSON.stringify(command) + '\n')) child.kill();
+    }, reason => { console.error('[production-input]', reason); child.kill(); });
+    const lines = createInterface({ input: child.stdout });
+    lines.on('line', line => { console.log('[production-input]', line); receiver.consume(line); });
+    child.on('error', error => { console.error('[production-input]', error); app.exit(1); });
+    child.on('exit', () => receiver.consume('{"event":"overlay_disconnected"}'));
+    app.on('before-quit', () => child.kill());
+    for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+      process.on(signal, () => { child.kill(); app.exit(0); });
+    }
+  } else createSurface();
   ipcMain.on('surface-input', (_e, ev: SurfaceEvent) => onSurfaceInput(ev));
 
   // A newly connected layer has none of our frames, and static widgets never repaint by
@@ -502,6 +534,7 @@ app.whenReady().then(() => {
       if (captureMode === 'win32' && g !== 0) injectHook();
       for (const w of widgets) w.win?.webContents.invalidate();
     }
+    if (captureMode === 'production') return;
     for (const on of bridge.takeEditRequests()) setEdit(on, `hotkey (${captureMode})`);
     if (captureMode === 'win32') onWin32Inputs();
     else onLayerInputs();
@@ -517,6 +550,6 @@ app.whenReady().then(() => {
       app.exit(1);
     }, 15000);
   }
-});
+}).catch(error => { console.error(error); app.exit(1); });
 
 app.on('window-all-closed', () => {});
