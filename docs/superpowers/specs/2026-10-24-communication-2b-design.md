@@ -77,8 +77,12 @@ Out:
      times out.
 
    Lock waits are at most 100 ms; on a timeout the thread skips and retries on the next pass.
-6. **Disconnect.** On `disconnect` the thread emits `data_disconnected`, closes everything and
-   goes back to step 2.
+6. **Disconnect.** On `disconnect` the thread first reads both regions once more, because the
+   producer may have written just before it went while the thread was busy (for example, blocked
+   on a full stdout), and `disconnect` wins the tie with the bells. The views stay valid while the
+   thread holds the handles. It emits what it finds as on any pass (`info`, `data_lost`,
+   `data_event`); a lock still busy after 100 ms skips that read. Then it emits
+   `data_disconnected`, closes everything and goes back to step 2.
 
 Threads:
 - **The producer** calls `commit`, `push_event` and `flush` from one thread of its own (the API
@@ -193,6 +197,7 @@ A malformed value is a usage error, exit 2, like the helper's other arguments.
 | Bad layout: a magic, size, offset or schema that doesn't fit; a slot length over its `max_len`; text that isn't UTF-8; a seq that goes backwards under the same producer id | `error data_bad_layout`, once per producer, and the same wait for `disconnect`. Every read is checked: the spec's "stop rather than emit wrong data". |
 | Game exits | `game_exited` stops everything, as in 2a. |
 | Stdin closes | The helper exits, as in 2a, in every phase, including while the data thread runs. |
+| A panic in the data thread | The helper prints a line on stderr and exits with code 3, so the relay does not run on without its data. `uw-host` restarts it, as for any helper exit, with `--data-resume`. |
 | Host slow to read (stdout full) | `emit()` blocks the writer, as in 2a. Lines are never split or reordered. |
 | The whole Linux client restarts | `uw-host`'s resume point is lost, so the new helper starts at the write head. Events from the client's downtime are not delivered; the snapshot still restores every current value. |
 
