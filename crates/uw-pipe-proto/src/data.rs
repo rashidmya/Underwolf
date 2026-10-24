@@ -5,11 +5,16 @@
 //!
 //! - `hello`: the 24-byte hello block (magic, format version, producer pid, `producer_id`).
 //! - `schema`: the info store's categories of keys, each key with a maximum value length.
+//! - `info`: the info store (header, schema, per-key timestamps and value slots).
 
 mod hello;
+mod info;
 mod schema;
 
 pub use hello::{HELLO_MAGIC, HELLO_SIZE, Hello, read_hello, write_hello};
+pub use info::{
+    INFO_HEADER_SIZE, INFO_MAGIC, InfoLayout, InfoReader, InfoValue, info_init, info_set,
+};
 pub use schema::{
     MAX_KEYS, MAX_NAME_LEN, MAX_VALUE_LEN, Schema, SchemaCategory, SchemaError, SchemaKey,
 };
