@@ -83,7 +83,8 @@ Out:
 Threads:
 - **The producer** calls `commit`, `push_event` and `flush` from one thread of its own (the API
   takes `&mut self`). It never waits on a shared lock; it only tries with 0 ms. A busy lock leaves
-  the work pending for the next call. In 2b the producer runs on the test overlay's worker thread.
+  the work pending for the next call. In 2b the producer runs on a thread of its own in the test
+  overlay, not on 2a's channel worker.
 - **The data thread is the helper's only reader.** It shares only `emit()` with 2a's relay loop.
   `emit()` writes each line whole under one lock, so control and data lines never interleave
   inside a line.
@@ -185,7 +186,7 @@ A malformed value is a usage error, exit 2, like the helper's other arguments.
 | Helper killed or restarted | `uw-host` restarts it with 2a's backoff and passes `--data-resume`. The new helper sends `data_connected` (`from_seq` = the resume seq), the full snapshot, then every event after the resume seq. |
 | Resume seq older than the ring's oldest record | `data_lost {events: <the gap>}`, then delivery from the oldest record. No event is delivered twice. |
 | Resume names another producer (a new game, a reused pid) | Start at the write head, as on a first attach. |
-| Producer's `dropped` grew | The difference goes into `data_lost`. |
+| Producer's `dropped` grew | The difference goes into `data_lost`. The baseline is the count when the helper attaches, so drops while no helper runs are not reported. |
 | Lock busy for more than 100 ms | Skip and retry on the next pass. |
 | `WAIT_ABANDONED` on a lock | Taken as acquired, then the headers are re-checked (2a's rule). |
 | Hello or header version not 1 | `error data_version_mismatch` (detail: the channel id), once per producer. The thread stops reading and waits for `disconnect`. |
@@ -259,7 +260,7 @@ pages, so the pages were read directly.
 | `crates/uw-helper/src/bin/uw-helper64/` | new `data.rs`: the data thread. `main.rs` parses `--data-channel` and `--data-resume` and starts the thread with the relay. |
 | `crates/uw-host/` | the resume point and the restart argument |
 | `crates/uw-test-overlay/` | the test producer |
-| `crates/uw-test-game/` | `--bad-data-channel`: a hello block with the wrong version |
+| `crates/uw-test-game/` | `--bad-data-channel <version\|layout>`: a hello block with format version 2 (`data_version_mismatch`), or with a wrong magic (`data_bad_layout`) |
 
 ## Testing
 
@@ -285,7 +286,8 @@ pages, so the pages were read directly.
    - kill the helper: after the restart, every tick from the downtime arrives exactly once, with
      contiguous seqs;
    - a burst env var gives `data_lost`;
-   - `--bad-data-channel` gives `data_bad_layout`;
+   - `--bad-data-channel version` gives `data_version_mismatch`, and `--bad-data-channel layout`
+     gives `data_bad_layout`;
    - stdin closing still ends the helper while its data thread runs;
    - 2a's suites stay green.
 4. **The owner's live check in Deadlock**, with the same test overlay:
