@@ -8,9 +8,11 @@
 //! - `info`: the info store (header, schema, per-key timestamps and value slots).
 //! - `ring`: the event ring (header, 30 records).
 //! - `resume`: where event delivery starts and resumes, as pure arithmetic on seqs.
+//! - `outbox`: the producer's pending info and event queue, with its throttle.
 
 mod hello;
 mod info;
+mod outbox;
 mod resume;
 mod ring;
 mod schema;
@@ -19,6 +21,7 @@ pub use hello::{HELLO_MAGIC, HELLO_SIZE, Hello, read_hello, write_hello};
 pub use info::{
     INFO_HEADER_SIZE, INFO_MAGIC, InfoLayout, InfoReader, InfoValue, info_init, info_set,
 };
+pub use outbox::{Outbox, ProduceError, QUEUE_CAP, THROTTLE_MAX, THROTTLE_WINDOW_MS, Throttle};
 pub use resume::{BadResumePoint, CatchUp, RING_SLOTS, ResumePoint, catch_up, start_after};
 pub use ring::{
     Drained, MAX_EVENT_DATA, MAX_EVENT_NAME, RECORD_SIZE, RING_HEADER_SIZE, RING_MAGIC, RING_SIZE,
