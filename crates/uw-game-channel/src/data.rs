@@ -106,7 +106,8 @@ impl Mapping {
 
     fn bytes_mut(&mut self) -> &mut [u8] {
         // SAFETY: as `bytes`, on a read/write view; `&mut self` makes this the only borrow in this
-        // process, and the caller holds the region's lock (or no one else can open it yet).
+        // process, and the caller holds the region's lock (or, in `create`, before `connect` is
+        // set, when no helper reads it).
         unsafe { std::slice::from_raw_parts_mut(self.view.ptr, self.view.len) }
     }
 }
@@ -221,7 +222,7 @@ impl Clock {
     }
 }
 
-/// The in-game side of one channel. Dropping it sets `disconnect` and resets `connect`.
+/// The in-game side of one channel. Dropping it resets `connect`, then sets `disconnect`.
 pub struct Producer {
     outbox: Outbox,
     producer_id: u64,

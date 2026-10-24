@@ -154,7 +154,7 @@ The rules:
 | `commit(&[(category, key, Option<&str>)])` | One info transaction per pass. Signals `info-bell` once if anything changed. |
 | `push_event(name, data)` | Queues an event: a FIFO of 256, oldest dropped and counted in `dropped`. One throttle of 30 events per 200 ms; events over the budget wait in the queue. |
 | `flush()` | Writes pending info and queued events, within the throttle. Call it regularly (the test producer does every 100 ms). |
-| `Drop` | Sets `disconnect` and resets `connect`. |
+| `Drop` | Resets `connect`, then sets `disconnect`. |
 
 An unknown key, or a value, name or data over its limit, comes back as an error. Nothing is
 silently dropped or truncated.
