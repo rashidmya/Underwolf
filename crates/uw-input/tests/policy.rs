@@ -145,3 +145,59 @@ fn focus_loss_invalidates_requests_even_before_capture_starts() {
         CaptureCode::StaleEpoch
     );
 }
+
+#[test]
+fn polling_aliases_and_mouse_follow_held_quarantine() {
+    let mut p = ready();
+    key(&mut p, 162, true);
+    p.event(PolicyEvent::Input(InputRecord::button(1, true, 0, 0, 0)));
+    enter(&mut p);
+    request(&mut p, false);
+    p.event(PolicyEvent::Restored { epoch: p.epoch() });
+    assert!(p.key_suppressed(17));
+    assert!(p.key_suppressed(162));
+    assert!(p.key_suppressed(4));
+    key(&mut p, 162, false);
+    p.event(PolicyEvent::Input(InputRecord::button(1, false, 0, 0, 0)));
+    assert!(!p.key_suppressed(17));
+    assert!(!p.key_suppressed(4));
+}
+
+#[test]
+fn raw_observation_tracks_game_held_keys_and_never_duplicates_captured_input() {
+    let mut p = ready();
+    p.event(PolicyEvent::Observed(InputRecord::key(87, 17, true, false, false, 0)));
+    let entry = request(&mut p, true);
+    assert!(entry.releases.iter().flatten().any(|r| r.a == 87));
+    p.event(PolicyEvent::SetupFinished { epoch: p.epoch(), success: true });
+    let observed = p.event(PolicyEvent::Observed(InputRecord::key(65, 30, true, false, false, 0)));
+    assert!(observed.host.iter().all(Option::is_none));
+    assert_eq!(key(&mut p, 65, true).host.iter().flatten().count(), 1);
+}
+#[test]
+fn hiding_state_is_applied_only_after_restoration() {
+    let mut p = ready();
+    enter(&mut p);
+    let effects = p.event(PolicyEvent::VisibleState { on: false, state_seq: 9 });
+    assert!(effects.applied.is_none());
+    assert!(!p.active());
+    assert_eq!(p.event(PolicyEvent::Restored { epoch: p.epoch() }).applied, Some(9));
+    assert_eq!(p.event(PolicyEvent::VisibleState { on: true, state_seq: 10 }).applied, Some(10));
+    assert!(!p.active());
+}
+
+#[test]
+fn reconnect_while_restoring_reissues_restore_for_the_new_epoch() {
+    let mut p = ready();
+    enter(&mut p);
+    request(&mut p, false);
+    let old = p.epoch();
+    let lost = p.event(PolicyEvent::Disconnected);
+    assert!(p.epoch() > old);
+    assert!(matches!(lost.transition,Some(Transition::Release{epoch,..}) if epoch==p.epoch()));
+    assert_eq!(lost.result.unwrap().code, CaptureCode::Superseded);
+    let connected = p.event(PolicyEvent::Connected);
+    assert!(matches!(connected.transition,Some(Transition::Release{epoch,..}) if epoch==p.epoch()));
+    p.event(PolicyEvent::Restored { epoch: p.epoch() });
+    assert_eq!(p.mode(), Mode::Inactive);
+}

@@ -645,7 +645,19 @@ dependencies = [
 name = "uw-input"
 version = "0.0.0"
 dependencies = [
+ "minhook",
  "uw-pipe-proto",
+ "windows-sys",
+]
+
+[[package]]
+name = "uw-overlay"
+version = "0.0.0"
+dependencies = [
+ "uw-game-channel",
+ "uw-input",
+ "uw-pipe-proto",
+ "windows-sys",
 ]
 
 [[package]]

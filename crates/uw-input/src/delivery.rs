@@ -84,13 +84,13 @@ impl Outbox {
     }
     /// Worker only. A stale reset must never erase a newer epoch's records.
     pub fn reset(&self, epoch: u64) {
-        if let Ok(mut q) = self.queue.lock() {
-            if epoch > q.epoch {
-                q.records.clear();
-                q.epoch = epoch;
-                q.next = 1;
-                self.revoke.store(false, Ordering::Release)
-            }
+        if let Ok(mut q) = self.queue.lock()
+            && epoch > q.epoch
+        {
+            q.records.clear();
+            q.epoch = epoch;
+            q.next = 1;
+            self.revoke.store(false, Ordering::Release)
         }
     }
 }

@@ -9,10 +9,10 @@ impl Utf16Text {
     }
     pub fn push(&mut self, unit: u16) -> [Option<char>; 2] {
         let high = self.high.take();
-        if let Some(h) = high {
-            if (0xdc00..=0xdfff).contains(&unit) {
-                return [char::from_u32(0x10000 + (((h as u32 - 0xd800) << 10) | (unit as u32 - 0xdc00))), None];
-            }
+        if let Some(h) = high
+            && (0xdc00..=0xdfff).contains(&unit)
+        {
+            return [char::from_u32(0x10000 + (((h as u32 - 0xd800) << 10) | (unit as u32 - 0xdc00))), None];
         }
         let prefix = high.map(|_| '\u{fffd}');
         let next = if (0xd800..=0xdbff).contains(&unit) {

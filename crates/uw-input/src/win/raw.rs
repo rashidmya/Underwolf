@@ -1,0 +1,197 @@
+//! Suppress original-call raw output without changing record count or size-query semantics.
+use super::*;
+use crate::raw::{ReleaseSet, neutralize};
+use windows_sys::Win32::{
+    Foundation::{GetLastError, SetLastError},
+    UI::Input::*,
+};
+static RELEASES: Mutex<Option<ReleaseSet>> = Mutex::new(None);
+static DATA: AtomicUsize = AtomicUsize::new(0);
+static BUFFER: AtomicUsize = AtomicUsize::new(0);
+pub(super) fn targets() -> Vec<hooks::Target> {
+    vec![
+        hooks::Target {
+            address: GetRawInputData as *const () as usize,
+            detour: data as *const () as usize,
+            original: &DATA,
+        },
+        hooks::Target {
+            address: GetRawInputBuffer as *const () as usize,
+            detour: buffer as *const () as usize,
+            original: &BUFFER,
+        },
+    ]
+}
+fn observe(record: &[u8]) -> bool {
+    let Some(s) = SHARED.get() else { return false };
+    if s.capture() {
+        return true;
+    }
+    let kind = u32::from_le_bytes(record[..4].try_into().unwrap());
+    if kind == 1 && record.len() >= 40 {
+        if u32::from_le_bytes(record[36..40].try_into().unwrap()) == crate::raw::RELEASE_TAG {
+            return false;
+        }
+        let mut vk = u16::from_le_bytes(record[30..32].try_into().unwrap()) as i32;
+        let scan = u16::from_le_bytes(record[24..26].try_into().unwrap()) as i32;
+        let flags = u16::from_le_bytes(record[26..28].try_into().unwrap());
+        if vk >= 255 {
+            return false;
+        }
+        vk = match vk {
+            16 => {
+                if scan == 0x36 {
+                    161
+                } else {
+                    160
+                }
+            }
+            17 => {
+                if flags & 2 != 0 {
+                    163
+                } else {
+                    162
+                }
+            }
+            18 => {
+                if flags & 2 != 0 {
+                    165
+                } else {
+                    164
+                }
+            }
+            other => other,
+        };
+        return window::observe(s, InputRecord::key(vk, scan, flags & 1 == 0, flags & 2 != 0, false, 0));
+    }
+    if kind == 0 && record.len() >= 48 {
+        if u32::from_le_bytes(record[44..48].try_into().unwrap()) == crate::raw::RELEASE_TAG {
+            return false;
+        }
+        let flags = u16::from_le_bytes(record[28..30].try_into().unwrap());
+        let mut blocked = false;
+        for (button, down) in [1u16, 0x10, 4, 0x40, 0x100].into_iter().enumerate() {
+            if flags & down != 0 {
+                blocked |= window::observe(s, InputRecord::button(button as i32, true, 0, 0, 0));
+            }
+            if flags & (down << 1) != 0 {
+                blocked |= window::observe(s, InputRecord::button(button as i32, false, 0, 0, 0));
+            }
+        }
+        return blocked;
+    }
+    false
+}
+unsafe fn filter(ptr: *mut u8, bytes: usize) {
+    if bytes < 24 {
+        return;
+    }
+    // SAFETY: successful original read initialized the validated span.
+    let original = unsafe { std::slice::from_raw_parts(ptr, bytes) };
+    if !observe(original) {
+        return;
+    }
+    let Ok(mut pending) = RELEASES.try_lock() else {
+        if let Some(s) = SHARED.get() {
+            s.revoke(InputReason::Unavailable);
+        }
+        // Contention must not let the captured input through.
+        // SAFETY: the successful original call initialized this checked byte span.
+        let record = unsafe { std::slice::from_raw_parts_mut(ptr, bytes) };
+        let _ = neutralize(record, &mut ReleaseSet::default());
+        return;
+    };
+    let releases = pending.get_or_insert_with(ReleaseSet::default);
+    // SAFETY: the original API initialized exactly this record's validated byte span.
+    let record = unsafe { std::slice::from_raw_parts_mut(ptr, bytes) };
+    if neutralize(record, releases).is_err()
+        && let Some(s) = SHARED.get()
+    {
+        s.revoke(InputReason::Unavailable)
+    }
+}
+unsafe extern "system" fn data(
+    input: HRAWINPUT,
+    command: u32,
+    out: *mut core::ffi::c_void,
+    size: *mut u32,
+    header: u32,
+) -> u32 {
+    boundary(u32::MAX, || {
+        // SAFETY: trampoline matches GetRawInputData and is published before enabling.
+        let original = unsafe {
+            std::mem::transmute::<
+                usize,
+                unsafe extern "system" fn(HRAWINPUT, u32, *mut core::ffi::c_void, *mut u32, u32) -> u32,
+            >(DATA.load(Ordering::Acquire))
+        };
+        // SAFETY: forward original caller buffers unchanged.
+        let result = unsafe { original(input, command, out, size, header) };
+        // SAFETY: no pointer arguments.
+        let error = unsafe { GetLastError() };
+        if !bypassed() && command == RID_INPUT && !out.is_null() && result != u32::MAX && result >= 24 {
+            // SAFETY: a successful RID_INPUT read initialized result bytes.
+            unsafe { filter(out.cast(), result as usize) }
+        }
+        // SAFETY: preserve the original API error state.
+        unsafe { SetLastError(error) };
+        result
+    })
+}
+unsafe extern "system" fn buffer(out: *mut RAWINPUT, size: *mut u32, header: u32) -> u32 {
+    boundary(u32::MAX, || {
+        // SAFETY: caller provides the required size pointer, or original call handles invalid input.
+        let capacity = if size.is_null() { 0 } else { (unsafe { *size }) as usize };
+        // SAFETY: trampoline matches the API.
+        let original = unsafe {
+            std::mem::transmute::<usize, unsafe extern "system" fn(*mut RAWINPUT, *mut u32, u32) -> u32>(
+                BUFFER.load(Ordering::Acquire),
+            )
+        };
+        // SAFETY: forward original caller buffers unchanged.
+        let result = unsafe { original(out, size, header) };
+        // SAFETY: no pointer arguments.
+        let error = unsafe { GetLastError() };
+        if !bypassed() && !out.is_null() && result != u32::MAX {
+            let mut offset = 0usize;
+            for _ in 0..result {
+                if offset.checked_add(24).is_none_or(|n| n > capacity) {
+                    if let Some(s) = SHARED.get() {
+                        s.revoke(InputReason::Unavailable)
+                    }
+                    break;
+                }
+                // SAFETY: original returned this many records; header lies within the caller's capacity.
+                let ptr = unsafe { out.cast::<u8>().add(offset) };
+                // SAFETY: initialized header length, read unaligned to avoid assuming caller alignment.
+                let len = unsafe { std::ptr::read_unaligned(ptr.add(4).cast::<u32>()) } as usize;
+                if len < 24 || offset.checked_add(len).is_none_or(|n| n > capacity) {
+                    if let Some(s) = SHARED.get() {
+                        s.revoke(InputReason::Unavailable)
+                    }
+                    break;
+                }
+                // SAFETY: this initialized record is fully within the original caller's buffer.
+                unsafe { filter(ptr, len) };
+                offset = (offset + len).div_ceil(8) * 8;
+            }
+        }
+        // SAFETY: preserve original error state after filtering.
+        unsafe { SetLastError(error) };
+        result
+    })
+}
+
+pub(super) fn expect_releases(records: &[Option<InputRecord>; 261]) -> bool {
+    let Ok(mut slot) = RELEASES.try_lock() else { return false };
+    let mut pending = ReleaseSet::default();
+    for record in records.iter().flatten() {
+        match record.kind {
+            1 if (0..256).contains(&record.a) => pending.key_up(record.a as u8),
+            4 if (0..5).contains(&record.a) => pending.mouse_up(record.a as u8),
+            _ => {}
+        }
+    }
+    *slot = Some(pending);
+    true
+}

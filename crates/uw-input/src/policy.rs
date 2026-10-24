@@ -20,10 +20,12 @@ pub enum PolicyEvent {
     Disconnected,
     Foreground(bool),
     Visible(bool),
+    VisibleState { on: bool, state_seq: u64 },
     Healthy(bool),
     Installed(bool),
     Destroyed,
     Input(InputRecord),
+    Observed(InputRecord),
     Char(u16),
     Request(CaptureRequest),
     SetupFinished { epoch: u64, success: bool },
@@ -36,10 +38,11 @@ pub struct Effects {
     pub host: [Option<InputRecord>; 2],
     pub transition: Option<Transition>,
     pub result: Option<CaptureResult>,
+    pub applied: Option<u64>,
 }
 impl Default for Effects {
     fn default() -> Self {
-        Self { pass: false, releases: [None; 261], host: [None; 2], transition: None, result: None }
+        Self { pass: false, releases: [None; 261], host: [None; 2], transition: None, result: None, applied: None }
     }
 }
 pub struct Policy {
@@ -57,6 +60,7 @@ pub struct Policy {
     game_buttons: [Option<InputRecord>; 5],
     suppressed_buttons: [bool; 5],
     pending: Option<CaptureRequest>,
+    pending_visibility: Option<u64>,
     text: Utf16Text,
 }
 impl Default for Policy {
@@ -81,11 +85,26 @@ impl Policy {
             game_buttons: [None; 5],
             suppressed_buttons: [false; 5],
             pending: None,
+            pending_visibility: None,
             text: Utf16Text::default(),
         }
     }
     pub fn active(&self) -> bool {
         self.mode == Mode::Capturing
+    }
+    pub fn key_suppressed(&self, vk: usize) -> bool {
+        let held = |key: usize| self.suppressed_keys[key];
+        match vk {
+            16 => held(16) || held(160) || held(161),
+            17 => held(17) || held(162) || held(163),
+            18 => held(18) || held(164) || held(165),
+            1 => self.suppressed_buttons[0],
+            4 => self.suppressed_buttons[1],
+            2 => self.suppressed_buttons[2],
+            5 => self.suppressed_buttons[3],
+            6 => self.suppressed_buttons[4],
+            _ => self.suppressed_keys.get(vk).copied().unwrap_or(false),
+        }
     }
     pub fn mode(&self) -> Mode {
         self.mode
@@ -151,6 +170,10 @@ impl Policy {
                     self.connected = true;
                     self.healthy = false;
                     self.bump();
+                    if self.mode == Mode::Releasing {
+                        e.transition =
+                            Some(Transition::Release { epoch: self.epoch, reason: InputReason::Disconnected });
+                    }
                 }
             }
             PolicyEvent::Disconnected => {
@@ -161,6 +184,14 @@ impl Policy {
                     self.release(InputReason::Disconnected, &mut e);
                     if old == self.epoch {
                         self.bump();
+                        if self.mode == Mode::Releasing {
+                            e.transition =
+                                Some(Transition::Release { epoch: self.epoch, reason: InputReason::Disconnected });
+                        }
+                    }
+                    self.pending_visibility = None;
+                    if let Some(request) = self.pending.take() {
+                        e.result = Some(result(request, CaptureCode::Superseded));
                     }
                 }
             }
@@ -172,6 +203,14 @@ impl Policy {
                 }
                 if !on {
                     self.release(InputReason::FocusLost, &mut e)
+                }
+            }
+            PolicyEvent::VisibleState { on, state_seq } => {
+                e = self.event(PolicyEvent::Visible(on));
+                if self.mode == Mode::Releasing {
+                    self.pending_visibility = Some(state_seq);
+                } else {
+                    e.applied = Some(state_seq);
                 }
             }
             PolicyEvent::Visible(on) => {
@@ -253,6 +292,7 @@ impl Policy {
             PolicyEvent::Restored { epoch } => {
                 if epoch == self.epoch && self.mode == Mode::Releasing {
                     self.mode = Mode::Inactive;
+                    e.applied = self.pending_visibility.take();
                     if let Some(r) = self.pending.take() {
                         e.result = Some(result(r, CaptureCode::Applied))
                     }
@@ -263,6 +303,13 @@ impl Policy {
                     e.host = self.text.push(unit).map(|c| c.map(|c| InputRecord::text(c, self.modifiers())))
                 } else {
                     e.pass = self.mode == Mode::Inactive
+                }
+            }
+            PolicyEvent::Observed(r) => {
+                // Raw and legacy streams overlap. Raw reads track passthrough held
+                // state/hotkeys, but never provide a second captured host event.
+                if !self.active() {
+                    return self.event(PolicyEvent::Input(r));
                 }
             }
             PolicyEvent::Input(r) => {
