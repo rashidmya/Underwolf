@@ -27,14 +27,18 @@ impl Desired {
 pub struct Driver {
     desired: Desired,
     ids: RequestIds,
+    input_capable: bool,
 }
 
 impl Driver {
     /// `ids` is shared with the host's user, so reconcile commands never reuse a user's id.
     pub fn new(desired: Desired, ids: RequestIds) -> Driver {
-        Driver { desired, ids }
+        Driver { desired, ids, input_capable: false }
     }
 
+    pub fn input_capable(&self) -> bool {
+        self.input_capable
+    }
     pub fn desired(&self) -> &Desired {
         &self.desired
     }
@@ -44,7 +48,9 @@ impl Driver {
         match cmd {
             Command::LoadOverlay { path, .. } => self.desired.overlay = Some(path.clone()),
             Command::SetState { edit_mode, visible, .. } => {
-                if let Some(on) = edit_mode {
+                if let Some(on) = edit_mode
+                    && !self.input_capable
+                {
                     self.desired.edit_mode = *on;
                 }
                 if let Some(on) = visible {
@@ -58,13 +64,27 @@ impl Driver {
     /// A helper event: the commands that bring the game to the desired state.
     pub fn on_event(&mut self, event: &Event) -> Vec<Command> {
         match event {
+            Event::InputReady { .. } => {
+                self.input_capable = true;
+                self.desired.edit_mode = false;
+                vec![]
+            }
+            Event::InputState { state } => {
+                self.desired.edit_mode = state.active;
+                vec![]
+            }
+            Event::OverlayDisconnected if self.input_capable => {
+                self.desired.edit_mode = false;
+                vec![]
+            }
             Event::BootstrapConnected { overlay_loaded: false, .. } => match &self.desired.overlay {
                 Some(path) => vec![Command::LoadOverlay { request_id: self.ids.next(), path: path.clone() }],
                 None => vec![],
             },
-            Event::OverlayConnected { .. } => vec![Command::SetState { input_epoch: None,
+            Event::OverlayConnected { .. } => vec![Command::SetState {
+                input_epoch: None,
                 request_id: self.ids.next(),
-                edit_mode: Some(self.desired.edit_mode),
+                edit_mode: (!self.input_capable).then_some(self.desired.edit_mode),
                 visible: Some(self.desired.visible),
             }],
             _ => vec![],

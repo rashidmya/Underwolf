@@ -114,3 +114,33 @@ fn a_restarted_helper_gets_data_resume_from_the_last_data_event() {
     assert_eq!(next(&host), Event::HelperRestarted { attempt: 1 });
     assert_eq!(next(&host), Event::HelperProtocolError { line: "args --data-resume 77:4".into() });
 }
+
+#[test]
+fn slow_input_receiver_has_a_bounded_backlog_and_visible_overflow() {
+    let host = Host::start(
+        Scripts(vec![
+            r#"
+        i=0
+        while [ "$i" -lt 100 ]; do
+            echo '{"event":"input_challenge","challenge":{"epoch":1,"nonce":1,"through_seq":0}}'
+            i=$((i + 1))
+        done
+        read -r rest
+    "#,
+        ]),
+        Desired::new(None),
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    let mut count = 0;
+    loop {
+        match next(&host) {
+            Event::InputChallenge { .. } => {
+                count += 1;
+                assert!(count <= 64);
+            }
+            Event::Error { code, .. } if code == "input_queue_overflow" => break,
+            Event::Stopped { .. } => panic!("overflow was not reported"),
+            _ => {}
+        }
+    }
+}

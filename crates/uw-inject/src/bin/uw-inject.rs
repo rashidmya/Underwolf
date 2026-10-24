@@ -36,23 +36,60 @@ fn main() {
 /// then share it in the host and the helper); the reply gets the user's id back.
 #[cfg(unix)]
 #[derive(Default)]
-struct UserIds(std::sync::Mutex<std::collections::HashMap<u32, u32>>);
+struct UserIds(std::sync::Mutex<UserIdState>);
+
+#[cfg(unix)]
+#[derive(Default)]
+struct UserIdState {
+    replies: std::collections::HashMap<u32, u32>,
+    captures: std::collections::HashMap<u32, u32>,
+    input: bool,
+}
 
 #[cfg(unix)]
 impl UserIds {
-    /// Parse one stdin line into a command carrying `host_id`; remember the user's id, if any.
     fn outgoing(&self, line: &str, host_id: u32) -> Result<uw_pipe_proto::jsonl::Command, String> {
-        let (cmd, user) = uw_pipe_proto::jsonl::Command::parse_with_id(line, host_id).map_err(|e| e.to_string())?;
+        use uw_pipe_proto::jsonl::Command;
+        let (cmd, user) = Command::parse_with_id(line, host_id).map_err(|e| e.to_string())?;
+        let mut state = self.0.lock().unwrap();
+        if state.input && matches!(cmd, Command::SetState { edit_mode: Some(_), .. }) {
+            if state.captures.len() >= 32 {
+                return Err("input_requests_full".into());
+            }
+            state.captures.insert(host_id, user.unwrap_or(host_id));
+        }
         if let Some(user) = user {
-            self.0.lock().unwrap().insert(host_id, user);
+            state.replies.insert(host_id, user);
         }
         Ok(cmd)
     }
 
-    /// Put the user's id back on a reply (once: the entry is forgotten).
     fn incoming(&self, event: &mut uw_pipe_proto::jsonl::Event) {
+        use uw_pipe_proto::jsonl::Event;
+        let mut state = self.0.lock().unwrap();
+        match event {
+            Event::InputReady { .. } => state.input = true,
+            Event::OverlayDisconnected | Event::GameExited | Event::Stopped { .. } => {
+                state.captures.clear();
+                state.input = false;
+            }
+            Event::CaptureResult { capture_request_id, .. } => {
+                if let Some(user) = state.captures.remove(capture_request_id) {
+                    *capture_request_id = user;
+                }
+                return;
+            }
+            Event::Error { request_id: Some(id), .. } => {
+                if let Some(user) = state.captures.remove(id) {
+                    state.replies.remove(id);
+                    *id = user;
+                    return;
+                }
+            }
+            _ => {}
+        }
         if let Some(id) = event.request_id_mut()
-            && let Some(user) = self.0.lock().unwrap().remove(id)
+            && let Some(user) = state.replies.remove(id)
         {
             *id = user;
         }
@@ -213,6 +250,27 @@ mod tests {
         ids.incoming(&mut error);
         assert_eq!(error, Event::reply_error(5, "overlay_not_connected"));
         assert!(ids.outgoing("not json", 6).is_err());
+    }
+
+    #[test]
+    fn capture_id_survives_acceptance_until_application_or_loss() {
+        use uw_pipe_proto::input::CaptureCode;
+        let ids = UserIds::default();
+        ids.incoming(&mut Event::InputReady { version: 1 });
+        ids.outgoing(r#"{"cmd":"set_state","request_id":42,"input_epoch":1,"edit_mode":true}"#, 7).unwrap();
+        let mut accepted = Event::StateSet { request_id: 7, seq: 2 };
+        ids.incoming(&mut accepted);
+        assert_eq!(accepted.request_id(), Some(42));
+        let mut applied =
+            Event::CaptureResult { epoch: 1, state_seq: 2, capture_request_id: 7, code: CaptureCode::Applied };
+        ids.incoming(&mut applied);
+        assert!(matches!(applied, Event::CaptureResult { capture_request_id: 42, .. }));
+        ids.outgoing(r#"{"cmd":"set_state","request_id":43,"input_epoch":1,"edit_mode":true}"#, 8).unwrap();
+        ids.incoming(&mut Event::OverlayDisconnected);
+        let mut late =
+            Event::CaptureResult { epoch: 1, state_seq: 2, capture_request_id: 8, code: CaptureCode::Applied };
+        ids.incoming(&mut late);
+        assert!(matches!(late, Event::CaptureResult { capture_request_id: 8, .. }));
     }
 
     /// Catches a line that is not UTF-8 ending the reader: every later command would be ignored.

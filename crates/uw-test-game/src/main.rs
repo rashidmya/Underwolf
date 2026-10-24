@@ -124,7 +124,14 @@ mod win {
         }
     }
 
+    static INPUT_LOG: std::sync::OnceLock<std::sync::Mutex<std::fs::File>> = std::sync::OnceLock::new();
     unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if msg == windows_sys::Win32::UI::WindowsAndMessaging::WM_KEYDOWN {
+            use std::io::Write;
+            if let Some(log) = INPUT_LOG.get() && let Ok(mut log) = log.lock() {
+                let _ = writeln!(log, "key {wparam}");
+            }
+        }
         if msg == WM_DESTROY {
             // SAFETY: standard teardown.
             unsafe { PostQuitMessage(0) };
@@ -135,6 +142,9 @@ mod win {
     }
 
     pub fn run() {
+        if let Some(path) = std::env::var_os("UW_TEST_INPUT_LOG") {
+            INPUT_LOG.set(std::sync::Mutex::new(std::fs::File::create(path).expect("input trace"))).ok();
+        }
         // SAFETY: Win32 window creation with a static class name and our own wndproc.
         unsafe {
             let hinstance = GetModuleHandleW(std::ptr::null());

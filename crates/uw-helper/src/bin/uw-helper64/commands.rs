@@ -4,7 +4,7 @@
 //! (design 2a "Failures": no orphan helper keeps the helper mutex).
 
 use std::io::BufRead;
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{sync_channel, Receiver};
 
 use uw_pipe_proto::jsonl::{Command, Event};
 
@@ -41,7 +41,7 @@ pub(crate) fn spawn_stdin_reader() -> Result<Commands, String> {
     if event.is_null() {
         return Err("CreateEventW failed".into());
     }
-    let (tx, rx) = channel();
+    let (tx, rx) = sync_channel(64);
     let signal = event as usize; // a HANDLE is not `Send`; the event is never closed
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {
@@ -51,8 +51,12 @@ pub(crate) fn spawn_stdin_reader() -> Result<Commands, String> {
             }
             match Command::parse(&line) {
                 Ok(cmd) => {
-                    if tx.send(cmd).is_err() {
-                        break;
+                    if tx.try_send(cmd).is_err() {
+                        // A stalled relay must not accumulate input acknowledgements or
+                        // block this reader indefinitely. Process loss fails pending
+                        // commands at the host and revokes capture in the game.
+                        eprintln!("[uw-helper64] command queue overflow; closing session");
+                        std::process::exit(1);
                     }
                     // SAFETY: signals the event created above.
                     unsafe { SetEvent(signal as HANDLE) };

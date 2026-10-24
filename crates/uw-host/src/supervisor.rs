@@ -17,11 +17,11 @@
 
 use std::collections::BTreeMap;
 
-use uw_pipe_proto::data::{ResumePoint, DEFAULT_CHANNEL};
+use uw_pipe_proto::data::{DEFAULT_CHANNEL, ResumePoint};
 use uw_pipe_proto::jsonl::{Command, Event};
 
-use crate::driver::{Desired, Driver};
 use crate::RequestIds;
+use crate::driver::{Desired, Driver};
 
 /// `status ok` -> `overlay_connected` deadline.
 pub const OVERLAY_TIMEOUT_MS: u64 = 10_000;
@@ -67,9 +67,13 @@ pub enum Action {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     /// A helper runs, started at this time.
-    Running { since: u64 },
+    Running {
+        since: u64,
+    },
     /// No helper; the next one starts at this time.
-    Waiting { restart_at: u64 },
+    Waiting {
+        restart_at: u64,
+    },
     Stopped,
 }
 
@@ -251,7 +255,11 @@ impl Supervisor {
     }
 
     fn on_exit(&mut self, now: u64) -> Vec<Action> {
-        let out: Vec<Action> = self.pending.drain(..).map(|c| Action::Emit(not_connected(&c))).collect();
+        self.driver.on_event(&Event::OverlayDisconnected);
+        let mut out: Vec<Action> = self.pending.drain(..).map(|c| Action::Emit(not_connected(&c))).collect();
+        if self.overlay_up && self.driver.input_capable() {
+            out.push(Action::Emit(Event::OverlayDisconnected));
+        }
         self.overlay_up = false;
         self.overlay_deadline = None;
         if let Phase::Running { since } = self.phase {

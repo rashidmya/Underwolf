@@ -11,24 +11,27 @@
 
 use std::io::Write;
 
-use uw_game_channel::objects::{LockError, Objects, LOCK_TIMEOUT_MS};
-use uw_helper::decide::{hello_wait_from_bytes, HelloWait};
+use uw_game_channel::objects::{LOCK_TIMEOUT_MS, LockError, Objects};
+use uw_helper::decide::{HelloWait, hello_wait_from_bytes};
+use uw_helper::input::{CapturePending, InputRelay};
 use uw_helper::pending::Pending;
 use uw_pipe_proto::bells::{bit_names, to_host};
+use uw_pipe_proto::input::{CaptureRequest, InputMessage};
 use uw_pipe_proto::jsonl::{Command, Event};
+use uw_pipe_proto::pipe::encode_input;
 use uw_pipe_proto::pipe::{
-    check_overlay_first, decode, decode_overlay, encode, encode_overlay, Message, OverlayFirst, OverlayMessage,
-    MAX_PATH_UNITS, PROTOCOL_VERSION,
+    MAX_PATH_UNITS, Message, OverlayFirst, OverlayMessage, PROTOCOL_VERSION, check_overlay_first, decode,
+    decode_overlay, encode, encode_overlay,
 };
 use uw_pipe_proto::state;
 
 use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, WaitForMultipleObjects, WaitForSingleObject, INFINITE, PROCESS_SYNCHRONIZE,
+    INFINITE, OpenProcess, PROCESS_SYNCHRONIZE, WaitForMultipleObjects, WaitForSingleObject,
 };
 
 use crate::commands::Commands;
-use crate::pipe_server::{now_ms, PipeEvent, PipeServer};
+use crate::pipe_server::{PipeEvent, PipeServer, now_ms};
 use crate::wait_ms;
 use crate::win32::Channel;
 
@@ -43,6 +46,8 @@ pub(crate) fn emit(event: &Event) {
 }
 
 struct Relay<'a> {
+    input: Option<InputRelay>,
+    captures: CapturePending,
     objects: &'a Objects,
     bootstrap: &'a mut PipeServer,
     overlay: &'a mut PipeServer,
@@ -71,6 +76,8 @@ pub(crate) fn run(
 ) {
     spawn_game_watcher(pid);
     let mut r = Relay {
+        input: None,
+        captures: CapturePending::default(),
         objects: &channel.objects,
         bootstrap,
         overlay: &mut channel.overlay,
@@ -97,8 +104,12 @@ pub(crate) fn run(
         for id in r.pings.expire(now_ms()) {
             emit(&Event::reply_error(id, "overlay_not_responding"));
         }
+        for id in r.captures.expire(now_ms()) {
+            emit(&Event::reply_error(id, "input_application_timeout"));
+        }
         let handles = [commands.event, r.objects.bell_host(), r.bootstrap.event(), r.overlay.event()];
-        let next = [r.loads.next_deadline(), r.pings.next_deadline()].into_iter().flatten().min();
+        let next =
+            [r.loads.next_deadline(), r.pings.next_deadline(), r.captures.next_deadline()].into_iter().flatten().min();
         let timeout = next.map_or(MAX_WAIT_MS, |d| d.saturating_sub(now_ms()).min(MAX_WAIT_MS));
         // SAFETY: waits on four handles this process owns; the result only says "something may be
         // ready", and every source is polled at the top of the loop.
@@ -109,7 +120,16 @@ pub(crate) fn run(
 impl Relay<'_> {
     fn command(&mut self, cmd: Command) {
         match cmd {
-            Command::InputAck { request_id, .. } => emit(&Event::reply_error(request_id, "input_unavailable")),
+            Command::InputAck { request_id, ack } => {
+                if self.input.as_ref().is_none_or(|r| r.request_epoch(Some(ack.epoch)).is_err()) {
+                    emit(&Event::reply_error(request_id, "input_stale_epoch"));
+                } else if self.overlay.write(&encode_input(&OverlayMessage::Input(InputMessage::Ack(ack))).unwrap()) {
+                    emit(&Event::InputAcked { request_id });
+                } else {
+                    emit(&Event::reply_error(request_id, "overlay_not_connected"));
+                    self.drop_overlay();
+                }
+            }
             Command::LoadOverlay { request_id, path } => {
                 if path.encode_utf16().count() > MAX_PATH_UNITS {
                     emit(&Event::reply_error(request_id, "path_too_long"));
@@ -124,9 +144,17 @@ impl Relay<'_> {
                     self.drop_bootstrap();
                 }
             }
-            Command::SetState { input_epoch: _, request_id, edit_mode, visible } => {
+            Command::SetState { input_epoch, request_id, edit_mode, visible } => {
                 if !self.overlay_up {
                     emit(&Event::reply_error(request_id, "overlay_not_connected"));
+                    return;
+                }
+                if edit_mode.is_some() && self.input.as_ref().is_some_and(|r| r.request_epoch(input_epoch).is_err()) {
+                    emit(&Event::reply_error(request_id, "input_stale_epoch"));
+                    return;
+                }
+                if edit_mode.is_some() && self.input.is_some() && !self.captures.available(request_id) {
+                    emit(&Event::reply_error(request_id, "input_requests_full"));
                     return;
                 }
                 let change = match self.objects.lock(LOCK_TIMEOUT_MS) {
@@ -146,6 +174,28 @@ impl Relay<'_> {
                     self.objects.ring_game(change.bits);
                 }
                 emit(&Event::StateSet { request_id, seq: change.seq });
+                if edit_mode.is_some()
+                    && let Some(input) = &self.input
+                    && let Some(current) = input.state
+                {
+                    let request = CaptureRequest {
+                        epoch: current.epoch,
+                        state_seq: change.seq,
+                        request_id,
+                        on: edit_mode.unwrap_or(current.active),
+                    };
+                    // Reserve before sending; every result must match all correlation fields.
+                    if let Err(code) = self.captures.add(request, now_ms()) {
+                        emit(&Event::reply_error(request_id, code));
+                        return;
+                    }
+                    if !self
+                        .overlay
+                        .write(&encode_input(&OverlayMessage::Input(InputMessage::Capture(request))).unwrap())
+                    {
+                        self.drop_overlay();
+                    }
+                }
             }
             Command::Ping { request_id } => {
                 if !self.overlay_up {
@@ -239,7 +289,20 @@ impl Relay<'_> {
                             self.overlay_up = true;
                             emit(&Event::OverlayConnected { module_version });
                         }
-                        OverlayFirst::InputHello { .. } | OverlayFirst::VersionMismatch => {
+                        OverlayFirst::InputHello { module_version } => {
+                            if !self.overlay.write(
+                                &encode_input(&OverlayMessage::Input(InputMessage::Welcome { input_version: 1 }))
+                                    .unwrap(),
+                            ) {
+                                self.drop_overlay();
+                                continue;
+                            }
+                            self.input = Some(InputRelay::default());
+                            self.overlay_up = true;
+                            emit(&Event::InputReady { version: 1 });
+                            emit(&Event::OverlayConnected { module_version });
+                        }
+                        OverlayFirst::VersionMismatch => {
                             emit(&Event::error("version_mismatch"));
                             self.overlay.disconnect();
                         }
@@ -251,6 +314,21 @@ impl Relay<'_> {
                     }
                 }
                 PipeEvent::Message(bytes) => match decode_overlay(&bytes) {
+                    Ok(OverlayMessage::Input(message)) => {
+                        if let InputMessage::Result(result) = &message
+                            && !self.captures.take(*result)
+                        {
+                            eprintln!("[uw-helper64] late or unmatched capture result: {result:?}");
+                            continue;
+                        }
+                        match self.input.as_mut().ok_or("input_unavailable").and_then(|r| r.accept(message)) {
+                            Ok(event) => emit(&event),
+                            Err(code) => {
+                                emit(&Event::error(code));
+                                self.drop_overlay();
+                            }
+                        }
+                    }
                     Ok(OverlayMessage::Pong { nonce, seen_seq }) => {
                         if self.pings.take(nonce) {
                             emit(&Event::Pong { request_id: nonce, seen_seq });
@@ -298,6 +376,10 @@ impl Relay<'_> {
     }
 
     fn overlay_lost(&mut self) {
+        for id in self.captures.drain() {
+            emit(&Event::reply_error(id, "input_application_lost"));
+        }
+        self.input = None;
         if self.overlay_up {
             emit(&Event::OverlayDisconnected);
         }

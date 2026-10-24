@@ -7,3 +7,5 @@
 pub mod data_pass;
 pub mod decide;
 pub mod pending;
+
+pub mod input;

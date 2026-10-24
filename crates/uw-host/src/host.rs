@@ -7,15 +7,19 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{ChildStdin, Command, Stdio};
-use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use uw_pipe_proto::jsonl::{Command as HelperCommand, Event};
 
-use crate::discovery::{helper_command, GameSession};
+use crate::RequestIds;
+use crate::discovery::{GameSession, helper_command};
 use crate::driver::Desired;
 use crate::supervisor::{Action, Input, Supervisor};
-use crate::RequestIds;
 
 /// How the host starts one helper process.
 pub trait Launch: Send + 'static {
@@ -53,6 +57,7 @@ impl Launch for WineLaunch {
 }
 
 pub struct Host {
+    input_backlog: Arc<AtomicUsize>,
     inputs: Sender<Input>,
     events: Receiver<Event>,
     ids: RequestIds,
@@ -85,11 +90,13 @@ impl Host {
         let (etx, events) = channel();
         let supervisor = Supervisor::new(desired, ids.clone());
         let tx = inputs.clone();
+        let input_backlog = Arc::new(AtomicUsize::new(0));
+        let backlog = input_backlog.clone();
         std::thread::Builder::new()
             .name("uw-host".into())
-            .spawn(move || run(supervisor, launch, rx, tx, etx))
+            .spawn(move || run(supervisor, launch, rx, tx, etx, backlog))
             .expect("spawn the host thread");
-        Host { inputs, events, ids }
+        Host { inputs, events, ids, input_backlog }
     }
 
     /// A fresh request id, for a command that has none.
@@ -110,11 +117,20 @@ impl Host {
 
     /// The next event; `None` once the host has stopped and its helper has exited.
     pub fn recv(&self) -> Option<Event> {
-        self.events.recv().ok()
+        let event = self.events.recv().ok()?;
+        self.received(&event);
+        Some(event)
     }
 
     pub fn recv_timeout(&self, d: Duration) -> Result<Event, RecvTimeoutError> {
-        self.events.recv_timeout(d)
+        let event = self.events.recv_timeout(d)?;
+        self.received(&event);
+        Ok(event)
+    }
+    fn received(&self, event: &Event) {
+        if input_event(event) {
+            self.input_backlog.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 }
 
@@ -126,7 +142,7 @@ impl Drop for Host {
 
 /// Spawn a helper and its stdout reader. The reader sends each non-empty line, then
 /// `HelperExited` once stdout closes and the helper is reaped.
-fn spawn(mut cmd: Command, tx: &Sender<Input>) -> Result<ChildStdin, String> {
+fn spawn(mut cmd: Command, tx: &Sender<Input>, backlog: Arc<AtomicUsize>) -> Result<ChildStdin, String> {
     let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().map_err(|e| {
         eprintln!("[uw-host] starting the helper: {e}");
         "helper_start_failed".to_string()
@@ -146,6 +162,14 @@ fn spawn(mut cmd: Command, tx: &Sender<Input>) -> Result<ChildStdin, String> {
             }
             let line = String::from_utf8_lossy(&buf);
             let line = line.trim_end_matches(['\n', '\r']);
+            if Event::parse(line).is_ok_and(|e| input_event(&e))
+                && backlog.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < 64).then_some(n + 1)).is_err() {
+                    // No input can be silently dropped: end the helper session and
+                    // let its local game lease expire independently of the reader.
+                    let _ = tx.send(Input::HelperLine(Event::error("input_queue_overflow").to_line()));
+                    let _ = child.kill();
+                    break;
+                }
             if !line.trim().is_empty() && tx.send(Input::HelperLine(line.to_string())).is_err() {
                 break;
             }
@@ -156,7 +180,14 @@ fn spawn(mut cmd: Command, tx: &Sender<Input>) -> Result<ChildStdin, String> {
     Ok(stdin)
 }
 
-fn run(mut sup: Supervisor, mut launch: impl Launch, rx: Receiver<Input>, tx: Sender<Input>, events: Sender<Event>) {
+fn run(
+    mut sup: Supervisor,
+    mut launch: impl Launch,
+    rx: Receiver<Input>,
+    tx: Sender<Input>,
+    events: Sender<Event>,
+    backlog: Arc<AtomicUsize>,
+) {
     let epoch = Instant::now();
     let now = || epoch.elapsed().as_millis() as u64;
     let mut stdin: Option<ChildStdin> = None;
@@ -167,13 +198,15 @@ fn run(mut sup: Supervisor, mut launch: impl Launch, rx: Receiver<Input>, tx: Se
         let mut i = 0;
         while i < actions.len() {
             match actions[i].clone() {
-                Action::StartHelper { args } => match launch.command(&args).and_then(|cmd| spawn(cmd, &tx)) {
-                    Ok(s) => {
-                        stdin = Some(s);
-                        helper_running = true;
+                Action::StartHelper { args } => {
+                    match launch.command(&args).and_then(|cmd| spawn(cmd, &tx, backlog.clone())) {
+                        Ok(s) => {
+                            stdin = Some(s);
+                            helper_running = true;
+                        }
+                        Err(code) => actions.extend(sup.handle(Input::StartFailed(code), now())),
                     }
-                    Err(code) => actions.extend(sup.handle(Input::StartFailed(code), now())),
-                },
+                }
                 Action::Send(cmd) => {
                     if let Some(s) = stdin.as_mut() {
                         // A write that fails means the helper is exiting; its `HelperExited`
@@ -215,4 +248,16 @@ fn run(mut sup: Supervisor, mut launch: impl Launch, rx: Receiver<Input>, tx: Se
         }
         actions.extend(sup.tick(now()));
     }
+}
+
+fn input_event(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::InputReady { .. }
+            | Event::InputState { .. }
+            | Event::InputBatch { .. }
+            | Event::InputChallenge { .. }
+            | Event::CaptureResult { .. }
+            | Event::InputAcked { .. }
+    )
 }
