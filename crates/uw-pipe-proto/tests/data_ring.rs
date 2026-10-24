@@ -252,6 +252,45 @@ fn records_and_headers_that_do_not_fit_are_refused() {
     );
 }
 
+/// Catches a ring whose counters are out of range being read: a `write_seq` or a `dropped` above
+/// `i64::MAX` is a bad layout (no real producer gets there), and `i64::MAX` itself still reads.
+#[test]
+fn counters_out_of_range_are_a_bad_layout() {
+    let layout = |why: &str| ReadError::Layout(why.into());
+    let over = (i64::MAX as u64) + 1;
+    let mut r = ring();
+    r[8..16].copy_from_slice(&over.to_le_bytes());
+    assert_eq!(
+        read_ring_head(&r),
+        Err(layout("event ring write_seq is over i64::MAX"))
+    );
+    assert_eq!(
+        RingReader::start(&r, 7, None).unwrap_err(),
+        layout("event ring write_seq is over i64::MAX")
+    );
+    let mut r = ring();
+    r[16..24].copy_from_slice(&over.to_le_bytes());
+    assert_eq!(
+        read_ring_head(&r),
+        Err(layout("event ring dropped is over i64::MAX"))
+    );
+    assert_eq!(
+        RingReader::start(&r, 7, None).unwrap_err(),
+        layout("event ring dropped is over i64::MAX")
+    );
+
+    let mut r = ring();
+    r[8..16].copy_from_slice(&(i64::MAX as u64).to_le_bytes());
+    r[16..24].copy_from_slice(&(i64::MAX as u64).to_le_bytes());
+    assert_eq!(
+        read_ring_head(&r),
+        Ok(RingHead {
+            write_seq: i64::MAX as u64,
+            dropped: i64::MAX as u64
+        })
+    );
+}
+
 /// Catches the resume arithmetic going wrong (design "Failures"): the records after the resume
 /// seq, a gap counted when the ring no longer holds them, and a resume point ahead of the ring.
 #[test]

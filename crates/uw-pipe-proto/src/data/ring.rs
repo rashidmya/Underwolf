@@ -78,7 +78,7 @@ pub struct RingHead {
     pub dropped: u64,
 }
 
-/// Check the ring's size, magic and version, and read its counters.
+/// Check the ring's size, magic and version, and read its counters (each at most `i64::MAX`).
 pub fn read_ring_head(region: &[u8]) -> Result<RingHead, ReadError> {
     if region.len() < RING_SIZE {
         return Err(ReadError::Layout(format!(
@@ -93,10 +93,19 @@ pub fn read_ring_head(region: &[u8]) -> Result<RingHead, ReadError> {
     if version != FORMAT_VERSION {
         return Err(ReadError::Version(version));
     }
-    Ok(RingHead {
-        write_seq: rd_u64(region, OFF_WRITE_SEQ),
-        dropped: rd_u64(region, OFF_DROPPED),
-    })
+    let write_seq = rd_u64(region, OFF_WRITE_SEQ);
+    if write_seq > i64::MAX as u64 {
+        return Err(ReadError::Layout(
+            "event ring write_seq is over i64::MAX".into(),
+        ));
+    }
+    let dropped = rd_u64(region, OFF_DROPPED);
+    if dropped > i64::MAX as u64 {
+        return Err(ReadError::Layout(
+            "event ring dropped is over i64::MAX".into(),
+        ));
+    }
+    Ok(RingHead { write_seq, dropped })
 }
 
 /// One event as the helper read it.

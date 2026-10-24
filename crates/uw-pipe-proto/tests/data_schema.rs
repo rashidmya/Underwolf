@@ -248,3 +248,15 @@ fn too_many_categories_or_keys_are_refused() {
     }
     assert_eq!(Schema::parse(&bytes), Err(SchemaError::TooManyKeys(over)));
 }
+
+/// Catches an off-by-one at the category cap: exactly `MAX_CATEGORIES` categories fit `new` and
+/// `parse`, and survive a round trip.
+#[test]
+fn exactly_max_categories_fit() {
+    let categories: Vec<SchemaCategory> = (0..MAX_CATEGORIES)
+        .map(|i| SchemaCategory::new(&format!("c{i}"), &[]))
+        .collect();
+    let schema = Schema::new(categories).unwrap();
+    assert_eq!(schema.categories().len(), MAX_CATEGORIES);
+    assert_eq!(Schema::parse(&schema.serialize()), Ok(schema));
+}

@@ -5,9 +5,9 @@
 //!
 //! The producer builds it once, at create (`Schema::new`); the helper parses the copy it finds in
 //! the info store (`Schema::parse`). Both apply the design's limits: names of at most
-//! `MAX_NAME_LEN` bytes, a `max_len` of at most `MAX_VALUE_LEN`, at most `MAX_KEYS` keys and at most
-//! `MAX_CATEGORIES` categories. A name
-//! used twice (a category, or a key within its category) does not fit either.
+//! `MAX_NAME_LEN` bytes, a `max_len` of at most `MAX_VALUE_LEN`, at most `MAX_KEYS` keys and at
+//! most `MAX_CATEGORIES` categories. A name used twice (a category, or a key within its category)
+//! does not fit either.
 
 use serde::{Deserialize, Serialize};
 
