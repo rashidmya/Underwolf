@@ -1,3 +1,4 @@
+use uw_pipe_proto::data::SchemaCategory;
 use uw_pipe_proto::jsonl::{Command, Event};
 
 #[test]
@@ -119,4 +120,51 @@ fn events_have_the_design_wire_form() {
 fn unknown_command_is_an_error() {
     assert!(Command::parse(r#"{"cmd":"nope","request_id":1}"#).is_err());
     assert!(Command::parse("not json").is_err());
+}
+
+fn data_events() -> Vec<Event> {
+    vec![
+        Event::DataConnected {
+            channel: 1,
+            producer_id: 123_456,
+            from_seq: 7,
+            schema: vec![SchemaCategory::new("test", &[("ticks", 32), ("last_seq", 32)])],
+        },
+        Event::Info { channel: 1, category: "test".into(), key: "ticks".into(), value: Some("3".into()), ts: 40 },
+        Event::Info { channel: 1, category: "test".into(), key: "last_seq".into(), value: None, ts: 41 },
+        Event::DataEvent { channel: 1, seq: 8, name: "tick".into(), data: "3".into(), ts: 42 },
+        Event::DataLost { channel: 1, events: 12 },
+        Event::DataDisconnected { channel: 1 },
+        Event::data_error("data_bad_layout", 1),
+    ]
+}
+
+/// Catches renamed data events or fields, or a null value left out instead of sent as `null`:
+/// these are the wire forms in the design's "New JSON events" table.
+#[test]
+fn data_events_have_the_design_wire_form() {
+    let lines: Vec<String> = data_events().iter().map(Event::to_line).collect();
+    assert_eq!(
+        lines,
+        [
+            r#"{"event":"data_connected","channel":1,"producer_id":123456,"from_seq":7,"schema":[{"category":"test","keys":[{"key":"ticks","max_len":32},{"key":"last_seq","max_len":32}]}]}"#,
+            r#"{"event":"info","channel":1,"category":"test","key":"ticks","value":"3","ts":40}"#,
+            r#"{"event":"info","channel":1,"category":"test","key":"last_seq","value":null,"ts":41}"#,
+            r#"{"event":"data_event","channel":1,"seq":8,"name":"tick","data":"3","ts":42}"#,
+            r#"{"event":"data_lost","channel":1,"events":12}"#,
+            r#"{"event":"data_disconnected","channel":1}"#,
+            r#"{"event":"error","code":"data_bad_layout","detail":1}"#,
+        ]
+    );
+}
+
+/// Catches a data event that does not parse back, or one taken for a reply (design: data events
+/// carry no `request_id`, so they never touch pending commands).
+#[test]
+fn data_events_round_trip_and_are_not_replies() {
+    for e in data_events() {
+        assert_eq!(Event::parse(&e.to_line()).unwrap(), e);
+        assert_eq!(e.request_id(), None, "{e:?}");
+        assert!(e.clone().request_id_mut().is_none(), "{e:?}");
+    }
 }

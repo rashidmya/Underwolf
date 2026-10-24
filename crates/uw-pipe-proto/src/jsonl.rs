@@ -1,10 +1,14 @@
 //! The Linux-host <-> helper channel: one JSON object per line (design 2a "Linux ↔ helper").
 //! Commands travel on the helper's stdin, events on its stdout (diagnostics on stderr). Every
 //! command carries a `request_id`, and its one reply (`status`, `state_set`, `pong`, or an `error`)
-//! echoes it. `uw-host` adds its own events (the last four `Event` variants) to the stream it
-//! hands its user. Serialized with serde; `to_line` never contains a newline.
+//! echoes it. The game-data channel's events (design 2b: `data_connected`, `info`, `data_event`,
+//! `data_lost`, `data_disconnected`) carry its `channel` and no `request_id`. `uw-host` adds its
+//! own events (the last four `Event` variants) to the stream it hands its user. Serialized with
+//! serde; `to_line` never contains a newline.
 
 use serde::{Deserialize, Serialize};
+
+use crate::data::SchemaCategory;
 
 /// Host -> helper.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +55,19 @@ pub enum Event {
     BootstrapDisconnected,
     /// The game process ended (the helper then exits 0).
     GameExited,
+    /// Data channel `channel` was opened and checked (design 2b): its producer, the seq after
+    /// which events will be delivered, and its schema. The snapshot's `info` lines follow.
+    DataConnected { channel: u32, producer_id: u64, from_seq: u64, schema: Vec<SchemaCategory> },
+    /// One info key: the snapshot after `data_connected`, then each change. `value` null is a
+    /// key set to null.
+    Info { channel: u32, category: String, key: String, value: Option<String>, ts: u64 },
+    /// One event from the ring, in seq order.
+    DataEvent { channel: u32, seq: u64, name: String, data: String, ts: u64 },
+    /// `events` were lost before the events that follow: overwritten before they were read, plus
+    /// growth in the producer's dropped count.
+    DataLost { channel: u32, events: u64 },
+    /// The producer set `disconnect`.
+    DataDisconnected { channel: u32 },
     /// A failure. `request_id` is set when it answers a command; `detail` carries a
     /// `GetLastError` where there is one.
     Error {
@@ -79,6 +96,12 @@ impl Event {
     /// An error that answers the command `request_id`.
     pub fn reply_error(request_id: u32, code: &str) -> Event {
         Event::Error { request_id: Some(request_id), code: code.to_string(), detail: None }
+    }
+
+    /// A data channel error (`data_version_mismatch`, `data_bad_layout`): `detail` is the
+    /// channel id (design 2b).
+    pub fn data_error(code: &str, channel: u32) -> Event {
+        Event::Error { request_id: None, code: code.to_string(), detail: Some(channel) }
     }
 
     /// The `request_id` a reply answers (`status`, `state_set`, `pong`, or an `error` that
