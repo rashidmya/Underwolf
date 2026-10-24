@@ -1,7 +1,7 @@
 # Input 3a — production keyboard and mouse capture
 
 **Date:** 2026-10-24
-**Status:** Draft for owner review; implementation not yet authorized by this document.
+**Status:** Approved by the owner on 2026-10-24; implementation plan next.
 
 ## Intent and decisions
 
@@ -10,7 +10,8 @@ work from plans 1, 2a and 2b. A player can enter exclusive input mode, use a tes
 to the game without stuck keys, mouse movement leaking into the game, or a trapped cursor.
 
 The owner accepted splitting roadmap item 3 into 3a and 3b. This document proposes the detailed
-3a behavior; choices below are the author's recommendations, not previously approved owner decisions.
+3a behavior. The owner approved this document after the builder check; the detailed choices
+originated as the author's recommendations.
 The parent design's Linux/Proton priority and read/draw-only constraints continue to apply.
 
 ## Approaches
@@ -226,5 +227,5 @@ pass is not a substitute for evidence about Proton input, cursor behavior or per
 ## Builder check
 
 2026-10-24: a separate read-only reviewer checked whether consequential unanswered questions
-prevented an implementation plan. Result: "nothing important left". Owner approval of the
-proposed behavior is still pending.
+prevented an implementation plan. Result: "nothing important left". The owner subsequently
+approved the proposed behavior.
