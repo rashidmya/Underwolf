@@ -120,6 +120,16 @@ fn pending_keys_keep_their_own_timestamps_and_the_newest_value() {
     o.commit(&[("test", "ticks", Some("2"))], 40).unwrap();
     assert!(!o.write_info(&mut info));
     assert_eq!(r.changes(&info).unwrap(), []);
+    // The bell rings when any key changed, not only the last one committed.
+    o.commit(
+        &[
+            ("test", "ticks", Some("3")),
+            ("test", "last_seq", Some("7")),
+        ],
+        50,
+    )
+    .unwrap();
+    assert!(o.write_info(&mut info));
 }
 
 /// Catches an event over the design's limits being queued (or truncated) instead of refused.
@@ -187,4 +197,19 @@ fn queue_overflow_is_counted_and_the_rest_wait_for_the_throttle() {
     }
     assert!(!o.has_pending_events());
     assert!(!o.write_events(&mut r, now));
+}
+
+/// Catches an empty queue spending throttle budget (the budget check must come after the
+/// emptiness check), which would leave events waiting that the window had room for.
+#[test]
+fn an_empty_queue_spends_no_throttle_budget() {
+    let (mut o, _) = outbox();
+    let mut r = ring();
+    o.push_event("one", "", 0).unwrap();
+    o.write_events(&mut r, 0);
+    for i in 0..29u64 {
+        o.push_event("more", &i.to_string(), 0).unwrap();
+    }
+    o.write_events(&mut r, 0);
+    assert_eq!(o.queued(), 0);
 }
