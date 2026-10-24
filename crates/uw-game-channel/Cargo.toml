@@ -8,8 +8,10 @@ publish.workspace = true
 # The control channel's in-game side (design 2a). `objects` holds the named doorbells, mask
 # region, state block and lock: the helper creates them (`Objects::create`) and the game only
 # opens them (`Objects::open`). `start` runs the in-game worker (overlay pipe, bells, ping). An
-# overlay module links it. Windows only; on Linux the crate is empty. The examples are the gate
-# probes run by `tests/wine_objects.rs`.
+# overlay module links it. `data` is the game-data channel (design 2b): `Producer` in the game,
+# `Consumer` in the helper. Windows only; on Linux the crate only re-exports the layouts' types.
+# The examples are the gate probes run by `tests/wine_objects.rs` (2a) and `tests/wine_data.rs`
+# (2b).
 [lib]
 name = "uw_game_channel"
 
@@ -26,6 +28,8 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_System_Memory",
+    "Win32_System_Performance",
     "Win32_System_Pipes",
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
 ] }

@@ -19,7 +19,7 @@ use windows_sys::Win32::Foundation::{
     WAIT_OBJECT_0,
 };
 use windows_sys::Win32::System::Memory::{
-    CreateFileMappingW, MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, VirtualQuery, FILE_MAP_READ,
+    CreateFileMappingW, MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, VirtualQuery, FILE_MAP, FILE_MAP_READ,
     FILE_MAP_WRITE, MEMORY_BASIC_INFORMATION, MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE,
 };
 use windows_sys::Win32::System::Threading::{
@@ -31,11 +31,11 @@ use windows_sys::Win32::System::Threading::{
 /// command fails with `state_busy`). Game threads other than the worker use 0.
 pub const LOCK_TIMEOUT_MS: u32 = 100;
 
-fn wide(s: &str) -> Vec<u16> {
+pub(crate) fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
 
-fn last_error() -> u32 {
+pub(crate) fn last_error() -> u32 {
     // SAFETY: no arguments.
     unsafe { GetLastError() }
 }
@@ -88,8 +88,8 @@ impl From<LockError> for ObjectsError {
     }
 }
 
-/// An owned kernel handle, closed on drop.
-struct Handle(HANDLE);
+/// An owned kernel handle, closed on drop. `data` uses it too.
+pub(crate) struct Handle(pub(crate) HANDLE);
 
 impl Drop for Handle {
     fn drop(&mut self) {
@@ -99,17 +99,22 @@ impl Drop for Handle {
 }
 
 /// A mapped view of a whole file mapping, unmapped on drop. `len` is the mapped region from
-/// `VirtualQuery` (whole pages, so at least the object's size).
-struct View {
-    ptr: *mut u8,
-    len: usize,
+/// `VirtualQuery` (whole pages, so at least the object's size). `data` uses it too.
+pub(crate) struct View {
+    pub(crate) ptr: *mut u8,
+    pub(crate) len: usize,
 }
 
 impl View {
     fn map(mapping: &Handle, name: &str) -> Result<View, ObjectsError> {
-        // SAFETY: maps the whole object read/write; `VirtualQuery` only describes our own view.
+        View::map_as(mapping, FILE_MAP_READ | FILE_MAP_WRITE, name)
+    }
+
+    /// Map the whole object with `access` (`FILE_MAP_READ` alone gives a read-only view).
+    pub(crate) fn map_as(mapping: &Handle, access: FILE_MAP, name: &str) -> Result<View, ObjectsError> {
+        // SAFETY: maps the whole object with `access`; `VirtualQuery` only describes our own view.
         unsafe {
-            let addr = MapViewOfFile(mapping.0, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, 0);
+            let addr = MapViewOfFile(mapping.0, access, 0, 0, 0);
             if addr.Value.is_null() {
                 return Err(win32("MapViewOfFile", name));
             }
