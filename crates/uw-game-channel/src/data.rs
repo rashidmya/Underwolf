@@ -345,10 +345,11 @@ impl Producer {
 
 impl Drop for Producer {
     fn drop(&mut self) {
+        // Reset `connect` first: a consumer woken by `disconnect` must already find it reset.
         // SAFETY: sets and resets our own event handles; the handles close after this.
         unsafe {
-            SetEvent(self.disconnect.0);
             ResetEvent(self.connect.0);
+            SetEvent(self.disconnect.0);
         }
     }
 }
