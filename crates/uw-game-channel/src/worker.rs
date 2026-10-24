@@ -166,7 +166,7 @@ fn serve_once<F: FnMut(&Link<'_>, u64, &StateV1)>(
     }
 }
 
-enum Read {
+pub(super) enum Read {
     Pending,
     Message(Vec<u8>),
     Broken,
@@ -174,7 +174,7 @@ enum Read {
 
 /// The overlay-pipe client: an overlapped, message-mode handle with one read pending at a time.
 /// Dropping it cancels the read (and waits for the cancel) and closes everything, also on unwind.
-struct Client {
+pub(super) struct Client {
     pipe: HANDLE,
     read_event: HANDLE,
     write_event: HANDLE,
@@ -190,7 +190,7 @@ fn manual_event() -> HANDLE {
 
 impl Client {
     /// `None` while the pipe is missing or busy (both mean "retry later").
-    fn connect(name: &str) -> Option<Client> {
+    pub(super) fn connect(name: &str) -> Option<Client> {
         let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
         // SAFETY: NUL-terminated name; opens an existing pipe for overlapped duplex I/O.
         let pipe = unsafe {
@@ -228,7 +228,7 @@ impl Client {
     }
 
     /// Start reading the next message. `false`: the pipe is gone.
-    fn start_read(&mut self) -> bool {
+    pub(super) fn start_read(&mut self) -> bool {
         // SAFETY: an overlapped read into `buf` (never resized) on the boxed `ov`; both live in
         // `self` until the read completes or `Drop` cancels it.
         let err = unsafe {
@@ -242,7 +242,7 @@ impl Client {
         self.reading
     }
 
-    fn poll_read(&mut self) -> Read {
+    pub(super) fn poll_read(&mut self) -> Read {
         if !self.reading {
             return Read::Broken;
         }
@@ -262,7 +262,7 @@ impl Client {
     }
 
     /// Write one message, waiting at most `WRITE_TIMEOUT_MS`. `false`: the pipe is gone.
-    fn write(&self, bytes: &[u8]) -> bool {
+    pub(super) fn write(&self, bytes: &[u8]) -> bool {
         // SAFETY: an overlapped write with its own event; on a timeout it is cancelled and the
         // cancel awaited before `ov` and `bytes` go out of scope.
         unsafe {

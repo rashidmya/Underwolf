@@ -22,3 +22,5 @@ mod worker;
 
 #[cfg(windows)]
 pub use worker::{start, Link};
+
+pub mod input;
