@@ -9,16 +9,26 @@
 use serde::{Deserialize, Serialize};
 
 use crate::data::SchemaCategory;
+use crate::input::{CaptureCode, InputAck, InputBatch, InputChallenge, InputState};
 
 /// Host -> helper.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Command {
+    InputAck {
+        request_id: u32,
+        ack: InputAck,
+    },
     /// Load (and start) the overlay at this Windows path. Reply: `status`.
-    LoadOverlay { request_id: u32, path: String },
+    LoadOverlay {
+        request_id: u32,
+        path: String,
+    },
     /// Set the given state fields. Reply: `state_set` with the block's `seq` (not bumped, and no
     /// bell, if nothing changed).
     SetState {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_epoch: Option<u64>,
         request_id: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         edit_mode: Option<bool>,
@@ -26,13 +36,36 @@ pub enum Command {
         visible: Option<bool>,
     },
     /// Reply: `pong` from the overlay.
-    Ping { request_id: u32 },
+    Ping {
+        request_id: u32,
+    },
 }
 
 /// Helper -> host, and `uw-host`'s own events.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
+    InputReady {
+        version: u16,
+    },
+    InputState {
+        state: InputState,
+    },
+    InputBatch {
+        batch: InputBatch,
+    },
+    InputChallenge {
+        challenge: InputChallenge,
+    },
+    CaptureResult {
+        epoch: u64,
+        state_seq: u64,
+        capture_request_id: u32,
+        code: CaptureCode,
+    },
+    InputAcked {
+        request_id: u32,
+    },
     /// The bootstrap connected and sent `hello`; `overlay_path` is the overlay it already runs.
     BootstrapConnected {
         overlay_loaded: bool,
@@ -41,33 +74,71 @@ pub enum Event {
     },
     /// The bootstrap's reply to `load_overlay`: the lowercase code, a numeric `detail` (a Windows
     /// error or the start function's code, 0 if none) and a human message.
-    Status { request_id: u32, code: String, detail: u32, message: String },
+    Status {
+        request_id: u32,
+        code: String,
+        detail: u32,
+        message: String,
+    },
     /// The reply to `set_state`.
-    StateSet { request_id: u32, seq: u64 },
+    StateSet {
+        request_id: u32,
+        seq: u64,
+    },
     /// The overlay's reply to `ping`: the last `seq` it applied.
-    Pong { request_id: u32, seen_seq: u64 },
+    Pong {
+        request_id: u32,
+        seen_seq: u64,
+    },
     /// The overlay connected to its pipe and sent `overlay_hello`.
-    OverlayConnected { module_version: u32 },
+    OverlayConnected {
+        module_version: u32,
+    },
     OverlayDisconnected,
     /// The overlay rang `bell-host`: the bits' names (unknown ones `bit<N>`), and `applied_seq`
     /// read right after.
-    Bell { bits: Vec<String>, applied_seq: u64 },
+    Bell {
+        bits: Vec<String>,
+        applied_seq: u64,
+    },
     BootstrapDisconnected,
     /// The game process ended (the helper then exits 0).
     GameExited,
     /// Data channel `channel` was opened and checked (design 2b): its producer, the seq after
     /// which events will be delivered, and its schema. The snapshot's `info` lines follow.
-    DataConnected { channel: u32, producer_id: u64, from_seq: u64, schema: Vec<SchemaCategory> },
+    DataConnected {
+        channel: u32,
+        producer_id: u64,
+        from_seq: u64,
+        schema: Vec<SchemaCategory>,
+    },
     /// One info key: the snapshot after `data_connected`, then each change. `value` null is a
     /// key set to null.
-    Info { channel: u32, category: String, key: String, value: Option<String>, ts: u64 },
+    Info {
+        channel: u32,
+        category: String,
+        key: String,
+        value: Option<String>,
+        ts: u64,
+    },
     /// One event from the ring, in seq order.
-    DataEvent { channel: u32, seq: u64, name: String, data: String, ts: u64 },
+    DataEvent {
+        channel: u32,
+        seq: u64,
+        name: String,
+        data: String,
+        ts: u64,
+    },
     /// `events` were lost before the events that follow: overwritten before they were read, plus
     /// growth in the producer's dropped count.
-    DataLost { channel: u32, events: u64 },
+    DataLost {
+        channel: u32,
+        events: u64,
+    },
     /// The producer set `disconnect`.
-    DataDisconnected { channel: u32 },
+    DataDisconnected {
+        channel: u32,
+    },
     /// A failure. `request_id` is set when it answers a command; `detail` carries a
     /// `GetLastError` where there is one (the channel id for `data_version_mismatch` /
     /// `data_bad_layout`).
@@ -79,13 +150,19 @@ pub enum Event {
         detail: Option<u32>,
     },
     /// `uw-host`: it started the helper again (`attempt` counts restarts since the last reset).
-    HelperRestarted { attempt: u32 },
+    HelperRestarted {
+        attempt: u32,
+    },
     /// `uw-host`: a helper stdout line it could not parse.
-    HelperProtocolError { line: String },
+    HelperProtocolError {
+        line: String,
+    },
     /// `uw-host`: `status ok` but no `overlay_connected` within 10 s.
     OverlayTimeout,
     /// `uw-host`: it stopped for good (no more restarts), and why.
-    Stopped { reason: String },
+    Stopped {
+        reason: String,
+    },
 }
 
 impl Event {
@@ -109,9 +186,10 @@ impl Event {
     /// answers a command); `None` for an unsolicited event.
     pub fn request_id(&self) -> Option<u32> {
         match self {
-            Event::Status { request_id, .. } | Event::StateSet { request_id, .. } | Event::Pong { request_id, .. } => {
-                Some(*request_id)
-            }
+            Event::InputAcked { request_id }
+            | Event::Status { request_id, .. }
+            | Event::StateSet { request_id, .. }
+            | Event::Pong { request_id, .. } => Some(*request_id),
             Event::Error { request_id, .. } => *request_id,
             _ => None,
         }
@@ -120,9 +198,10 @@ impl Event {
     /// As `request_id`, to put another id on the reply (the `uw-inject` CLI maps its user's ids).
     pub fn request_id_mut(&mut self) -> Option<&mut u32> {
         match self {
-            Event::Status { request_id, .. } | Event::StateSet { request_id, .. } | Event::Pong { request_id, .. } => {
-                Some(request_id)
-            }
+            Event::InputAcked { request_id }
+            | Event::Status { request_id, .. }
+            | Event::StateSet { request_id, .. }
+            | Event::Pong { request_id, .. } => Some(request_id),
             Event::Error { request_id, .. } => request_id.as_mut(),
             _ => None,
         }
@@ -139,7 +218,8 @@ impl Event {
 impl Command {
     pub fn request_id(&self) -> u32 {
         match self {
-            Command::LoadOverlay { request_id, .. }
+            Command::InputAck { request_id, .. }
+            | Command::LoadOverlay { request_id, .. }
             | Command::SetState { request_id, .. }
             | Command::Ping { request_id } => *request_id,
         }

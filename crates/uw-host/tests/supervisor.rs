@@ -69,7 +69,7 @@ fn request_ids_are_shared_and_replies_clear_their_commands() {
     let actions = f.exits();
     assert_eq!(actions, vec![emit(Event::reply_error(2, "bootstrap_not_connected"))]);
     // A command while no helper runs fails at once and is not sent.
-    let set = Command::SetState { request_id: f.ids.next(), edit_mode: Some(true), visible: None };
+    let set = Command::SetState { input_epoch: None, request_id: f.ids.next(), edit_mode: Some(true), visible: None };
     assert_eq!(f.user(set), vec![emit(Event::reply_error(3, "overlay_not_connected"))]);
 }
 
@@ -108,21 +108,21 @@ fn restarts_back_off_and_reset_after_a_minute_of_uptime() {
 #[test]
 fn reconcile_after_reconnect_loads_only_when_needed_and_pushes_the_desired_state() {
     let mut f = Fake::started();
-    let on = Command::SetState { request_id: f.ids.next(), edit_mode: Some(true), visible: None }; // 1
+    let on = Command::SetState { input_epoch: None, request_id: f.ids.next(), edit_mode: Some(true), visible: None }; // 1
     assert_eq!(f.user(on.clone()), vec![Action::Send(on)]);
     let connected = Event::OverlayConnected { module_version: 1 };
     assert_eq!(
         f.says(connected.clone()),
         vec![
             emit(connected.clone()),
-            Action::Send(Command::SetState { request_id: 2, edit_mode: Some(true), visible: Some(true) })
+            Action::Send(Command::SetState { input_epoch: None, request_id: 2, edit_mode: Some(true), visible: Some(true) })
         ]
     );
 
     // The helper dies. While it is down the user turns edit mode off: refused, but remembered.
     f.now = 5_000;
     f.exits();
-    let off = Command::SetState { request_id: f.ids.next(), edit_mode: Some(false), visible: None }; // 3
+    let off = Command::SetState { input_epoch: None, request_id: f.ids.next(), edit_mode: Some(false), visible: None }; // 3
     assert_eq!(f.user(off), vec![emit(Event::reply_error(3, "overlay_not_connected"))]);
     assert!(!f.sup.desired().edit_mode);
 
@@ -132,7 +132,7 @@ fn reconcile_after_reconnect_loads_only_when_needed_and_pushes_the_desired_state
     assert_eq!(f.says(bootstrap_connected(true)), vec![emit(bootstrap_connected(true))]);
     assert_eq!(
         f.says(connected.clone()),
-        vec![emit(connected), Action::Send(Command::SetState { request_id: 4, edit_mode: Some(false), visible: Some(true) })]
+        vec![emit(connected), Action::Send(Command::SetState { input_epoch: None, request_id: 4, edit_mode: Some(false), visible: Some(true) })]
     );
 
     // A bootstrap that lost its overlay (a fresh game) is told to load it again.

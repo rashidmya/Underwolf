@@ -42,12 +42,12 @@ fn every_overlay_connect_gets_the_full_desired_state_with_a_fresh_id() {
     let connected = Event::OverlayConnected { module_version: 1 };
     assert_eq!(
         d.on_event(&connected),
-        vec![Command::SetState { request_id: 1, edit_mode: Some(false), visible: Some(true) }]
+        vec![Command::SetState { input_epoch: None, request_id: 1, edit_mode: Some(false), visible: Some(true) }]
     );
-    d.note_command(&Command::SetState { request_id: ids.next(), edit_mode: Some(true), visible: None });
+    d.note_command(&Command::SetState { input_epoch: None, request_id: ids.next(), edit_mode: Some(true), visible: None });
     assert_eq!(
         d.on_event(&connected),
-        vec![Command::SetState { request_id: 3, edit_mode: Some(true), visible: Some(true) }]
+        vec![Command::SetState { input_epoch: None, request_id: 3, edit_mode: Some(true), visible: Some(true) }]
     );
     d.note_command(&Command::LoadOverlay { request_id: ids.next(), path: r"Z:\b.dll".into() });
     assert_eq!(d.desired(), &Desired { overlay: Some(r"Z:\b.dll".into()), edit_mode: true, visible: true });

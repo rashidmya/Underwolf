@@ -11,3 +11,5 @@ pub mod jsonl;
 pub mod names;
 pub mod pipe;
 pub mod state;
+
+pub mod input;

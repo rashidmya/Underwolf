@@ -109,6 +109,7 @@ pub(crate) fn run(
 impl Relay<'_> {
     fn command(&mut self, cmd: Command) {
         match cmd {
+            Command::InputAck { request_id, .. } => emit(&Event::reply_error(request_id, "input_unavailable")),
             Command::LoadOverlay { request_id, path } => {
                 if path.encode_utf16().count() > MAX_PATH_UNITS {
                     emit(&Event::reply_error(request_id, "path_too_long"));
@@ -123,7 +124,7 @@ impl Relay<'_> {
                     self.drop_bootstrap();
                 }
             }
-            Command::SetState { request_id, edit_mode, visible } => {
+            Command::SetState { input_epoch: _, request_id, edit_mode, visible } => {
                 if !self.overlay_up {
                     emit(&Event::reply_error(request_id, "overlay_not_connected"));
                     return;
@@ -238,7 +239,7 @@ impl Relay<'_> {
                             self.overlay_up = true;
                             emit(&Event::OverlayConnected { module_version });
                         }
-                        OverlayFirst::VersionMismatch => {
+                        OverlayFirst::InputHello { .. } | OverlayFirst::VersionMismatch => {
                             emit(&Event::error("version_mismatch"));
                             self.overlay.disconnect();
                         }

@@ -12,12 +12,12 @@ fn load_overlay_command_round_trips() {
 /// Catches a renamed command or field: these are the wire names in the design's table.
 #[test]
 fn set_state_and_ping_have_the_design_wire_form() {
-    let c = Command::SetState { request_id: 2, edit_mode: Some(true), visible: None };
+    let c = Command::SetState { input_epoch: None, request_id: 2, edit_mode: Some(true), visible: None };
     assert_eq!(c.to_line(), r#"{"cmd":"set_state","request_id":2,"edit_mode":true}"#);
     assert_eq!(Command::parse(&c.to_line()).unwrap(), c);
     assert_eq!(
         Command::parse(r#"{"cmd":"set_state","request_id":3,"visible":false}"#).unwrap(),
-        Command::SetState { request_id: 3, edit_mode: None, visible: Some(false) }
+        Command::SetState { input_epoch: None, request_id: 3, edit_mode: None, visible: Some(false) }
     );
     assert_eq!(Command::Ping { request_id: 4 }.to_line(), r#"{"cmd":"ping","request_id":4}"#);
     assert_eq!(Command::Ping { request_id: 4 }.request_id(), 4);

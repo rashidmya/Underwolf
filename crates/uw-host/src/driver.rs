@@ -51,7 +51,7 @@ impl Driver {
                     self.desired.visible = *on;
                 }
             }
-            Command::Ping { .. } => {}
+            Command::Ping { .. } | Command::InputAck { .. } => {}
         }
     }
 
@@ -62,7 +62,7 @@ impl Driver {
                 Some(path) => vec![Command::LoadOverlay { request_id: self.ids.next(), path: path.clone() }],
                 None => vec![],
             },
-            Event::OverlayConnected { .. } => vec![Command::SetState {
+            Event::OverlayConnected { .. } => vec![Command::SetState { input_epoch: None,
                 request_id: self.ids.next(),
                 edit_mode: Some(self.desired.edit_mode),
                 visible: Some(self.desired.visible),

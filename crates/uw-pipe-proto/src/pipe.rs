@@ -73,13 +73,7 @@ impl StatusCode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     /// bootstrap -> helper, always first.
-    Hello {
-        protocol_version: u16,
-        bootstrap_version: u16,
-        bitness: u16,
-        overlay_loaded: bool,
-        overlay_path: String,
-    },
+    Hello { protocol_version: u16, bootstrap_version: u16, bitness: u16, overlay_loaded: bool, overlay_path: String },
     /// helper -> bootstrap.
     LoadOverlay { request_id: u32, path: String },
     /// bootstrap -> helper.
@@ -88,6 +82,7 @@ pub enum Message {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtoError {
+    BadInput,
     Short,
     BadMagic,
     /// The header's `version` is not `PROTOCOL_VERSION` (carries the version seen).
@@ -104,6 +99,7 @@ pub enum ProtoError {
 impl std::fmt::Display for ProtoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ProtoError::BadInput => write!(f, "invalid input message"),
             ProtoError::Short => write!(f, "message shorter than the header"),
             ProtoError::BadMagic => write!(f, "bad magic"),
             ProtoError::BadVersion(v) => write!(f, "unsupported header version {v}"),
@@ -290,19 +286,31 @@ pub fn decode(bytes: &[u8]) -> Result<Message, ProtoError> {
 /// the helper (design "Overlay pipe messages").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OverlayMessage {
+    Input(crate::input::InputMessage),
     /// game -> helper, always first: the overlay module's version and the state block layout it
     /// reads.
-    Hello { module_version: u32, state_layout: u16 },
+    Hello {
+        module_version: u32,
+        state_layout: u16,
+    },
     /// helper -> game.
-    Ping { nonce: u32 },
+    Ping {
+        nonce: u32,
+    },
     /// game -> helper: the ping's nonce and the last `seq` the overlay applied.
-    Pong { nonce: u32, seen_seq: u64 },
+    Pong {
+        nonce: u32,
+        seen_seq: u64,
+    },
 }
 
 /// Encode an overlay-pipe message (header + payload). Reserved fields are 0.
 pub fn encode_overlay(m: &OverlayMessage) -> Vec<u8> {
     let mut p = Vec::new();
     let ty = match m {
+        OverlayMessage::Input(_) => {
+            return encode_input(m).expect("use encode_input for untrusted messages");
+        }
         OverlayMessage::Hello { module_version, state_layout } => {
             p.extend_from_slice(&module_version.to_le_bytes());
             p.extend_from_slice(&state_layout.to_le_bytes());
@@ -324,8 +332,24 @@ pub fn encode_overlay(m: &OverlayMessage) -> Vec<u8> {
 }
 
 /// Decode one framed overlay-pipe message. A bootstrap-pipe type is `UnknownType`.
+pub fn encode_input(m: &OverlayMessage) -> Result<Vec<u8>, ProtoError> {
+    match m {
+        OverlayMessage::Input(m) => {
+            let (tag, payload) = m.encode()?;
+            Ok(frame(tag, &payload))
+        }
+        _ => Ok(encode_overlay(m)),
+    }
+}
+
 pub fn decode_overlay(bytes: &[u8]) -> Result<OverlayMessage, ProtoError> {
     let (ty, payload) = unframe(bytes)?;
+    if (0x110..=0x117).contains(&ty) {
+        if bytes.len() != HEADER_LEN + payload.len() {
+            return Err(ProtoError::BadInput);
+        }
+        return crate::input::InputMessage::decode(ty, payload).map(OverlayMessage::Input);
+    }
     let mut c = Cur { b: payload, i: 0 };
     match ty {
         TYPE_OVERLAY_HELLO => {
@@ -347,8 +371,13 @@ pub fn decode_overlay(bytes: &[u8]) -> Result<OverlayMessage, ProtoError> {
 /// How the helper takes the first message on a new overlay-pipe connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OverlayFirst {
+    InputHello {
+        module_version: u32,
+    },
     /// An `overlay_hello` the helper supports.
-    Hello { module_version: u32 },
+    Hello {
+        module_version: u32,
+    },
     /// An `overlay_hello` with another header version or state layout (design: `version_mismatch`).
     VersionMismatch,
     /// Anything else (design: `pipe_error`; the connection is dropped).
@@ -359,6 +388,17 @@ pub enum OverlayFirst {
 /// or `state_layout` the helper does not support gives `version_mismatch`).
 pub fn check_overlay_first(bytes: &[u8]) -> OverlayFirst {
     match decode_overlay(bytes) {
+        Ok(OverlayMessage::Input(crate::input::InputMessage::Hello {
+            module_version,
+            state_layout,
+            input_version,
+        })) => {
+            if state_layout == crate::state::LAYOUT_VERSION && input_version == crate::input::INPUT_VERSION {
+                OverlayFirst::InputHello { module_version }
+            } else {
+                OverlayFirst::VersionMismatch
+            }
+        }
         Ok(OverlayMessage::Hello { module_version, state_layout }) if state_layout == crate::state::LAYOUT_VERSION => {
             OverlayFirst::Hello { module_version }
         }

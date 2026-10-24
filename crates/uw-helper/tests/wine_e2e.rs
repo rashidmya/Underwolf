@@ -584,17 +584,17 @@ fn the_overlay_connects_and_applies_set_state() {
     pfx.game = Some(wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).spawn().unwrap());
     let mut helper = start_with_overlay(&pfx);
 
-    helper.send_cmd(&Cmd::SetState { request_id: 2, edit_mode: Some(true), visible: None });
+    helper.send_cmd(&Cmd::SetState { input_epoch: None, request_id: 2, edit_mode: Some(true), visible: None });
     assert_eq!(helper.next_parsed(Duration::from_secs(10)), Event::StateSet { request_id: 2, seq: 1 });
     assert_eq!(helper.next_parsed(Duration::from_secs(10)), applied(1));
     assert_eq!(overlay_state(&pfx).as_deref(), Some("seq=1 edit_mode=1 visible=0\n"));
 
     // Nothing changes: the same seq, and no bell.
-    helper.send_cmd(&Cmd::SetState { request_id: 3, edit_mode: Some(true), visible: None });
+    helper.send_cmd(&Cmd::SetState { input_epoch: None, request_id: 3, edit_mode: Some(true), visible: None });
     assert_eq!(helper.next_parsed(Duration::from_secs(10)), Event::StateSet { request_id: 3, seq: 1 });
     helper.expect_quiet(Duration::from_secs(2));
 
-    helper.send_cmd(&Cmd::SetState { request_id: 4, edit_mode: Some(false), visible: Some(true) });
+    helper.send_cmd(&Cmd::SetState { input_epoch: None, request_id: 4, edit_mode: Some(false), visible: Some(true) });
     assert_eq!(helper.next_parsed(Duration::from_secs(10)), Event::StateSet { request_id: 4, seq: 2 });
     assert_eq!(helper.next_parsed(Duration::from_secs(10)), applied(2));
     assert_eq!(overlay_state(&pfx).as_deref(), Some("seq=2 edit_mode=0 visible=1\n"));
@@ -619,7 +619,7 @@ fn ping_gets_pong_with_the_last_applied_seq() {
     helper.expect_all(&[ok(1), Event::OverlayConnected { module_version: OVERLAY_VERSION }], Duration::from_secs(30));
     helper.send_cmd(&Cmd::Ping { request_id: 10 });
     assert_eq!(helper.next_parsed(Duration::from_secs(10)), Event::Pong { request_id: 10, seen_seq: 0 });
-    helper.send_cmd(&Cmd::SetState { request_id: 11, edit_mode: Some(true), visible: None });
+    helper.send_cmd(&Cmd::SetState { input_epoch: None, request_id: 11, edit_mode: Some(true), visible: None });
     helper.expect_all(&[Event::StateSet { request_id: 11, seq: 1 }, applied(1)], Duration::from_secs(10));
     helper.send_cmd(&Cmd::Ping { request_id: 12 });
     assert_eq!(helper.next_parsed(Duration::from_secs(10)), Event::Pong { request_id: 12, seen_seq: 1 });
@@ -641,7 +641,7 @@ fn a_slow_overlay_start_times_out_and_its_late_status_is_discarded() {
     let mut helper = start_helper(&pfx, &[], &[("UW_STATUS_TIMEOUT_MS", "2000")]);
     // Sent while the helper still hooks: refused, and answered before `bootstrap_connected`.
     helper.send_cmd(&Cmd::LoadOverlay { request_id: 7, path: overlay.clone() });
-    helper.send_cmd(&Cmd::SetState { request_id: 8, edit_mode: Some(true), visible: None });
+    helper.send_cmd(&Cmd::SetState { input_epoch: None, request_id: 8, edit_mode: Some(true), visible: None });
     helper.send_cmd(&Cmd::Ping { request_id: 9 });
     let first: Vec<Event> = (0..4).map(|_| helper.next_parsed(Duration::from_secs(200))).collect();
     assert_eq!(
@@ -691,7 +691,7 @@ fn a_ping_the_overlay_does_not_answer_in_time_is_overlay_not_responding() {
     helper.send_cmd(&load(&overlay));
     helper.expect_all(&[ok(1), Event::OverlayConnected { module_version: OVERLAY_VERSION }], Duration::from_secs(30));
 
-    helper.send_cmd(&Cmd::SetState { request_id: 2, edit_mode: Some(true), visible: None });
+    helper.send_cmd(&Cmd::SetState { input_epoch: None, request_id: 2, edit_mode: Some(true), visible: None });
     assert_eq!(helper.next_parsed(Duration::from_secs(10)), Event::StateSet { request_id: 2, seq: 1 });
     helper.send_cmd(&Cmd::Ping { request_id: 3 });
     assert_eq!(helper.next_parsed(Duration::from_secs(10)), Event::reply_error(3, "overlay_not_responding"));
@@ -860,32 +860,32 @@ fn set_state_is_busy_under_the_lock_and_a_busy_bell_is_retried() {
     pfx.game = Some(wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).spawn().unwrap());
     let mut helper = start_helper(&pfx, &[], &[]);
     helper.expect_event("bootstrap_connected", Duration::from_secs(200));
-    helper.send_cmd(&Cmd::SetState { request_id: 1, edit_mode: Some(true), visible: None });
+    helper.send_cmd(&Cmd::SetState { input_epoch: None, request_id: 1, edit_mode: Some(true), visible: None });
     assert_eq!(helper.next_parsed(Duration::from_secs(10)), Event::reply_error(1, "overlay_not_connected"));
 
     // The probe holds the state lock for 3 s.
     let p = Probe::start(&pfx, &["hold", "3000"]);
     assert_eq!(helper.next_parsed(Duration::from_secs(60)), Event::OverlayConnected { module_version: PROBE_VERSION });
     p.expect_line("locked", Duration::from_secs(10));
-    helper.send_cmd(&Cmd::SetState { request_id: 2, edit_mode: Some(true), visible: None });
+    helper.send_cmd(&Cmd::SetState { input_epoch: None, request_id: 2, edit_mode: Some(true), visible: None });
     assert_eq!(helper.next_parsed(Duration::from_secs(2)), Event::reply_error(2, "state_busy"));
     p.expect_line("released", Duration::from_secs(10));
     // The bell rung while the lock was held comes out once, after the release.
     assert_eq!(helper.next_parsed(Duration::from_secs(5)), applied(42));
     helper.expect_quiet(Duration::from_secs(1));
 
-    helper.send_cmd(&Cmd::SetState { request_id: 3, edit_mode: Some(true), visible: None });
+    helper.send_cmd(&Cmd::SetState { input_epoch: None, request_id: 3, edit_mode: Some(true), visible: None });
     assert_eq!(helper.next_parsed(Duration::from_secs(5)), Event::StateSet { request_id: 3, seq: 1 });
     p.expect_line("bell 1 seq 1", Duration::from_secs(5));
     assert_eq!(helper.next_parsed(Duration::from_secs(5)), applied(1));
 
     // Nothing changes: the current seq, no bump, no bell-game ring.
-    helper.send_cmd(&Cmd::SetState { request_id: 4, edit_mode: Some(true), visible: None });
+    helper.send_cmd(&Cmd::SetState { input_epoch: None, request_id: 4, edit_mode: Some(true), visible: None });
     assert_eq!(helper.next_parsed(Duration::from_secs(5)), Event::StateSet { request_id: 4, seq: 1 });
     p.expect_quiet(Duration::from_millis(1500));
     helper.expect_quiet(Duration::from_millis(500));
 
-    helper.send_cmd(&Cmd::SetState { request_id: 5, edit_mode: Some(false), visible: Some(true) });
+    helper.send_cmd(&Cmd::SetState { input_epoch: None, request_id: 5, edit_mode: Some(false), visible: Some(true) });
     assert_eq!(helper.next_parsed(Duration::from_secs(5)), Event::StateSet { request_id: 5, seq: 2 });
     p.expect_line("bell 6 seq 2", Duration::from_secs(5));
     assert_eq!(helper.next_parsed(Duration::from_secs(5)), applied(2));
@@ -1045,7 +1045,7 @@ fn the_data_thread_waits_for_the_producer_then_relays_it() {
     fn last_seq(e: &Event) -> bool {
         matches!(e, Event::Info { key, value: Some(v), .. } if key == "last_seq" && v == "1")
     }
-    helper.send_cmd(&Cmd::SetState { request_id: 2, edit_mode: Some(true), visible: None });
+    helper.send_cmd(&Cmd::SetState { input_epoch: None, request_id: 2, edit_mode: Some(true), visible: None });
     helper.expect_all(&[Event::StateSet { request_id: 2, seq: 1 }, applied(1)], Duration::from_secs(10));
     let mut more = data_until(&helper, Duration::from_secs(10), |e| state_seen(e) || last_seq(e));
     let rest: fn(&Event) -> bool = if more.iter().any(state_seen) { last_seq } else { state_seen };
@@ -1137,7 +1137,7 @@ fn a_burst_while_the_host_reads_slowly_loses_nothing_unannounced() {
     {
         // Stop reading the helper's stdout: its pipe fills and its writes block.
         let _paused = gate.lock().unwrap();
-        helper.send_cmd(&Cmd::SetState { request_id: 2, edit_mode: Some(true), visible: None });
+        helper.send_cmd(&Cmd::SetState { input_epoch: None, request_id: 2, edit_mode: Some(true), visible: None });
         helper.send_cmd(&Cmd::Ping { request_id: 3 });
         std::thread::sleep(Duration::from_secs(3));
     }
@@ -1200,7 +1200,7 @@ fn a_producer_gone_while_the_host_reads_slowly_still_delivers_its_last_event() {
         // Stop reading until the producer is surely gone: it started before `data_connected`, so
         // 8 s from here is past its 6.5 s.
         let _paused = gate.lock().unwrap();
-        helper.send_cmd(&Cmd::SetState { request_id: 2, edit_mode: Some(true), visible: None });
+        helper.send_cmd(&Cmd::SetState { input_epoch: None, request_id: 2, edit_mode: Some(true), visible: None });
         std::thread::sleep(Duration::from_secs(8));
     }
     let seen = data_until(&helper, Duration::from_secs(60), |e| *e == Event::DataDisconnected { channel: 1 });
@@ -1243,7 +1243,7 @@ fn a_busy_info_lock_is_skipped_and_the_newest_value_comes_after() {
     std::thread::sleep(Duration::from_millis(300));
     helper.drain_data();
     // A state applied while the info lock is held: its event gets through, its `last_seq` waits.
-    helper.send_cmd(&Cmd::SetState { request_id: 2, edit_mode: Some(true), visible: None });
+    helper.send_cmd(&Cmd::SetState { input_epoch: None, request_id: 2, edit_mode: Some(true), visible: None });
     helper.expect_all(&[Event::StateSet { request_id: 2, seq: 1 }, applied(1)], Duration::from_secs(10));
     let held = data_until(&helper, Duration::from_secs(3), |e| {
         matches!(e, Event::DataEvent { name, data, .. } if name == "state_seen" && data == "1")

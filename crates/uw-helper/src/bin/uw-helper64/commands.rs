@@ -28,7 +28,7 @@ impl Commands {
         while let Ok(cmd) = self.rx.try_recv() {
             let code = match cmd {
                 Command::LoadOverlay { .. } => "bootstrap_not_connected",
-                Command::SetState { .. } | Command::Ping { .. } => "overlay_not_connected",
+                Command::InputAck { .. } | Command::SetState { .. } | Command::Ping { .. } => "overlay_not_connected",
             };
             emit(&Event::reply_error(cmd.request_id(), code));
         }
