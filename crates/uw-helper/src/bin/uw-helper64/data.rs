@@ -127,8 +127,9 @@ fn run(pid: u32, channel: u32, mut resume: Option<ResumePoint>) {
     }
 }
 
-/// Relay one producer until `disconnect` (`Ok`) or a read that does not fit (`Err`). `point`
-/// follows the last event delivered.
+/// Relay one producer until `disconnect` or a read that does not fit (`Err`). On `disconnect` it
+/// returns after one last read, whose result may be `Err`. `point` follows the last event
+/// delivered.
 fn relay(c: &mut Consumer, channel: u32, point: &mut ResumePoint) -> Result<(), ReadError> {
     let mut owed = Owed::default();
     loop {
