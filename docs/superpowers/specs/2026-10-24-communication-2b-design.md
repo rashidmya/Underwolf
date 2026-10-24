@@ -1,6 +1,6 @@
 # Milestone 1, plan 2b: Communication, game-data channel (design)
 
-Date: 2026-10-24. Status: for owner review.
+Date: 2026-10-24. Status: implemented; the owner's live check passed (see "Live check (owner)").
 Implements spec §6.4 "Data channel (copy Overwolf)" and the relay half of §6.3
 (`2026-10-20-underwolf-design.md`). Proposed in `docs/spikes/SUMMARY.md`, milestone 1 item 2: "the
 Spike 3 data-channel relay folds into the same helper". Builds on plan 2a
@@ -321,3 +321,19 @@ for the host and the Windows target.
 - **The data thread shares stdout with 2a's relay.** A big snapshot delays control lines by the
   time it takes to write it, not by a lock wait.
 - **Proton:** only Proton 11.0 has been tested.
+
+## Live check (owner)
+
+2026-10-24, Deadlock ClientVersion 6819, Proton 11.0, Hideout, a fresh game session. **Pass.**
+
+- Snapshot: `data_connected` on channel 1 with the test schema (`ticks`, `last_seq`, 32 bytes
+  each) and `from_seq` 1, then `info` for `ticks` (`"0"`) and `last_seq` (`"1"`, the reconcile's
+  `state_seen` came before the attach). Ticks flowed: 3 within the wait.
+- Edit mode on, then off: `state_seen` with data `"2"` (seq 5) and `"3"` (seq 6).
+- Helper killed (`kill -KILL`): back after 5 s. `helper_restarted` attempt 1, then
+  `data_connected` with the same `producer_id` and `from_seq` 6, the last seq before the kill.
+  The seqs were contiguous over 10 events (no gap, no duplicate), with no `data_lost`. No `error`
+  event. The new helper skipped the hook (marker present).
+- Stop: SIGTERM to `uw-inject`; the helper exited because its stdin closed.
+- The game process (pid 2903110) kept running throughout. The owner saw no hitch, stutter or
+  frame drop, while the ticks flowed or at the helper kill.
