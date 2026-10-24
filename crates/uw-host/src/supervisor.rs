@@ -9,8 +9,15 @@
 //!   a failed start stop the host for good (`stopped {reason}`), with no restart;
 //! - `status ok` without `overlay_connected` within 10 s is `overlay_timeout`;
 //! - a stdout line that is not an event is `helper_protocol_error {line}`;
-//! - after every (re)connect the `Driver` reconciles the desired state.
+//! - after every (re)connect the `Driver` reconciles the desired state;
+//! - per data channel it keeps a resume point (design 2b "uw-host"): the producer and the last seq
+//!   delivered, from `data_connected` and each `data_event`. Every new helper gets
+//!   `--data-resume <producer_id>:<seq>` for the channel it reads. Data events carry no request
+//!   id, so they never touch pending commands, and they reach the user unchanged.
 
+use std::collections::BTreeMap;
+
+use uw_pipe_proto::data::{ResumePoint, DEFAULT_CHANNEL};
 use uw_pipe_proto::jsonl::{Command, Event};
 
 use crate::driver::{Desired, Driver};
@@ -46,8 +53,9 @@ pub enum Input {
 /// What the runtime must do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// Start a helper. The runtime later reports `HelperExited`, or `StartFailed` at once.
-    StartHelper,
+    /// Start a helper with these extra arguments (`--data-resume` once a resume point is held).
+    /// The runtime later reports `HelperExited`, or `StartFailed` at once.
+    StartHelper { args: Vec<String> },
     /// Write this command to the current helper's stdin.
     Send(Command),
     /// Hand this event to the host's user.
@@ -74,6 +82,8 @@ pub struct Supervisor {
     pending: Vec<Command>,
     overlay_up: bool,
     overlay_deadline: Option<u64>,
+    /// Per data channel: the producer and the last seq delivered.
+    resume: BTreeMap<u32, ResumePoint>,
 }
 
 /// The error a command gets when the side it needs is not there.
@@ -95,13 +105,28 @@ impl Supervisor {
             pending: Vec::new(),
             overlay_up: false,
             overlay_deadline: None,
+            resume: BTreeMap::new(),
         }
     }
 
     /// The first helper.
     pub fn start(&mut self, now: u64) -> Vec<Action> {
         self.phase = Phase::Running { since: now };
-        vec![Action::StartHelper]
+        vec![Action::StartHelper { args: self.helper_args() }]
+    }
+
+    /// The resume point of data channel `channel`, once it delivered something.
+    pub fn data_resume(&self, channel: u32) -> Option<ResumePoint> {
+        self.resume.get(&channel).copied()
+    }
+
+    /// The arguments for a new helper: `--data-resume` for the channel it reads (the default
+    /// one; `uw-host` passes no `--data-channel`), if a resume point is held.
+    fn helper_args(&self) -> Vec<String> {
+        match self.data_resume(DEFAULT_CHANNEL) {
+            Some(r) => vec!["--data-resume".to_string(), r.to_string()],
+            None => vec![],
+        }
     }
 
     pub fn desired(&self) -> &Desired {
@@ -157,7 +182,7 @@ impl Supervisor {
         {
             self.phase = Phase::Running { since: now };
             out.push(Action::Emit(Event::HelperRestarted { attempt: self.attempt }));
-            out.push(Action::StartHelper);
+            out.push(Action::StartHelper { args: self.helper_args() });
         }
         if self.overlay_deadline.is_some_and(|d| now >= d) {
             self.overlay_deadline = None;
@@ -197,6 +222,16 @@ impl Supervisor {
                 self.overlay_deadline = None;
             }
             Event::OverlayDisconnected => self.overlay_up = false,
+            // The resume point (design 2b): `from_seq` on connect (a new producer replaces the
+            // old one), then each event's seq.
+            Event::DataConnected { channel, producer_id, from_seq, .. } => {
+                self.resume.insert(*channel, ResumePoint { producer_id: *producer_id, seq: *from_seq });
+            }
+            Event::DataEvent { channel, seq, .. } => {
+                if let Some(r) = self.resume.get_mut(channel) {
+                    r.seq = *seq;
+                }
+            }
             _ => {}
         }
         let mut out = vec![Action::Emit(event.clone())];

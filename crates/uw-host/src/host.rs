@@ -19,9 +19,10 @@ use crate::RequestIds;
 
 /// How the host starts one helper process.
 pub trait Launch: Send + 'static {
-    /// The helper's command line (the host pipes its stdin and stdout), or the error code
-    /// (`game_not_found`, `no_wine_session`) when the game or its Wine session is gone.
-    fn command(&mut self) -> Result<Command, String>;
+    /// The helper's command line with `args` after the helper's own (`--data-resume` on a
+    /// restart), or the error code (`game_not_found`, `no_wine_session`) when the game or its Wine
+    /// session is gone. The host pipes its stdin and stdout.
+    fn command(&mut self, args: &[String]) -> Result<Command, String>;
 }
 
 /// `uw-helper64.exe` in the game's Wine session. Every start finds the game again by its pid, so
@@ -35,7 +36,7 @@ pub struct WineLaunch {
 }
 
 impl Launch for WineLaunch {
-    fn command(&mut self) -> Result<Command, String> {
+    fn command(&mut self, args: &[String]) -> Result<Command, String> {
         let session =
             GameSession::find_with_proton(&self.exe, Some(self.session.pid), Some(self.session.proton.clone()))
                 .map_err(|e| {
@@ -43,6 +44,7 @@ impl Launch for WineLaunch {
                     e.code().to_string()
                 })?;
         let mut cmd = helper_command(&session, &self.helper, &self.exe, &self.bootstrap, self.fallback);
+        cmd.args(args);
         if std::env::var_os("WINEDEBUG").is_none() {
             cmd.env("WINEDEBUG", "-all");
         }
@@ -165,7 +167,7 @@ fn run(mut sup: Supervisor, mut launch: impl Launch, rx: Receiver<Input>, tx: Se
         let mut i = 0;
         while i < actions.len() {
             match actions[i].clone() {
-                Action::StartHelper => match launch.command().and_then(|cmd| spawn(cmd, &tx)) {
+                Action::StartHelper { args } => match launch.command(&args).and_then(|cmd| spawn(cmd, &tx)) {
                     Ok(s) => {
                         stdin = Some(s);
                         helper_running = true;

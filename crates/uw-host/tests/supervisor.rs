@@ -4,6 +4,7 @@
 use uw_host::driver::Desired;
 use uw_host::supervisor::{Action, Input, Supervisor, OVERLAY_TIMEOUT_MS};
 use uw_host::RequestIds;
+use uw_pipe_proto::data::{ResumePoint, SchemaCategory};
 use uw_pipe_proto::jsonl::{Command, Event};
 
 const OVERLAY: &str = r"Z:\games\overlay.dll";
@@ -19,7 +20,7 @@ impl Fake {
     fn started() -> Fake {
         let ids = RequestIds::default();
         let mut sup = Supervisor::new(Desired::new(Some(OVERLAY.into())), ids.clone());
-        assert_eq!(sup.start(0), vec![Action::StartHelper]);
+        assert_eq!(sup.start(0), vec![start_helper(&[])]);
         Fake { sup, ids, now: 0 }
     }
     /// The fake helper prints `event`.
@@ -40,6 +41,10 @@ impl Fake {
 
 fn emit(e: Event) -> Action {
     Action::Emit(e)
+}
+
+fn start_helper(args: &[&str]) -> Action {
+    Action::StartHelper { args: args.iter().map(|a| a.to_string()).collect() }
 }
 
 fn bootstrap_connected(loaded: bool) -> Event {
@@ -81,7 +86,7 @@ fn restarts_back_off_and_reset_after_a_minute_of_uptime() {
         assert_eq!(f.sup.next_deadline(), Some(t + delay), "attempt {attempt}");
         assert_eq!(f.at(t + delay - 1), vec![], "too early for attempt {attempt}");
         t += delay;
-        assert_eq!(f.at(t), vec![emit(Event::HelperRestarted { attempt }), Action::StartHelper]);
+        assert_eq!(f.at(t), vec![emit(Event::HelperRestarted { attempt }), start_helper(&[])]);
     }
     // This helper stays up 1 ms short of a minute: no reset, the delay stays at 10 s.
     t += 59_999;
@@ -89,13 +94,13 @@ fn restarts_back_off_and_reset_after_a_minute_of_uptime() {
     assert_eq!(f.exits(), vec![]);
     assert_eq!(f.sup.next_deadline(), Some(t + 10_000));
     t += 10_000;
-    assert_eq!(f.at(t), vec![emit(Event::HelperRestarted { attempt: 7 }), Action::StartHelper]);
+    assert_eq!(f.at(t), vec![emit(Event::HelperRestarted { attempt: 7 }), start_helper(&[])]);
     // This one stays up a minute: the next delay is the first one again.
     t += 60_000;
     f.now = t;
     assert_eq!(f.exits(), vec![]);
     assert_eq!(f.sup.next_deadline(), Some(t + 1_000));
-    assert_eq!(f.at(t + 1_000), vec![emit(Event::HelperRestarted { attempt: 1 }), Action::StartHelper]);
+    assert_eq!(f.at(t + 1_000), vec![emit(Event::HelperRestarted { attempt: 1 }), start_helper(&[])]);
 }
 
 /// Catches a reconnect that reloads a loaded overlay, skips the full state push, or loses a
@@ -178,7 +183,7 @@ fn other_helper_errors_are_reported_and_the_helper_restarted() {
         assert_eq!(f.says(Event::error(code)), vec![emit(Event::error(code))], "{code}");
         f.now = 100;
         f.exits();
-        assert_eq!(f.at(1_100), vec![emit(Event::HelperRestarted { attempt: 1 }), Action::StartHelper], "{code}");
+        assert_eq!(f.at(1_100), vec![emit(Event::HelperRestarted { attempt: 1 }), start_helper(&[])], "{code}");
     }
 }
 
@@ -217,4 +222,94 @@ fn shutdown_stops_quietly() {
     assert_eq!(f.sup.handle(Input::Shutdown, 0), vec![Action::Stop]);
     assert_eq!(f.exits(), vec![]);
     assert_eq!(f.sup.next_deadline(), None);
+}
+
+fn data_connected(producer_id: u64, from_seq: u64) -> Event {
+    Event::DataConnected {
+        channel: 1,
+        producer_id,
+        from_seq,
+        schema: vec![SchemaCategory::new("test", &[("ticks", 32)])],
+    }
+}
+
+fn data_event(seq: u64) -> Event {
+    Event::DataEvent { channel: 1, seq, name: "tick".into(), data: seq.to_string(), ts: seq * 1_000 }
+}
+
+/// Catches a resume point that does not follow the design (design 2b "uw-host": on
+/// `data_connected` the seq becomes `from_seq` and a new producer replaces the old one; on each
+/// `data_event` it becomes that event's seq), or one moved by events that carry no seq.
+#[test]
+fn the_resume_point_follows_data_connected_and_each_data_event() {
+    let mut f = Fake::started();
+    assert_eq!(f.sup.data_resume(1), None);
+    assert_eq!(f.says(data_connected(77, 5)), vec![emit(data_connected(77, 5))]);
+    assert_eq!(f.sup.data_resume(1), Some(ResumePoint { producer_id: 77, seq: 5 }));
+    f.says(data_event(6));
+    f.says(data_event(7));
+    assert_eq!(f.sup.data_resume(1), Some(ResumePoint { producer_id: 77, seq: 7 }));
+    f.says(Event::Info { channel: 1, category: "test".into(), key: "ticks".into(), value: None, ts: 1 });
+    f.says(Event::DataLost { channel: 1, events: 3 });
+    f.says(Event::DataDisconnected { channel: 1 });
+    assert_eq!(f.sup.data_resume(1), Some(ResumePoint { producer_id: 77, seq: 7 }));
+    // A new producer (a new game session) replaces the old one.
+    f.says(data_connected(88, 40));
+    assert_eq!(f.sup.data_resume(1), Some(ResumePoint { producer_id: 88, seq: 40 }));
+    assert_eq!(f.sup.data_resume(2), None);
+}
+
+/// Catches a restarted helper started without `--data-resume` (it would start at the write head
+/// and lose the events of the downtime), or with a stale point.
+#[test]
+fn a_restarted_helper_gets_data_resume_with_the_last_seq_delivered() {
+    let mut f = Fake::started();
+    f.says(data_connected(77, 5));
+    f.says(data_event(6));
+    f.now = 100;
+    f.exits();
+    assert_eq!(
+        f.at(1_100),
+        vec![emit(Event::HelperRestarted { attempt: 1 }), start_helper(&["--data-resume", "77:6"])]
+    );
+    f.says(data_connected(77, 6));
+    f.says(data_event(7));
+    f.now = 2_000;
+    f.exits();
+    assert_eq!(
+        f.at(4_000),
+        vec![emit(Event::HelperRestarted { attempt: 2 }), start_helper(&["--data-resume", "77:7"])]
+    );
+}
+
+/// Catches data events taken for replies (design 2b: they carry no request id, so they never
+/// touch pending commands), changed on the way to the user, or answered with reconcile commands.
+#[test]
+fn data_events_pass_through_and_never_touch_pending_commands() {
+    let mut f = Fake::started();
+    let ping = Command::Ping { request_id: f.ids.next() };
+    f.user(ping);
+    for e in [
+        data_connected(77, 0),
+        data_event(1),
+        Event::Info { channel: 1, category: "test".into(), key: "ticks".into(), value: Some("1".into()), ts: 1 },
+        Event::DataLost { channel: 1, events: 2 },
+        Event::DataDisconnected { channel: 1 },
+    ] {
+        assert_eq!(f.says(e.clone()), vec![emit(e)]);
+    }
+    // The ping is still pending: the helper's death answers it, once.
+    assert_eq!(f.exits(), vec![emit(Event::reply_error(1, "overlay_not_connected"))]);
+}
+
+/// Catches `data_version_mismatch` or `data_bad_layout` stopping the host (design 2b: "Not stop
+/// codes"; the helper reports them and waits for `disconnect`).
+#[test]
+fn data_errors_are_reported_and_do_not_stop_the_host() {
+    for code in ["data_version_mismatch", "data_bad_layout"] {
+        let mut f = Fake::started();
+        let e = Event::data_error(code, 1);
+        assert_eq!(f.says(e.clone()), vec![emit(e)], "{code}");
+        assert!(!f.sup.is_stopped(), "{code}");
+    }
 }

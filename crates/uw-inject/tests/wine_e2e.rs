@@ -441,3 +441,37 @@ fn uw_inject_relays_the_test_producer_and_a_new_client_starts_at_the_write_head(
     let seen = data_until(&mut inj, Duration::from_secs(10), |e| matches!(e, Event::DataEvent { .. }));
     assert_eq!(event_seqs(&seen), [from_seq + 1], "{seen:?}");
 }
+
+/// Catches a restarted helper that does not resume the data channel (design 2b "Failures":
+/// `uw-host` restarts it with `--data-resume`; the new helper sends `data_connected` with
+/// `from_seq` the last seq delivered, the full snapshot, then every event after it): every tick
+/// from the downtime must arrive exactly once, with contiguous seqs and no `data_lost`.
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn a_killed_helper_resumes_the_data_channel_with_no_gap_and_no_duplicate() {
+    let fx = start_game("dataresume");
+    let mut inj = Inject::start(&fx);
+    let (id, from_seq, _) = expect_connected(&mut inj, Duration::from_secs(200));
+    let mut seen = data_until(&mut inj, Duration::from_secs(10), |e| {
+        matches!(e, Event::DataEvent { seq, .. } if *seq == from_seq + 2)
+    });
+
+    let helper = pid_in(&fx.prefix, "uw-helper64.exe").expect("the helper runs in the prefix");
+    // SAFETY: kills the test's own helper process.
+    unsafe { libc::kill(helper, libc::SIGKILL) };
+    // What came before `helper_restarted` is what uw-host delivered: its resume point.
+    seen.extend(data_until(&mut inj, Duration::from_secs(30), |e| *e == Event::HelperRestarted { attempt: 1 }));
+    let last = *event_seqs(&seen).last().unwrap();
+    let (again, resumed_after, snapshot) = expect_connected(&mut inj, Duration::from_secs(60));
+    assert_eq!((again, resumed_after), (id, last), "the new helper must resume after the last seq delivered");
+    assert_eq!(snapshot.len(), 2, "the full snapshot: {snapshot:?}");
+    // The downtime's ticks (a few seconds' worth), then on.
+    seen.extend(data_until(&mut inj, Duration::from_secs(15), |e| {
+        matches!(e, Event::DataEvent { seq, .. } if *seq == last + 4)
+    }));
+    let seqs = event_seqs(&seen);
+    let want: Vec<u64> = (from_seq + 1..).take(seqs.len()).collect();
+    assert_eq!(seqs, want, "a gap or a duplicate: {seen:?}");
+    assert!(!seen.iter().any(|e| matches!(e, Event::DataLost { .. })), "{seen:?}");
+    assert!(pid_in(&fx.prefix, "uw-test-game.exe").is_some(), "the game stopped");
+}

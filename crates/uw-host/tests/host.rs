@@ -11,16 +11,17 @@ use uw_host::driver::Desired;
 use uw_host::host::{Host, Launch};
 use uw_pipe_proto::jsonl::{Command as HelperCommand, Event};
 
-/// Starts `sh -c <script>` for each start, in order; past the last one, `game_not_found`.
+/// Starts `sh -c <script> uw-helper64 <args>…` for each start, in order (the script sees the
+/// host's extra arguments as `$@`); past the last one, `game_not_found`.
 struct Scripts(Vec<&'static str>);
 
 impl Launch for Scripts {
-    fn command(&mut self) -> Result<Command, String> {
+    fn command(&mut self, args: &[String]) -> Result<Command, String> {
         if self.0.is_empty() {
             return Err("game_not_found".into());
         }
         let mut c = Command::new("sh");
-        c.arg("-c").arg(self.0.remove(0));
+        c.arg("-c").arg(self.0.remove(0)).arg("uw-helper64").args(args);
         Ok(c)
     }
 }
@@ -90,4 +91,26 @@ fn a_non_utf8_line_is_a_protocol_error_and_later_events_still_arrive() {
     assert_eq!(next(&host), Event::HelperProtocolError { line: "\u{fffd}".into() });
     assert_eq!(next(&host), Event::GameExited);
     assert_eq!(next(&host), Event::Stopped { reason: "game_exited".into() });
+}
+
+/// Catches the resume point not reaching a restarted helper's command line (design 2b
+/// "uw-host": `--data-resume <producer_id>:<seq>`, the seq of the last `data_event` delivered),
+/// or data events not passed to the user unchanged.
+#[test]
+fn a_restarted_helper_gets_data_resume_from_the_last_data_event() {
+    let connected = r#"{"event":"data_connected","channel":1,"producer_id":77,"from_seq":3,"schema":[]}"#;
+    let tick = r#"{"event":"data_event","channel":1,"seq":4,"name":"tick","data":"1","ts":9}"#;
+    let host = Host::start(
+        Scripts(vec![
+            // Both lines, then die.
+            r#"echo '{"event":"data_connected","channel":1,"producer_id":77,"from_seq":3,"schema":[]}'; echo '{"event":"data_event","channel":1,"seq":4,"name":"tick","data":"1","ts":9}'; exit 1"#,
+            // Print the arguments it got (not an event: a protocol error), then wait for stdin.
+            r#"printf 'args %s\n' "$*"; read -r line; exit 0"#,
+        ]),
+        Desired::new(None),
+    );
+    assert_eq!(next(&host), Event::parse(connected).unwrap());
+    assert_eq!(next(&host), Event::parse(tick).unwrap());
+    assert_eq!(next(&host), Event::HelperRestarted { attempt: 1 });
+    assert_eq!(next(&host), Event::HelperProtocolError { line: "args --data-resume 77:4".into() });
 }
