@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust (edition 2024, rustc 1.96.1). Targets `x86_64-unknown-linux-gnu` (host crates, all unit tests) and `x86_64-pc-windows-gnu` (helper, `uw-game-channel`, test overlay, test game). `windows-sys = "0.61.2"`, `serde`/`serde_json`. Wine tests: system Wine 11.20 (`/usr/bin/wine`) under `xvfb-run -a`, `--test-threads=1`, each run bounded by `timeout`.
 
-**Base:** `main` at `e27ea19`: plan 2a's merged code under `crates/` and the owner-approved 2b design. Every snippet below was written against the code in `crates/` now. Every task was built and run in a scratch clone before this plan was written: unit tests, host and Windows clippy (`-D warnings`) and `cargo check --locked` on both targets at every task's commit, the red runs, every mutation step, and the Wine suites (gate 1 + 1, helper 23, `uw-inject` 4) on the final tree, with no processes or prefixes left behind. The code blocks were then taken from the plan text by a script and replayed onto a fresh clone of `e27ea19`; each task's tree matched the verified one byte for byte. The counts in the expected output come from those runs.
+**Base:** `main` at `e27ea19`: plan 2a's merged code under `crates/` and the owner-approved 2b design. Every snippet below was written against the code in `crates/` now. Every task was built and run in a scratch clone before this plan was written: unit tests, host and Windows clippy (`-D warnings`) and `cargo check --locked` on both targets at every task's commit, the red runs, every mutation step, and the Wine suites (gate 1 + 1, helper 24, `uw-inject` 4) on the final tree, twice, with no processes or prefixes left behind. The plan review's fixes (`plan-review.md`: I1, M1-M8) were verified the same way. The code blocks were then taken from the plan text by a script and replayed onto a fresh clone of `e27ea19`; each task's tree matched the verified one byte for byte. The counts in the expected output come from those runs.
 
 ---
 
@@ -44,9 +44,11 @@
 | `crates/uw-game-channel/src/data.rs` | new, Windows | `Producer` (create, commit, push_event, flush, Drop) and `Consumer` (open, attach, changes, drain, wait) |
 | `crates/uw-game-channel/examples/data_{producer,consumer}_probe.rs` | new, Windows | The gate's two command-driven probes |
 | `crates/uw-game-channel/tests/wine_data.rs` | new, ignored | The gate: both probes in one Wine prefix |
+| `crates/uw-helper/src/data_pass.rs` | new, lib (both) | `Woke`, `Owed`: the reads on each pass, a busy lock's skipped read owed to the next pass |
+| `crates/uw-helper/tests/data_pass.rs` | new tests | The reads per wake, and an owed read retried on any wake |
 | `crates/uw-helper/src/bin/uw-helper64/data.rs` | new, Windows | The data thread: attach, snapshot, deltas, events, resume, disconnect |
 | `crates/uw-helper/src/bin/uw-helper64/main.rs` | bin, Windows | + `--data-channel`, `--data-resume` (usage error: exit 2); starts the data thread with the relay |
-| `crates/uw-helper/examples/overlay_probe.rs` | Windows | + `hold-info-lock [ms]` |
+| `crates/uw-helper/examples/overlay_probe.rs` | Windows | + `hold-info-lock [ms]`, `break-info-magic` (needs `Win32_System_Memory` in `uw-helper`'s `Cargo.toml`) |
 | `crates/uw-helper/tests/wine_e2e.rs` | test, ignored | Data events on their own channel, a stdout pause, and the data scenarios |
 | `crates/uw-host/src/supervisor.rs` | lib | + the resume point per channel; `Action::StartHelper { args }` with `--data-resume` |
 | `crates/uw-host/src/host.rs` | lib, unix | `Launch::command(args)`; `WineLaunch` appends them |
@@ -57,25 +59,26 @@
 
 ## Decisions the design leaves open (reviewers: check these)
 
-- **`--bad-data-channel` takes `version` or `layout`.** The design's "Code layout" gives the flag "a hello block with the wrong version", and its "Testing" expects it to give `data_bad_layout`; by the "Failures" table a wrong version is `data_version_mismatch`. Both rows get an end-to-end test: `version` writes format version 2 (`data_version_mismatch`), `layout` a wrong magic (`data_bad_layout`).
+- **`--bad-data-channel` takes `version` or `layout`** (owner decision, 2026-10-24; the design text now says so). The design's first "Code layout" gave the flag "a hello block with the wrong version", and its "Testing" expected it to give `data_bad_layout`; by the "Failures" table a wrong version is `data_version_mismatch`. Both rows get an end-to-end test: `version` writes format version 2 (`data_version_mismatch`), `layout` a wrong magic (`data_bad_layout`).
 - **The producer's rules are pure code.** `Outbox` in `uw-pipe-proto::data` holds the pending info, the FIFO with its `dropped` count and the throttle, so the design's unit tests ("pending keys keep their own timestamps", "the throttle, and queue overflow counted in `dropped`") run on Linux. `uw-game-channel::data::Producer` wraps it with the Win32 objects and the clock.
 - **One throttle, asked only under the lock.** `write_events` asks the throttle only once the events lock is held, so a busy lock spends no budget (Spike 3's second throttle spent it twice).
 - **A commit with one bad entry is refused whole.** `commit` checks every entry first; an unknown key or a value over its `max_len` fails the call and nothing of that transaction is kept.
 - **A key never set changes even to null.** Timestamp 0 means "never set", so setting a never-set key to null gives it a timestamp and it is in the snapshot as null (the test producer's `last_seq` starts that way). A key already null stays unchanged.
-- **The dropped baseline is the count at attach.** A helper reports only growth it sees after it attached (the resume point carries no dropped count), so drops during a helper's downtime are not reported. Overwritten records are always reported, by seq.
+- **The dropped baseline is the count at attach** (owner decision, 2026-10-24: drops while no helper runs stay unreported; the design now says so). A helper reports only growth it sees after it attached (the resume point carries no dropped count). Overwritten records are always reported, by seq.
 - **Counters that go backwards are a bad layout.** A resume point ahead of the ring's write head under the same producer, a write head behind the last seq read, a slot holding another seq, and a `dropped` count that shrinks are all "a seq that goes backwards under the same producer id": `data_bad_layout`.
 - **A duplicate name does not fit a schema** (a category twice, or a key twice in its category): the producer's `Schema::new` refuses it, and the helper's parse is a bad layout.
 - **`data_disconnected` only after `data_connected`.** A producer refused at attach (`data_version_mismatch`, `data_bad_layout`) gets no `data_disconnected` when it goes away; one refused after `data_connected` does.
 - **A failed wait** (`WAIT_FAILED`, not expected with valid handles) sleeps the timeout and then reads both regions as on a timeout, instead of Spike 3's "disconnect".
+- **A read skipped on a busy lock is owed** (the plan review's M1): it is retried on the next pass whatever wakes it, not only on its own bell or a quiet second. With plan 5's collector committing every 50 ms the 1 s timeout never fires, so a skipped drain would otherwise wait for the next event. The rule is pure code (`uw_helper::data_pass`) with its own unit test; no Wine test can reach the difference, because the test producer pairs every commit with an event, so both bells ring on every tick.
 - **`uw-host` keeps a resume point per channel** but passes `--data-resume` only for channel 1, the channel a helper reads by default (`uw-host` passes no `--data-channel`). The pure supervisor builds the argument (`Action::StartHelper { args }`), so its unit tests see it; `Launch::command` appends it.
-- **The test producer runs on a thread of its own** in the test overlay ("the test overlay's worker thread" in the design), fed by the bell callback through a channel after each `applied`; it flushes every 100 ms.
-- **Test aids:** the gate's two command-driven probes; `overlay_probe hold-info-lock`; the test overlay's `UW_TEST_OVERLAY_DATA_RESTART_MS` (drop and re-create the producer: the disconnect test) and `UW_TEST_OVERLAY_BURST` (n events of 1000 bytes before each `state_seen`: the burst test); the helper suite's reader puts data events on a channel of their own (2a's tests never see them) and can pause stdout (a host slow to read).
+- **The test producer runs on a thread of its own** in the test overlay, not on 2a's channel worker (owner decision, 2026-10-24; the design's wording is corrected), fed by the bell callback through a channel after each `applied`; it flushes every 100 ms.
+- **Test aids:** the gate's two command-driven probes; `overlay_probe hold-info-lock` and `break-info-magic`; the test overlay's `UW_TEST_OVERLAY_DATA_RESTART_MS` (drop and re-create the producer: the disconnect test) and `UW_TEST_OVERLAY_BURST` (n events of 1000 bytes before each `state_seen`: the burst test); the helper suite's reader puts data events on a channel of their own (2a's tests never see them) and can pause stdout (a host slow to read).
 - **Shared Win32 helpers.** `uw-game-channel::data` reuses 2a's `Handle`, `View`, `wide` and `last_error` from `objects.rs` (made `pub(crate)`, with `View::map_as` for read-only views) instead of a second copy. The crate's `Cargo.toml` comment is corrected on the way (plan 2a's final review: on Linux the crate re-exports types, it is not empty).
 
 ## Conventions for every task
 
 - Work only in the repo; never run anything against Deadlock or Steam (Task 11 is run by the controller).
-- Wine runs: always `timeout … xvfb-run -a cargo test … -- --ignored --test-threads=1`, the Windows artifacts built first. Afterwards this prints nothing: `ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep`, and no `/tmp/uw-inject-*` directory is left. Never `pkill`/`killall` wine or wineserver: the tests end their own prefix's wineserver only.
+- Wine runs: always `timeout … xvfb-run -a cargo test … -- --ignored --test-threads=1`, the Windows artifacts built first. Afterwards both of these print nothing: `ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep`, and `find /tmp -maxdepth 1 -name 'uw-inject-*'` (no prefix left; `find`, not a glob, so zsh prints no `no matches found`). Never `pkill`/`killall` wine or wineserver: the tests end their own prefix's wineserver only.
 - Every task touching Windows code runs `cargo clippy --target x86_64-pc-windows-gnu -p <crate> --all-targets -- -D warnings` (host clippy cannot see `cfg(windows)` code) and the host clippy.
 - Every `unsafe` block has a true `// SAFETY:` comment. Comments wrap near 100 columns. New files are rustfmt-clean (`rustfmt --edition 2024 --check <file>`); existing files keep their style.
 - Mutation steps come after the commit, so `git checkout -- <file>` restores the committed code.
@@ -2990,7 +2993,7 @@ Design "Components and flow" steps 1-6 and "Testing" 2 (the Wine gate). `uw-game
 - `Producer::create(channel, schema)` creates every object in the design's order (hello block; info store with its schema written in; event ring; both locks; both bells; `disconnect`, then `connect`), writes the hello block last (`producer_id` = `GetTickCount64()`), and sets `connect`. Any object that already exists fails it with `Exists`. `commit`, `push_event` and `flush` take `&mut self` and try the locks with 0 ms only; `ts` is `QueryPerformanceCounter` in ms. Dropping it sets `disconnect` and resets `connect`.
 - `Consumer::open(pid, channel)` needs `connect` set, opens every other object and maps the three regions read-only (`FILE_MAP_READ`). `attach` checks the hello block, takes the snapshot under one info lock and picks the start under the events lock; `changes` and `drain` re-check the headers on every read; locks wait at most 100 ms (`LOCK_TIMEOUT_MS`) and `WAIT_ABANDONED` counts as acquired. `wait` is `[disconnect, info-bell, events-bell]`.
 
-Two command-driven probes run them in two Wine processes of one prefix, and the test checks every answer: the snapshot (null included), a delta, events in order, a first attach at the write head, a resume (including one older than the oldest record), ring wraparound giving `lost`, a busy lock given up after about 100 ms, an abandoned lock with the header intact (read) and broken (`data_bad_layout`), `disconnect` winning a tie, and `Exists` until the consumer lets go. Spike 3 proved these objects under Wine. **If the gate fails, stop and report to the owner.**
+Two command-driven probes run them in two Wine processes of one prefix (a second consumer probe joins at the end), and the test checks every answer: the snapshot (null included), the bells `create()` rang taken first so that a delta must ring its own, a delta, events in order, a first attach at the write head, a resume (including one older than the oldest record), ring wraparound giving `lost`, a busy lock given up after about 100 ms, an abandoned lock with the header intact (read) and broken (`data_bad_layout`), `disconnect` winning a tie, a channel whose `connect` is reset refused (`not ready`) although its objects still exist, and `Exists` until the consumer lets go. Spike 3 proved these objects under Wine. **If the gate fails, stop and report to the owner.**
 
 **Files:**
 - Modify: `crates/uw-game-channel/Cargo.toml`, `crates/uw-game-channel/src/lib.rs`, `crates/uw-game-channel/src/objects.rs`
@@ -3075,13 +3078,15 @@ mod win {
     fn open_lock(object: DataObject) -> HANDLE {
         let n = name(object);
         // SAFETY: opens an existing named mutex to wait on it and release it.
-        unsafe {
+        let h = unsafe {
             OpenMutexW(
                 SYNCHRONIZATION_SYNCHRONIZE | MUTEX_MODIFY_STATE,
                 0,
                 n.as_ptr(),
             )
-        }
+        };
+        assert!(!h.is_null(), "OpenMutexW failed");
+        h
     }
 
     /// On a thread of its own: take `object`'s lock, run `then` while holding it, and either
@@ -3113,11 +3118,13 @@ mod win {
 
     fn break_info_magic() {
         let n = name(DataObject::Info);
-        // SAFETY: opens our own info mapping for writing, writes one byte of its magic, and
-        // unmaps and closes it again.
+        // SAFETY: opens our own info mapping for writing, writes one byte of its magic (both
+        // handles checked first), and unmaps and closes it again.
         unsafe {
             let h = OpenFileMappingW(FILE_MAP_WRITE, 0, n.as_ptr());
+            assert!(!h.is_null(), "OpenFileMappingW failed");
             let view = MapViewOfFile(h, FILE_MAP_WRITE, 0, 0, 0);
+            assert!(!view.Value.is_null(), "MapViewOfFile failed");
             *view.Value.cast::<u8>() = b'X';
             UnmapViewOfFile(view);
             CloseHandle(h);
@@ -3201,6 +3208,7 @@ mod win {
 //! pid>`, run under Wine in the prefix where `data_producer_probe` runs. It runs one command per
 //! stdin line, as the helper's data thread would, and answers each with one line:
 //! - `open`: `Consumer::open` every 100 ms until it opens (`opened`; 30 s at most);
+//! - `open-once`: `Consumer::open` once: `opened`, or `not ready` (`connect` missing or not set);
 //! - `attach [<producer_id>:<seq>]`: `attached producer_id=<id> from_seq=<n> schema=<c.k/max,…>
 //!   snapshot=<c.k=value,…>` (null values print as `null`);
 //! - `wait`: `wake disconnect|info|events|timeout` (a 5 s wait);
@@ -3227,7 +3235,7 @@ mod win {
     use std::io::{BufRead, Write};
     use std::time::{Duration, Instant};
 
-    use uw_game_channel::data::{ConsumeError, Consumer, Wake};
+    use uw_game_channel::data::{ConsumeError, Consumer, OpenError, Wake};
     use uw_pipe_proto::data::{InfoValue, ResumePoint};
 
     const CHANNEL: u32 = 1;
@@ -3271,6 +3279,16 @@ mod win {
                 std::thread::sleep(Duration::from_millis(100));
             }
             return "error open timed out".into();
+        }
+        if word == "open-once" {
+            return match Consumer::open(pid, CHANNEL) {
+                Ok(c) => {
+                    *consumer = Some(c);
+                    "opened".into()
+                }
+                Err(OpenError::NotReady) => "not ready".into(),
+                Err(e) => format!("error {e}"),
+            };
         }
         let Some(c) = consumer.as_mut() else {
             return "error not open".into();
@@ -3353,7 +3371,8 @@ mod win {
 //! producer will; `data_consumer_probe.exe` reads it as the helper's data thread will. The test
 //! drives both, one command at a time, and checks every answer: the snapshot, deltas, events in
 //! order, a resume, ring wraparound giving a loss, a busy lock, an abandoned lock with and without
-//! a broken header, `disconnect` winning a tie, and `Exists` until the consumer lets go.
+//! a broken header, `disconnect` winning a tie, a channel refused once `connect` is reset, and
+//! `Exists` until the consumer lets go.
 //!
 //! Ignored by default (needs Wine and the Windows artifacts). Build and run:
 //!   cargo build --release --target x86_64-pc-windows-gnu -p uw-game-channel --examples
@@ -3492,8 +3511,9 @@ fn burst(seqs: std::ops::RangeInclusive<u64>) -> String {
 /// included) or a delta not seen, a first attach replaying the ring instead of starting at the
 /// write head, events out of order or twice, a resume that misses or repeats events, ring
 /// wraparound not counted as lost, a lock wait longer than 100 ms, an abandoned lock treated as
-/// busy or used without re-checking the header, `disconnect` losing a tie to a stale bell, or a
-/// producer re-created while the consumer still holds the old objects.
+/// busy or used without re-checking the header, `disconnect` losing a tie to a stale bell, a
+/// channel opened although `connect` is not set (a producer still creating it, or one that went
+/// away), or a producer re-created while the consumer still holds the old objects.
 #[test]
 #[ignore = "needs Wine and the x86_64-pc-windows-gnu examples"]
 fn the_data_channel_works_between_two_wine_processes() {
@@ -3515,8 +3535,12 @@ fn the_data_channel_works_between_two_wine_processes() {
         .to_string();
     fx.probes
         .push(Probe::start(&fx.dir, "data_consumer_probe", &[&pid]));
-    let (producer, consumer) = fx.probes.split_at_mut(1);
-    let (producer, consumer) = (&mut producer[0], &mut consumer[0]);
+    // A second consumer, only to check that a channel whose `connect` is not set is refused.
+    fx.probes
+        .push(Probe::start(&fx.dir, "data_consumer_probe", &[&pid]));
+    let [producer, consumer, late] = fx.probes.as_mut_slice() else {
+        unreachable!("three probes")
+    };
 
     // Attach: the snapshot, and events from the write head (the three pushed before are not
     // replayed).
@@ -3531,6 +3555,10 @@ fn the_data_channel_works_between_two_wine_processes() {
         )
     );
     assert_eq!(consumer.ask("drain"), "drain lost=0");
+    // `create()` rang both bells before the consumer opened: take them, so the waits after the
+    // delta show that the delta rang its own.
+    assert_eq!(consumer.ask("wait"), "wake info");
+    assert_eq!(consumer.ask("wait"), "wake events");
 
     // A delta: both bells ring; the info bell has the smaller index.
     assert_eq!(producer.ask("delta"), "ok");
@@ -3593,9 +3621,13 @@ fn the_data_channel_works_between_two_wine_processes() {
     // `disconnect` wins the tie with the events bell the burst left set.
     assert_eq!(producer.ask("drop"), "ok");
     assert_eq!(consumer.ask("wait"), "wake disconnect");
+    // `connect` is reset: a consumer that opens now refuses the channel, though the first one
+    // still holds its objects.
+    assert_eq!(late.ask("open-once"), "not ready");
     assert_eq!(producer.ask("recreate"), "exists");
     assert_eq!(consumer.ask("close"), "closed");
     assert_eq!(producer.ask("recreate"), "ok");
+    assert_eq!(late.ask("open-once"), "opened");
 }
 ```
 
@@ -4397,7 +4429,7 @@ Run:
 ```bash
 timeout 600 xvfb-run -a cargo test -p uw-game-channel --test wine_data -- --ignored --test-threads=1
 timeout 600 xvfb-run -a cargo test -p uw-game-channel --test wine_objects -- --ignored --test-threads=1
-ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep; ls -d /tmp/uw-inject-* 2>/dev/null
+ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep; find /tmp -maxdepth 1 -name 'uw-inject-*'
 ```
 Expected: `the_data_channel_works_between_two_wine_processes ... ok`, `test result: ok. 1 passed` (about 5 s); 2a's `the_channel_objects_work_between_two_wine_processes ... ok`, `1 passed` (the `objects.rs` edits change no behaviour); the leftover check prints nothing.
 
@@ -4419,7 +4451,7 @@ timeout 600 xvfb-run -a cargo test -p uw-game-channel --test wine_data -- --igno
 git checkout -- crates/uw-game-channel/src/data.rs
 cargo build --release --target x86_64-pc-windows-gnu -p uw-game-channel --examples
 timeout 600 xvfb-run -a cargo test -p uw-game-channel --test wine_data -- --ignored --test-threads=1
-ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep; ls -d /tmp/uw-inject-* 2>/dev/null
+ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep; find /tmp -maxdepth 1 -name 'uw-inject-*'
 ```
 Expected: the mutated build warns `unused import: WAIT_ABANDONED` (expected); its test run FAILS at the abandoned events lock with `left: "busy 0"`, `right: "drain lost=0"`; after the restore it passes again (`1 passed`); `git status` is clean; no leftovers.
 
@@ -4630,16 +4662,56 @@ git commit -m "data: the data channel's JSON events"
 Design "Components and flow" steps 2-6, "Threads", "Helper arguments" and the "Failures" rows for versions and layouts. The helper's new `data.rs` is its only reader of the channel, on a thread of its own started with the relay; it shares only `emit()` (whole lines under one lock) with 2a's relay loop:
 1. every second it tries `Consumer::open` (no producer yet: it says nothing);
 2. `attach`, then `data_connected` and one `info` per key in the snapshot;
-3. waits on `[disconnect, info-bell, events-bell]` for 1 s: `info` lines on `info-bell`, a drain on `events-bell` (`data_lost` first when anything was lost), both on a timeout; a busy lock is skipped until the next pass;
+3. waits on `[disconnect, info-bell, events-bell]` for 1 s: `info` lines on `info-bell`, a drain on `events-bell` (`data_lost` first when anything was lost), both on a timeout; a read a busy lock skipped is owed and done on the next pass, whatever wakes it (`uw_helper::data_pass`, pure and unit-tested; see "Decisions");
 4. on `disconnect`, `data_disconnected`, then it closes everything (only after its last wait returned) and starts over.
 
 A version or layout that does not fit is reported once per producer (`error`, `detail` the channel id, the reason on stderr); then it only waits for `disconnect`. `main.rs` parses `--data-channel <n>` (default 1) and `--data-resume <producer_id>:<seq>`; a malformed value is a usage error, exit 2. The test game's `--bad-data-channel <version|layout>` holds a channel whose hello block has format version 2 or a wrong magic (see "Decisions"). The helper suite's reader now puts data events on a channel of their own (`Helper::data`, `next_data`, `expect_data_quiet`), so 2a's tests never see them.
 
 **Files:**
-- Modify: `crates/uw-helper/src/bin/uw-helper64/main.rs`, `crates/uw-helper/tests/wine_e2e.rs`, `crates/uw-test-game/Cargo.toml`, `crates/uw-test-game/src/main.rs`
-- Create: `crates/uw-helper/src/bin/uw-helper64/data.rs`
+- Modify: `crates/uw-helper/src/lib.rs`, `crates/uw-helper/src/bin/uw-helper64/main.rs`, `crates/uw-helper/tests/wine_e2e.rs`, `crates/uw-test-game/Cargo.toml`, `crates/uw-test-game/src/main.rs`
+- Create: `crates/uw-helper/src/data_pass.rs`, `crates/uw-helper/tests/data_pass.rs`, `crates/uw-helper/src/bin/uw-helper64/data.rs`
 
 - [ ] **Step 1: Add `--bad-data-channel` and write the failing tests**
+
+`crates/uw-helper/tests/data_pass.rs` (complete file):
+
+```rust
+use uw_helper::data_pass::{Owed, Woke};
+
+/// Catches the data thread reading the wrong region on a wake (design 2b flow step 5: a bell
+/// reads its own region, and a timeout reads both, since a signal can be missed while a lock
+/// attempt times out).
+#[test]
+fn a_bell_reads_its_own_region_and_a_timeout_reads_both() {
+    let owed = Owed::default();
+    assert_eq!(owed.reads(Woke::InfoBell), (true, false));
+    assert_eq!(owed.reads(Woke::EventsBell), (false, true));
+    assert_eq!(owed.reads(Woke::Timeout), (true, true));
+}
+
+/// Catches a read skipped on a busy lock waiting for its own bell or a quiet second (design 2b
+/// flow step 5: "skips and retries on the next pass"): with a producer that commits info all the
+/// time, a skipped drain would otherwise wait for the next event, and a last event would sit in
+/// the ring.
+#[test]
+fn a_read_a_busy_lock_skipped_is_retried_on_the_next_wake_of_any_kind() {
+    let events_owed = Owed {
+        info: false,
+        events: true,
+    };
+    assert_eq!(events_owed.reads(Woke::InfoBell), (true, true));
+    let info_owed = Owed {
+        info: true,
+        events: false,
+    };
+    assert_eq!(info_owed.reads(Woke::EventsBell), (true, true));
+    let both = Owed {
+        info: true,
+        events: true,
+    };
+    assert_eq!(both.reads(Woke::InfoBell), (true, true));
+}
+```
 
 In `crates/uw-test-game/Cargo.toml`, make this edit (each "replace" block is exact and occurs once):
 
@@ -5015,14 +5087,76 @@ fn a_data_channel_with_a_bad_layout_is_data_bad_layout_once() {
 
 Run:
 ```bash
+cargo test -p uw-helper --test data_pass
 cargo build --release --target x86_64-pc-windows-gnu -p uw-test-game -p uw-bootstrap -p uw-test-overlay -p uw-helper
 cargo build --release --target x86_64-pc-windows-gnu -p uw-helper --example overlay_probe
 timeout 600 xvfb-run -a cargo test -p uw-helper --test wine_e2e -- --ignored --test-threads=1 a_data_channel
-ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep; ls -d /tmp/uw-inject-* 2>/dev/null
+ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep; find /tmp -maxdepth 1 -name 'uw-inject-*'
 ```
-Expected: `2 failed`. `a_data_channel_with_a_bad_layout_is_data_bad_layout_once` panics with `no data event within 10s` (the helper has no data thread); `a_data_channel_of_another_version_is_data_version_mismatch_once` fails in `assert_usage_error` (the old helper exits 2 with `unknown argument --data-channel`, not the new message); no leftovers.
+Expected: `data_pass` does not compile (`` error[E0432]: unresolved import `uw_helper::data_pass` ``). The Wine run gives `2 failed`: `a_data_channel_with_a_bad_layout_is_data_bad_layout_once` panics with `no data event within 10s` (the helper has no data thread); `a_data_channel_of_another_version_is_data_version_mismatch_once` fails in `assert_usage_error` (the old helper exits 2 with `unknown argument --data-channel`, not the new message); no leftovers.
 
-- [ ] **Step 3: Add the data thread and its arguments**
+- [ ] **Step 3: Add the reads per pass, the data thread and its arguments**
+
+`crates/uw-helper/src/data_pass.rs` (complete file):
+
+```rust
+//! The data thread's reads on each pass (design 2b flow step 5), apart from the Win32 wait, so the
+//! rule is unit-tested on Linux: a bell reads its own region and a timeout reads both, and a read
+//! that a busy lock skipped stays owed until it succeeds, on the next pass whatever woke it.
+
+/// What woke the data thread's wait, other than `disconnect` (which ends the relay).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Woke {
+    InfoBell,
+    EventsBell,
+    Timeout,
+}
+
+/// The reads a busy lock skipped, still owed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Owed {
+    pub info: bool,
+    pub events: bool,
+}
+
+impl Owed {
+    /// The reads for a pass that `woke`, as `(info, events)`: the bell's own region (both on a
+    /// timeout), and any read owed from an earlier pass.
+    pub fn reads(&self, woke: Woke) -> (bool, bool) {
+        let info = self.info || matches!(woke, Woke::InfoBell | Woke::Timeout);
+        let events = self.events || matches!(woke, Woke::EventsBell | Woke::Timeout);
+        (info, events)
+    }
+}
+```
+
+In `crates/uw-helper/src/lib.rs`, make this edit (each "replace" block is exact and occurs once):
+
+1. Replace:
+
+```rust
+//! The portable half of the helper: `decide` holds the `Win32` trait and the
+//! wait/hook/fallback/timeout state machine, and `pending` the relay's `load_overlay` requests
+//! awaiting their `status` (both unit-tested on Linux). The real `Win32` implementation, the pipe
+//! servers and the relay loop live in the `cfg(windows)` bin `uw-helper64`.
+
+pub mod decide;
+pub mod pending;
+```
+
+with:
+
+```rust
+//! The portable half of the helper: `decide` holds the `Win32` trait and the
+//! wait/hook/fallback/timeout state machine, `pending` the relay's `load_overlay` requests
+//! awaiting their `status`, and `data_pass` the data thread's reads on each pass (all unit-tested
+//! on Linux). The real `Win32` implementation, the pipe servers, the relay loop and the data
+//! thread live in the `cfg(windows)` bin `uw-helper64`.
+
+pub mod data_pass;
+pub mod decide;
+pub mod pending;
+```
 
 `crates/uw-helper/src/bin/uw-helper64/data.rs` (complete file):
 
@@ -5038,7 +5172,8 @@ Expected: `2 failed`. `a_data_channel_with_a_bad_layout_is_data_bad_layout_once`
 //! 3. Wait on `[disconnect, info-bell, events-bell]` with a 1 s timeout: emit the changed keys on
 //!    `info-bell`, drain the ring on `events-bell` (`data_lost` first when events were lost), and
 //!    read both on a timeout, because a signal can be missed while a lock attempt times out. A
-//!    busy lock is skipped and retried on the next pass.
+//!    read that a busy lock skipped is retried on the next pass, whatever wakes it
+//!    (`uw_helper::data_pass`).
 //! 4. On `disconnect`, emit `data_disconnected`, close everything and go back to 1.
 //!
 //! A version or a layout that does not fit is reported once per producer (`error
@@ -5046,6 +5181,7 @@ Expected: `2 failed`. `a_data_channel_with_a_bad_layout_is_data_bad_layout_once`
 //! reading and waits for `disconnect`.
 
 use uw_game_channel::data::{ConsumeError, Consumer, OpenError, Wake};
+use uw_helper::data_pass::{Owed, Woke};
 use uw_pipe_proto::data::{InfoValue, ReadError, ResumePoint};
 use uw_pipe_proto::jsonl::Event;
 
@@ -5143,21 +5279,30 @@ fn run(pid: u32, channel: u32, mut resume: Option<ResumePoint>) {
 /// Relay one producer until `disconnect` (`Ok`) or a read that does not fit (`Err`). `point`
 /// follows the last event delivered.
 fn relay(c: &mut Consumer, channel: u32, point: &mut ResumePoint) -> Result<(), ReadError> {
+    let mut owed = Owed::default();
     loop {
-        let wake = c.wait(WAIT_MS);
-        if wake == Wake::Disconnect {
-            return Ok(());
-        }
-        if matches!(wake, Wake::Info | Wake::Timeout) {
+        let woke = match c.wait(WAIT_MS) {
+            Wake::Disconnect => return Ok(()),
+            Wake::Info => Woke::InfoBell,
+            Wake::Events => Woke::EventsBell,
+            Wake::Timeout => Woke::Timeout,
+        };
+        let (read_info, read_events) = owed.reads(woke);
+        if read_info {
             match c.changes() {
-                Ok(values) => values.into_iter().for_each(|v| emit(&info(channel, v))),
-                Err(ConsumeError::Busy) => {}
+                Ok(values) => {
+                    owed.info = false;
+                    values.into_iter().for_each(|v| emit(&info(channel, v)));
+                }
+                // A busy lock: skip, and read again on the next pass, whatever wakes it.
+                Err(ConsumeError::Busy) => owed.info = true,
                 Err(ConsumeError::Read(e)) => return Err(e),
             }
         }
-        if matches!(wake, Wake::Events | Wake::Timeout) {
+        if read_events {
             match c.drain() {
                 Ok(d) => {
+                    owed.events = false;
                     if d.lost > 0 {
                         emit(&Event::DataLost {
                             channel,
@@ -5175,7 +5320,7 @@ fn relay(c: &mut Consumer, channel: u32, point: &mut ResumePoint) -> Result<(), 
                         });
                     }
                 }
-                Err(ConsumeError::Busy) => {}
+                Err(ConsumeError::Busy) => owed.events = true,
                 Err(ConsumeError::Read(e)) => return Err(e),
             }
         }
@@ -5362,16 +5507,17 @@ with:
 
 Run:
 ```bash
+cargo test -p uw-helper
 cargo build --release --target x86_64-pc-windows-gnu -p uw-test-game -p uw-bootstrap -p uw-test-overlay -p uw-helper
 cargo build -p uw-inject --bin uw-inject
 cargo clippy -p uw-helper -p uw-test-game --all-targets -- -D warnings
 cargo clippy --target x86_64-pc-windows-gnu -p uw-helper -p uw-test-game --all-targets -- -D warnings
-rustfmt --edition 2024 --check crates/uw-helper/src/bin/uw-helper64/data.rs
+rustfmt --edition 2024 --check crates/uw-helper/src/data_pass.rs crates/uw-helper/tests/data_pass.rs crates/uw-helper/src/bin/uw-helper64/data.rs
 timeout 900 xvfb-run -a cargo test -p uw-helper --test wine_e2e -- --ignored --test-threads=1
 timeout 600 xvfb-run -a cargo test -p uw-inject --test wine_e2e -- --ignored --test-threads=1
-ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep; ls -d /tmp/uw-inject-* 2>/dev/null
+ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep; find /tmp -maxdepth 1 -name 'uw-inject-*'
 ```
-Expected: both clippies clean; rustfmt prints nothing; helper `18 passed` (2a's 16 and the two new ones; about 95 s), `uw-inject` `2 passed`; no leftovers. 2a's tests still pass: with no producer the data thread only looks once a second.
+Expected: `uw-helper` unit tests all pass: `data_pass` 2, `decide` 30, `pending` 3; both clippies clean; rustfmt prints nothing; helper Wine `18 passed` (2a's 16 and the two new ones; about 95 s), `uw-inject` `2 passed`; no leftovers. 2a's tests still pass: with no producer the data thread only looks once a second.
 
 - [ ] **Step 5: Commit**
 
@@ -5379,6 +5525,16 @@ Expected: both clippies clean; rustfmt prints nothing; helper `18 passed` (2a's 
 git add crates/uw-helper crates/uw-test-game
 git commit -m "data: the helper's data thread, its arguments, and --bad-data-channel"
 ```
+
+- [ ] **Step 6: Check that the owed-read rule bites, then restore**
+
+In `crates/uw-helper/src/data_pass.rs`, replace `        let info = self.info || matches!(woke, Woke::InfoBell | Woke::Timeout);` with `        let info = matches!(woke, Woke::InfoBell | Woke::Timeout);` (a skipped info read waits for its own bell). Run:
+```bash
+cargo test -p uw-helper --test data_pass
+git checkout -- crates/uw-helper/src/data_pass.rs
+cargo test -p uw-helper --test data_pass
+```
+Expected: the first run FAILS `a_read_a_busy_lock_skipped_is_retried_on_the_next_wake_of_any_kind` with `left: (false, true)`, `right: (true, true)`; after the restore `2 passed`; `git status` is clean.
 
 ---
 
@@ -5571,9 +5727,12 @@ fn the_data_thread_waits_for_the_producer_then_relays_it() {
             })
             .collect()
     };
-    // The snapshot may have caught `ticks` just before its event was written.
+    // Attach reads the snapshot under the info lock and the start point under the events lock, a
+    // moment apart, and a tick commits `ticks` just before it writes its event. So the ring may be
+    // a tick behind the snapshot (events from `ticks` on) or a tick ahead (only `ticks + 2`).
     let events = numbers(true);
-    assert!(events == [ticks + 1, ticks + 2] || events == [ticks, ticks + 1, ticks + 2], "{seen:?}");
+    let fits = [vec![ticks + 1, ticks + 2], vec![ticks, ticks + 1, ticks + 2], vec![ticks + 2]];
+    assert!(fits.contains(&events), "{seen:?}");
     assert_eq!(numbers(false), [ticks + 1, ticks + 2], "{seen:?}");
 
     // `set_state` -> `state_applied` -> a `state_seen` event and `last_seq`, both with seq 1 (the
@@ -5772,7 +5931,7 @@ cargo build --release --target x86_64-pc-windows-gnu -p uw-test-game -p uw-boots
 cargo build -p uw-inject --bin uw-inject
 timeout 900 xvfb-run -a cargo test -p uw-helper --test wine_e2e -- --ignored --test-threads=1 the_data_thread a_producer_that closing_stdin_ends_the_helper_after killing_the_game
 timeout 600 xvfb-run -a cargo test -p uw-inject --test wine_e2e -- --ignored --test-threads=1 uw_inject_relays
-ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep; ls -d /tmp/uw-inject-* 2>/dev/null
+ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep; find /tmp -maxdepth 1 -name 'uw-inject-*'
 ```
 Expected: helper `4 failed`, each with `no data event within 10s` (the overlay has no producer yet); `uw-inject` `1 failed` with `no event in time` after 200 s (no `data_connected`); no leftovers.
 
@@ -6008,7 +6167,7 @@ cargo clippy -p uw-test-overlay -p uw-helper -p uw-inject --all-targets -- -D wa
 cargo clippy --target x86_64-pc-windows-gnu -p uw-test-overlay -p uw-helper -p uw-inject --all-targets -- -D warnings
 timeout 900 xvfb-run -a cargo test -p uw-helper --test wine_e2e -- --ignored --test-threads=1
 timeout 600 xvfb-run -a cargo test -p uw-inject --test wine_e2e -- --ignored --test-threads=1
-ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep; ls -d /tmp/uw-inject-* 2>/dev/null
+ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep; find /tmp -maxdepth 1 -name 'uw-inject-*'
 git status --short
 ```
 Expected: both clippies clean; helper `20 passed` (about 115 s; 2a's tests are untouched by the ticks, which go to `Helper::data`), `uw-inject` `3 passed`; no leftovers; `Cargo.lock` changed (the test overlay now depends on `uw-pipe-proto`).
@@ -6022,17 +6181,18 @@ git commit -m "data: the test overlay's producer, and the end-to-end data flow t
 
 ---
 
-## Task 9: Wine tests for resume, a burst under a slow host, and a busy info lock
+## Task 9: Wine tests for resume, a burst under a slow host, a busy info lock and a broken store
 
 The remaining "Failures" rows, at the helper:
 - **Resume** ("Helper killed or restarted", "Resume names another producer"): a new helper with `--data-resume <producer_id>:<seq>` sends `data_connected` with that `from_seq` and every tick from its downtime once, in order; with another producer's id it starts at the write head.
 - **A burst while the host reads slowly** ("Producer's dropped grew", "Host slow to read"): with `UW_TEST_OVERLAY_BURST=300` the producer queues 300 events of 1000 bytes before `state_seen`, so its queue of 256 drops at least 45. The test stops reading the helper's stdout for 3 s meanwhile (the pipe fills and `emit()` blocks the writer), then checks that every line parses, every seq gap was announced by a `data_lost` before it, the drops were reported, and the control replies came too.
-- **A busy info lock** ("Lock busy for more than 100 ms"): `overlay_probe hold-info-lock 4000` holds the info lock and rings the info bell every 200 ms. Ticks keep coming, no `info` does, and once it is released the newest `ticks` value arrives (the producer kept it pending).
+- **A busy info lock** ("Lock busy for more than 100 ms"): `overlay_probe hold-info-lock 4000` holds the info lock and rings the info bell every 200 ms. A state applied meanwhile gets its `state_seen` event through, no `info` comes, and once the lock is released its `last_seq` arrives: the producer kept the value pending. `last_seq` is used because only a `state_seen` changes it; a `ticks` value can be overtaken by the next tick in the producer's first pass after the release (the plan review's I1: an earlier version of this test failed when the probe started 900 or 950 ms into a tick). The planner swept the probe's start over a whole tick, 0 to 950 ms in 50 ms steps: all 20 phases pass.
+- **A store broken after `data_connected`** ("Bad layout", after attach): `overlay_probe break-info-magic` breaks the info store's magic under its lock. The helper reports `error data_bad_layout` (detail 1) once, then nothing for 3 s while the producer keeps ticking; when that producer goes away (`UW_TEST_OVERLAY_DATA_RESTART_MS=15000`) comes `data_disconnected`, and the next producer is relayed.
 
-The code these tests check already exists (Tasks 3, 7 and 8), so the red runs are mutations (Step 4). The test aids are new: the burst variable, the probe mode, and a gate on the helper suite's stdout reader.
+The code these tests check already exists (Tasks 3, 7 and 8), so the red runs are mutations (Step 4). The test aids are new: the burst variable, the two probe modes (`uw-helper` gets the `Win32_System_Memory` feature for the second), and a gate on the helper suite's stdout reader.
 
 **Files:**
-- Modify: `crates/uw-test-overlay/src/lib.rs`, `crates/uw-helper/examples/overlay_probe.rs`, `crates/uw-helper/tests/wine_e2e.rs`
+- Modify: `crates/uw-test-overlay/src/lib.rs`, `crates/uw-helper/Cargo.toml`, `crates/uw-helper/examples/overlay_probe.rs`, `crates/uw-helper/tests/wine_e2e.rs`
 
 - [ ] **Step 1: Add the test aids and the tests**
 
@@ -6132,6 +6292,27 @@ with:
                     let seq = seq.to_string();
 ```
 
+In `crates/uw-helper/Cargo.toml`, make this edit (each "replace" block is exact and occurs once):
+
+1. Replace:
+
+```toml
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Pipes",
+    "Win32_System_SystemInformation",
+```
+
+with:
+
+```toml
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Pipes",
+    "Win32_System_SystemInformation",
+```
+
 In `crates/uw-helper/examples/overlay_probe.rs`, make these 5 edits, in order (each "replace" block is exact and occurs once):
 
 1. Replace:
@@ -6151,6 +6332,8 @@ with:
 //! - `hold-info-lock [ms]`: without touching the overlay pipe, hold the game's data channel 1
 //!   info lock for `ms` (default 3000), ringing its info bell every 200 ms meanwhile; prints
 //!   `locked`, then `released` (design 2b: a busy lock).
+//! - `break-info-magic`: without touching the overlay pipe, break the magic of the game's data
+//!   channel 1 info store, under its lock, as a producer gone wrong would; prints `broken`.
 //!
 //! Runs under Wine in the game's prefix. It does nothing on other platforms.
 ```
@@ -6179,6 +6362,7 @@ with:
 3. Replace:
 
 ```rust
+        TH32CS_SNAPPROCESS,
     };
     use windows_sys::Win32::System::Pipes::{PIPE_READMODE_MESSAGE, SetNamedPipeHandleState};
     use windows_sys::Win32::System::Threading::WaitForSingleObject;
@@ -6189,6 +6373,10 @@ with:
 with:
 
 ```rust
+        TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::Memory::{
+        FILE_MAP_WRITE, MapViewOfFile, OpenFileMappingW, UnmapViewOfFile,
     };
     use windows_sys::Win32::System::Pipes::{PIPE_READMODE_MESSAGE, SetNamedPipeHandleState};
     use windows_sys::Win32::System::Threading::{
@@ -6255,6 +6443,52 @@ with:
         0
     }
 
+    /// Break the first byte of the game's data channel 1 info store, under the info lock.
+    fn break_info_magic(pid: u32) -> i32 {
+        let lock = wide(&data_name(pid, DEFAULT_CHANNEL, DataObject::InfoLock));
+        let info = wide(&data_name(pid, DEFAULT_CHANNEL, DataObject::Info));
+        // SAFETY: opens the game's named mutex and mapping; both names are NUL-terminated.
+        let (l, m) = unsafe {
+            (
+                OpenMutexW(
+                    SYNCHRONIZATION_SYNCHRONIZE | MUTEX_MODIFY_STATE,
+                    0,
+                    lock.as_ptr(),
+                ),
+                OpenFileMappingW(FILE_MAP_WRITE, 0, info.as_ptr()),
+            )
+        };
+        if l.is_null() || m.is_null() {
+            say("no data channel");
+            return 7;
+        }
+        // SAFETY: waits on the mutex handle opened above.
+        if unsafe { WaitForSingleObject(l, 5000) } != WAIT_OBJECT_0 {
+            say("lock busy");
+            return 8;
+        }
+        // SAFETY: maps the store for writing and, if that worked, writes its first byte while the
+        // lock is held; then unmaps it, releases the lock and closes both handles.
+        let mapped = unsafe {
+            let view = MapViewOfFile(m, FILE_MAP_WRITE, 0, 0, 0);
+            let mapped = !view.Value.is_null();
+            if mapped {
+                *view.Value.cast::<u8>() = b'X';
+                UnmapViewOfFile(view);
+            }
+            ReleaseMutex(l);
+            CloseHandle(l);
+            CloseHandle(m);
+            mapped
+        };
+        if !mapped {
+            say("map failed");
+            return 9;
+        }
+        say("broken");
+        0
+    }
+
     pub fn main() -> i32 {
         let args: Vec<String> = std::env::args().skip(1).collect();
 ```
@@ -6275,6 +6509,9 @@ with:
         };
         if mode == "hold-info-lock" {
             return hold_info_lock(pid, ms);
+        }
+        if mode == "break-info-magic" {
+            return break_info_magic(pid);
         }
         let p = connect(pid);
         match mode.as_str() {
@@ -6498,42 +6735,67 @@ fn a_burst_while_the_host_reads_slowly_loses_nothing_unannounced() {
 }
 
 /// Catches a busy info lock stalling the data thread or ending it (design 2b "Failures": a lock
-/// busy for more than 100 ms is skipped and retried on the next pass), and the values committed
+/// busy for more than 100 ms is skipped and retried on the next pass), and a value committed
 /// meanwhile being lost (design "A busy lock": the producer keeps the newest value and writes it
-/// on the next call).
+/// on the next call). The value is `last_seq`, which only a `state_seen` changes, so no tick can
+/// overtake it.
 #[test]
 #[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
 fn a_busy_info_lock_is_skipped_and_the_newest_value_comes_after() {
     win_artifact("examples/overlay_probe.exe"); // fail at once if the probe is not built
     let mut pfx = setup("databusy");
     pfx.game = Some(wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).spawn().unwrap());
-    let helper = start_with_overlay(&pfx);
+    let mut helper = start_with_overlay(&pfx);
     expect_test_producer(&helper);
     // The probe holds the info lock for 4 s and rings the info bell every 200 ms.
     let p = Probe::start(&pfx, &["hold-info-lock", "4000"]);
     p.expect_line("locked", Duration::from_secs(60));
     std::thread::sleep(Duration::from_millis(300));
     helper.drain_data();
-    let ticks = std::cell::Cell::new(0);
-    let held = data_until(&helper, Duration::from_secs(4), |e| {
-        if matches!(e, Event::DataEvent { name, .. } if name == "tick") {
-            ticks.set(ticks.get() + 1);
-        }
-        ticks.get() == 2
+    // A state applied while the info lock is held: its event gets through, its `last_seq` waits.
+    helper.send_cmd(&Cmd::SetState { request_id: 2, edit_mode: Some(true), visible: None });
+    helper.expect_all(&[Event::StateSet { request_id: 2, seq: 1 }, applied(1)], Duration::from_secs(10));
+    let held = data_until(&helper, Duration::from_secs(3), |e| {
+        matches!(e, Event::DataEvent { name, data, .. } if name == "state_seen" && data == "1")
     });
     assert!(!held.iter().any(|e| matches!(e, Event::Info { .. })), "info while the lock was held: {held:?}");
     p.expect_line("released", Duration::from_secs(10));
-    let after = data_until(&helper, Duration::from_secs(5), |e| matches!(e, Event::Info { key, .. } if key == "ticks"));
-    let newest = [held, after.clone()]
-        .concat()
-        .iter()
-        .filter_map(|e| match e {
-            Event::DataEvent { name, data, .. } if name == "tick" => data.parse::<u64>().ok(),
-            _ => None,
-        })
-        .max();
-    let Some(Event::Info { value: Some(v), .. }) = after.last() else { unreachable!() };
-    assert_eq!(v.parse::<u64>().ok(), newest, "{after:?}");
+    data_until(&helper, Duration::from_secs(5), |e| {
+        matches!(e, Event::Info { key, value: Some(v), .. } if key == "last_seq" && v == "1")
+    });
+}
+
+/// Catches a store that stops fitting after `data_connected` being read on, reported again and
+/// again, or re-attached (design 2b "Failures": `data_bad_layout` once per producer, then only the
+/// wait for `disconnect`), and the next producer not being relayed after it.
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn a_store_broken_after_data_connected_is_reported_once_until_disconnect() {
+    win_artifact("examples/overlay_probe.exe"); // fail at once if the probe is not built
+    let mut pfx = setup("databroken");
+    // The producer goes away 15 s after it starts, and a new one comes.
+    pfx.game = Some(
+        wine_cmd(&pfx, &win_artifact("uw-test-game.exe"))
+            .env("UW_TEST_OVERLAY_DATA_RESTART_MS", "15000")
+            .spawn()
+            .unwrap(),
+    );
+    let helper = start_with_overlay(&pfx);
+    let (first, _, _, _) = expect_test_producer(&helper);
+    let p = Probe::start(&pfx, &["break-info-magic"]);
+    p.expect_line("broken", Duration::from_secs(60));
+    // The next info read finds the broken header.
+    data_until(&helper, Duration::from_secs(5), |e| *e == Event::data_error("data_bad_layout", 1));
+    assert!(
+        helper.wait_stderr("data channel 1: info store magic is not UWDI", Duration::from_secs(2)),
+        "stderr: {:?}",
+        helper.stderr_lines()
+    );
+    // Once per producer: nothing more from it, though it keeps ticking.
+    helper.expect_data_quiet(Duration::from_secs(3));
+    data_until(&helper, Duration::from_secs(20), |e| *e == Event::DataDisconnected { channel: 1 });
+    let (second, _, _, _) = expect_test_producer(&helper);
+    assert_ne!(second, first, "the next producer is relayed");
 }
 ```
 
@@ -6547,38 +6809,42 @@ cargo clippy -p uw-test-overlay -p uw-helper --all-targets -- -D warnings
 cargo clippy --target x86_64-pc-windows-gnu -p uw-test-overlay -p uw-helper --all-targets -- -D warnings
 rustfmt --edition 2024 --check crates/uw-helper/examples/overlay_probe.rs
 timeout 900 xvfb-run -a cargo test -p uw-helper --test wine_e2e -- --ignored --test-threads=1
-ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep; ls -d /tmp/uw-inject-* 2>/dev/null
+ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep; find /tmp -maxdepth 1 -name 'uw-inject-*'
 ```
-Expected: both clippies clean; rustfmt prints nothing (the probe stays rustfmt-clean, as 2a left it); helper `23 passed` (about 140 s); no leftovers.
+Expected: both clippies clean; rustfmt prints nothing (the probe stays rustfmt-clean, as 2a left it); helper `24 passed` (about 170 s); no leftovers.
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add crates/uw-test-overlay crates/uw-helper
-git commit -m "data: Wine tests for resume, a burst under a slow host, and a busy info lock"
+git commit -m "data: Wine tests for resume, a burst under a slow host, a busy info lock and a broken store"
 ```
 
 - [ ] **Step 4: Check that the new tests bite, then restore**
 
-Four mutations, each built and run on its own, then undone with `git checkout`:
+Five mutations, each built and run on its own, then undone with `git checkout`:
 1. In `crates/uw-helper/src/bin/uw-helper64/main.rs`, replace `                data::spawn(pid, data_channel, data_resume);` with `                data::spawn(pid, data_channel, None);` (`--data-resume` ignored). Run the test `a_new_helper_resumes`.
 2. In `crates/uw-helper/src/bin/uw-helper64/data.rs`, replace `                    if d.lost > 0 {` with `                    if d.lost > u64::MAX {` (`data_lost` never sent). Run `a_burst_while`.
 3. In `crates/uw-pipe-proto/src/data/ring.rs`, replace `        let lost = c.lost + (head.dropped - self.dropped);` with `        let lost = c.lost;` (the queue's drops not counted). Run `a_burst_while`.
-4. In `crates/uw-helper/src/bin/uw-helper64/data.rs`, replace the two lines
+4. In `crates/uw-helper/src/bin/uw-helper64/data.rs`, replace `                Err(ConsumeError::Busy) => owed.info = true,` with `                Err(ConsumeError::Busy) => return Ok(()),` (a busy info lock ends the relay as if the producer left). Run `a_busy_info`.
+5. In the same file, replace the four lines
 
 ```rust
-                Ok(values) => values.into_iter().for_each(|v| emit(&info(channel, v))),
-                Err(ConsumeError::Busy) => {}
+                if let Err(e) = ended {
+                    report(channel, &e);
+                    wait_for_disconnect(&c);
+                }
 ```
 
 with
 
 ```rust
-                Ok(values) => values.into_iter().for_each(|v| emit(&info(channel, v))),
-                Err(ConsumeError::Busy) => return Ok(()),
+                if let Err(e) = ended {
+                    report(channel, &e);
+                }
 ```
 
-(a busy info lock ends the relay as if the producer left). Run `a_busy_info`.
+(after a read error it attaches again at once instead of waiting for `disconnect`). Run `a_store_broken`.
 
 For each, with `<test>` the name given:
 ```bash
@@ -6586,13 +6852,13 @@ cargo build --release --target x86_64-pc-windows-gnu -p uw-test-game -p uw-boots
 timeout 600 xvfb-run -a cargo test -p uw-helper --test wine_e2e -- --ignored --test-threads=1 <test>
 git checkout -- crates/uw-helper/src/bin/uw-helper64/main.rs crates/uw-helper/src/bin/uw-helper64/data.rs crates/uw-pipe-proto/src/data/ring.rs
 ```
-Then rebuild and run the three tests once more, and the leftover check:
+Then rebuild and run the four tests once more, and the leftover check:
 ```bash
 cargo build --release --target x86_64-pc-windows-gnu -p uw-test-game -p uw-bootstrap -p uw-test-overlay -p uw-helper
-timeout 600 xvfb-run -a cargo test -p uw-helper --test wine_e2e -- --ignored --test-threads=1 a_new_helper_resumes a_burst_while a_busy_info
-ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep; ls -d /tmp/uw-inject-* 2>/dev/null
+timeout 600 xvfb-run -a cargo test -p uw-helper --test wine_e2e -- --ignored --test-threads=1 a_new_helper_resumes a_burst_while a_busy_info a_store_broken
+ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep; find /tmp -maxdepth 1 -name 'uw-inject-*'
 ```
-Expected: mutation 1 (it warns that `data_resume` is never read) fails `a_new_helper_resumes…` with `data_connected must resume at <id>:<seq>` (`left: (<id>, <a later seq>)`: the write head); mutation 2 fails `a_burst_while…` with `seq <n> after <m>: a gap of <g>, but only 0 announced`; mutation 3 fails it with `the queue's drops were not reported: lost <x>, gaps <x>`; mutation 4 fails `a_busy_info…` with `no data event within …` (no ticks while the lock is held). After the restore all three pass; `git status` is clean; no leftovers.
+Expected: mutation 1 (it warns that `data_resume` is never read) fails `a_new_helper_resumes…` with `data_connected must resume at <id>:<seq>` (`left: (<id>, <a later seq>)`: the write head); mutation 2 fails `a_burst_while…` with `seq <n> after <m>: a gap of <g>, but only 0 announced`; mutation 3 fails it with `the queue's drops were not reported: lost <x>, gaps <x>`; mutation 4 fails `a_busy_info…` with `no data event within 2.99…s` (the relay ended at the first busy read, and its `data_disconnected` came before the drain; the new attach waits on the held lock, so not even the `state_seen` event arrives); mutation 5 fails `a_store_broken…` with `` expected no data event, got {"event":"data_disconnected","channel":1} ``. After the restore all four pass; `git status` is clean; no leftovers.
 
 ---
 
@@ -6988,7 +7254,7 @@ Run:
 cargo test -p uw-host --test supervisor --test host
 cargo build -p uw-inject --bin uw-inject
 timeout 600 xvfb-run -a cargo test -p uw-inject --test wine_e2e -- --ignored --test-threads=1 a_killed_helper_resumes
-ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep; ls -d /tmp/uw-inject-* 2>/dev/null
+ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep; find /tmp -maxdepth 1 -name 'uw-inject-*'
 ```
 Expected: the unit tests do not compile: `` error[E0559]: variant `Action::StartHelper` has no field named `args` ``, `` error[E0599]: no method named `data_resume` found for struct `Supervisor` ``, and in `host.rs` `` error[E0050]: method `command` has 2 parameters but the declaration in trait `command` has 1 ``. The Wine test (the `uw-inject` bin and that test still build) FAILS with `the new helper must resume after the last seq delivered`, `left: (<id>, <the write head>)`, `right: (<id>, <the last seq>)`; no leftovers.
 
@@ -7264,7 +7530,7 @@ cargo clippy -p uw-host -p uw-inject --all-targets -- -D warnings
 cargo clippy --target x86_64-pc-windows-gnu -p uw-host -p uw-inject --all-targets -- -D warnings
 cargo build -p uw-inject --bin uw-inject
 timeout 600 xvfb-run -a cargo test -p uw-inject --test wine_e2e -- --ignored --test-threads=1
-ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep; ls -d /tmp/uw-inject-* 2>/dev/null
+ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep; find /tmp -maxdepth 1 -name 'uw-inject-*'
 ```
 Expected, all passing: `uw-host` `cli` 3, `discovery` 14, `driver` 4, `host` 5, `supervisor` 12; `uw-inject` bin unit tests 3; both clippies clean; `uw-inject` Wine `4 passed` (about 25 s); no leftovers.
 
@@ -7274,6 +7540,20 @@ Expected, all passing: `uw-host` `cli` 3, `discovery` 14, `driver` 4, `host` 5, 
 git add crates/uw-host crates/uw-inject
 git commit -m "data: uw-host keeps the resume point and passes --data-resume on restart"
 ```
+
+- [ ] **Step 6: Check that the pass-through tests bite, then restore**
+
+`data_events_pass_through_and_never_touch_pending_commands` and `data_errors_are_reported_and_do_not_stop_the_host` already held before this task (2a's catch-all arms); Step 2 failed them only because their file did not compile. Two mutations of `crates/uw-host/src/supervisor.rs`, each run on its own:
+1. Replace `pub const STOP_CODES: [&str; 4] = ["already_running", "version_mismatch", "hook_failed", "bootstrap_timeout"];` with `pub const STOP_CODES: [&str; 5] = ["already_running", "version_mismatch", "hook_failed", "bootstrap_timeout", "data_bad_layout"];` (a data error stops the host).
+2. Replace `        let mut out = vec![Action::Emit(event.clone())];` with `        let mut out = if matches!(event, Event::Info { .. }) { vec![] } else { vec![Action::Emit(event.clone())] };` (`info` lines swallowed).
+
+For each:
+```bash
+cargo test -p uw-host --test supervisor
+git checkout -- crates/uw-host/src/supervisor.rs
+```
+Then `cargo test -p uw-host --test supervisor` once more.
+Expected: mutation 1 FAILS `data_errors_are_reported_and_do_not_stop_the_host` with `left: [Emit(Error { request_id: None, code: "data_bad_layout", detail: Some(1) }), Emit(Stopped { reason: "data_bad_layout" }), Stop]`; mutation 2 FAILS `data_events_pass_through_and_never_touch_pending_commands` with `left: []`, `right: [Emit(Info { channel: 1, category: "test", key: "ticks", … })]`; after the restore `12 passed`; `git status` is clean.
 
 ---
 
@@ -7387,9 +7667,11 @@ Expected, section by section:
 - each `== game`: the same pid as the first. **The game keeps running normally throughout.**
 - `== stop`: `helper gone` (the helper exited when `uw-inject`'s exit closed its stdin).
 
+**The owner watches the game** the whole time, in particular while the ticks flow (from `== data` on) and at the helper kill (`== helper` to `== back after`), and says whether there was any hitch, stutter or frame drop. Ask and note the answer; anything but "none" goes into the result as something unexpected.
+
 - [ ] **Step 4: Record the result**
 
-Add a "Live check (owner)" section at the end of `docs/superpowers/specs/2026-10-24-communication-2b-design.md` with the date, the `ClientVersion`, Proton 11.0, pass or fail, the "back after" time, the event count from `seqs:`, and anything unexpected. Then remove the log directory the script printed, and:
+Add a "Live check (owner)" section at the end of `docs/superpowers/specs/2026-10-24-communication-2b-design.md` with the date, the `ClientVersion`, Proton 11.0, pass or fail, the "back after" time, the event count from `seqs:`, the owner's answer about hitches or stutter (while the ticks flowed and at the helper kill), and anything unexpected. Then remove the log directory the script printed, and:
 
 ```bash
 git add docs/superpowers/specs/2026-10-24-communication-2b-design.md
@@ -7412,7 +7694,7 @@ Expected: prints nothing, exit 0.
 - [ ] **Step 2: All unit tests**
 
 Run: `cargo test -p uw-pipe-proto -p uw-game-channel -p uw-helper -p uw-host -p uw-inject -p uw-bootstrap`
-Expected, all passing: `uw-pipe-proto` lib unit tests (`names`) 3, `bells` 3, `data_info` 6, `data_outbox` 5, `data_ring` 11, `data_schema` 6, `jsonl` 10, `pipe` 19, `state` 5; `uw-helper` `decide` 30, `pending` 3; `uw-host` `cli` 3, `discovery` 14, `driver` 4, `host` 5, `supervisor` 12; `uw-inject` bin unit tests 3; `uw-bootstrap` `state` 3. Ignored Wine tests: `uw-game-channel` `wine_data` 1 and `wine_objects` 1, `uw-helper` 23, `uw-inject` 4.
+Expected, all passing: `uw-pipe-proto` lib unit tests (`names`) 3, `bells` 3, `data_info` 6, `data_outbox` 5, `data_ring` 11, `data_schema` 6, `jsonl` 10, `pipe` 19, `state` 5; `uw-helper` `data_pass` 2, `decide` 30, `pending` 3; `uw-host` `cli` 3, `discovery` 14, `driver` 4, `host` 5, `supervisor` 12; `uw-inject` bin unit tests 3; `uw-bootstrap` `state` 3. Ignored Wine tests: `uw-game-channel` `wine_data` 1 and `wine_objects` 1, `uw-helper` 24, `uw-inject` 4.
 
 - [ ] **Step 3: Clippy, host and Windows**
 
@@ -7437,10 +7719,10 @@ timeout 600 xvfb-run -a cargo test -p uw-game-channel --test wine_objects -- --i
 timeout 600 xvfb-run -a cargo test -p uw-game-channel --test wine_data -- --ignored --test-threads=1
 timeout 900 xvfb-run -a cargo test -p uw-helper --test wine_e2e -- --ignored --test-threads=1
 timeout 600 xvfb-run -a cargo test -p uw-inject --test wine_e2e -- --ignored --test-threads=1
-ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep; ls -d /tmp/uw-inject-* 2>/dev/null
+ps -eo pid,args | grep -E 'uw-test-game|uw-helper64|_probe' | grep -vF grep; find /tmp -maxdepth 1 -name 'uw-inject-*'
 git status --short
 ```
-Expected: 2a's gate `1 passed`, the data gate `1 passed`, helper `23 passed` (about 140 s), `uw-inject` `4 passed` (about 25 s); the leftover check prints nothing; the tree is clean.
+Expected: 2a's gate `1 passed`, the data gate `1 passed`, helper `24 passed` (about 170 s), `uw-inject` `4 passed` (about 25 s); the leftover check prints nothing; the tree is clean.
 
 - [ ] **Step 5: The live check passed**
 
@@ -7452,7 +7734,7 @@ Confirm Task 11's result is recorded in the design doc as a pass. With Steps 1-5
 
 **1. Design coverage.** Every requirement maps to a task:
 - Scope "In": the layouts (Tasks 1-4), the Win32 objects (Task 5), the helper's data thread with attach, snapshot, deltas, events, resume and the JSON events (Tasks 6, 7), `uw-host`'s resume point and `--data-resume` (Task 10), the test producer (Tasks 8, 9) and `--bad-data-channel` (Task 7).
-- Flow step 1, the create order with the hello block last and then `connect` (Task 5 `Producer::create`); step 2, a try every second, `connect` set, the rest opened, the hello block's magic, version and pid, read-only views and layout checks, `data_connected` with the schema and `from_seq` (Tasks 1, 2, 3, 5, 7); step 3, the snapshot under one info lock with nulls, deltas from exactly that snapshot (Tasks 2, 5, 7); step 4, the start point under the event lock (Tasks 3, 5); step 5, the wait on `[disconnect, info-bell, events-bell]` with 1 s and both regions read on a timeout, 100 ms lock waits then skip (Tasks 5, 7, 9); step 6, `data_disconnected`, close, back to step 2 (Tasks 7, 8).
+- Flow step 1, the create order with the hello block last and then `connect` (Task 5 `Producer::create`); step 2, a try every second, `connect` set (the gate's second consumer is refused once it is reset), the rest opened, the hello block's magic, version and pid, read-only views and layout checks, `data_connected` with the schema and `from_seq` (Tasks 1, 2, 3, 5, 7); step 3, the snapshot under one info lock with nulls, deltas from exactly that snapshot (Tasks 2, 5, 7); step 4, the start point under the event lock (Tasks 3, 5); step 5, the wait on `[disconnect, info-bell, events-bell]` with 1 s and both regions read on a timeout, 100 ms lock waits then skip, a skipped read owed to the next pass (Tasks 5, 7, 9); step 6, `data_disconnected`, close, back to step 2 (Tasks 7, 8).
 - Threads: the producer on one thread of its own with `&mut self` and 0 ms tries (Tasks 4, 5, 8); the data thread as the helper's only reader, sharing only `emit()` (Task 7; lines whole under a slow host: Task 9).
 - Messages and layouts: the names with one suffix per object (Task 1, uniqueness test with 2a's names); the hello block (Task 1); the info store, its schema form, the timestamp and busy-lock rules, the limits (Tasks 1, 2, 4); the ring (Task 3); text as UTF-8 and `ts` from `QueryPerformanceCounter` (Tasks 2-5); the producer API table and "errors, never silent drops" (Tasks 4, 5); the JSON events (Task 6); the helper arguments and exit 2 (Task 7); `uw-host` (Task 10).
 - Failures, row by row, with the test that fails when the row breaks:
@@ -7461,21 +7743,21 @@ Confirm Task 11's result is recorded in the design doc as a pass. With Steps 1-5
   - Resume seq older than the oldest record: `a_resumed_reader_delivers_each_event_after_the_resume_seq_once`, `catch_up_gives_the_records_to_deliver_and_the_gap` (Task 3), and the gate's `attach <id>:2` (Task 5).
   - Resume names another producer: `start_after_resumes_only_the_same_producer` (Task 3) and the third helper in Task 9's resume test.
   - Producer's `dropped` grew: `growth_in_dropped_is_lost_too` (Task 3), `queue_overflow_is_counted_and_the_rest_wait_for_the_throttle` (Task 4), `a_burst_while_the_host_reads_slowly_loses_nothing_unannounced` (Task 9, mutation 3).
-  - Lock busy over 100 ms: the gate's `hold-info` step (Task 5) and `a_busy_info_lock_is_skipped_and_the_newest_value_comes_after` (Task 9, mutation 4).
+  - Lock busy over 100 ms: the gate's `hold-info` step (Task 5), `a_busy_info_lock_is_skipped_and_the_newest_value_comes_after` (Task 9, mutation 4; no tick phase can fail it), and the owed read's `a_read_a_busy_lock_skipped_is_retried_on_the_next_wake_of_any_kind` (Task 7, its mutation).
   - `WAIT_ABANDONED`: the gate's `abandon-events` and `abandon-info` steps (Task 5, Step 8's mutation).
   - Version not 1: `a_hello_block_that_does_not_check_out_is_refused`, the info and ring version checks (Tasks 1-3), `a_data_channel_of_another_version_is_data_version_mismatch_once` (Task 7).
-  - Bad layout: Tasks 1-3's refusal tests (magic, size, offset, schema, slot length, UTF-8, seqs and counts going backwards), the gate's broken header (Task 5), `a_data_channel_with_a_bad_layout_is_data_bad_layout_once` (Task 7).
+  - Bad layout: Tasks 1-3's refusal tests (magic, size, offset, schema, slot length, UTF-8, seqs and counts going backwards), the gate's broken header (Task 5), `a_data_channel_with_a_bad_layout_is_data_bad_layout_once` at attach (Task 7), and `a_store_broken_after_data_connected_is_reported_once_until_disconnect` after attach (Task 9, mutation 5).
   - Game exits: `killing_the_game_reports_game_exited`, now with the data thread attached (Task 8).
   - Stdin closes: `closing_stdin_ends_the_helper_after_it_connected`, now with the data thread attached (Task 8), and 2a's window-wait test.
   - Host slow to read: `a_burst_while_the_host_reads_slowly_loses_nothing_unannounced` (Task 9).
   - The whole Linux client restarts: the second client in `uw_inject_relays_the_test_producer_and_a_new_client_starts_at_the_write_head` (Task 8).
-  - Not stop codes: `data_errors_are_reported_and_do_not_stop_the_host` (Task 10).
+  - Not stop codes: `data_errors_are_reported_and_do_not_stop_the_host` (Task 10, Step 6's mutation 1); data events reach the user unchanged: `data_events_pass_through_and_never_touch_pending_commands` (mutation 2).
 - Differences from Spike 3: names by pid and channel (Task 1); `producer_id` (Tasks 1, 5); one throttle (Task 4); the schema parsed once (`Outbox::new` at create, Tasks 4, 5); errors to the caller and counted drops (Task 4); each pending key's own timestamp (Task 4); resume after the last delivered seq instead of replay (Tasks 3, 7, 10); JSON lines from a thread of 2a's helper (Task 7); 100 ms lock waits (Task 5); `uw-host` supervising its own helper (2a, plus Task 10).
-- Platform facts: `connect` seen late (the gate's consumer opens after the producer set it), the smallest index winning (gate), no handle closed during a wait (the data thread drops its `Consumer` only after its last wait), read-only views (`FILE_MAP_READ`), paging-file zeros (the zeroed-mapping refusal tests).
+- Platform facts: `connect` seen late (the gate's consumer opens after the producer set it) and a reset `connect` refused (the gate's second consumer), the smallest index winning (gate, with `create()`'s bells taken first), no handle closed during a wait (the data thread drops its `Consumer` only after its last wait), read-only views (`FILE_MAP_READ`), paging-file zeros (the zeroed-mapping refusal tests).
 - Testing 1 (Tasks 1-4, 6, 10), 2 (Task 5, the gate), 3 (Tasks 7-10), 4 (Task 11); "Done when" (Task 12). Risks need no code; "a producer can't be re-created right away" is checked by the gate's `recreate` (`exists` until the consumer closes).
 
 **2. Placeholder scan.** No TBD/TODO, no "similar to Task N", no step without its code; every run step names its command and expected result. New files are given whole; changes to existing files are exact replace blocks, each occurring once in the file as the previous step left it (generated from, and checked against, the scratch commits, and replayed byte for byte onto a fresh clone).
 
-**3. Type and name consistency.** `DataObject`/`data_name` (Task 1) are what the producer, the consumer, the test game and `overlay_probe` use; `ReadError` (`Version`/`Layout`, `code()`), `Hello`, `read_hello`/`write_hello`, `Schema`/`SchemaCategory`/`SchemaKey`/`SchemaError` (Task 1); `InfoLayout`/`info_init`/`info_set`/`InfoReader`/`InfoValue` (Task 2); `ResumePoint`/`start_after`/`catch_up`/`CatchUp`, `RingReader`/`Drained`/`RingEvent`/`read_ring_head`/`ring_init`/`ring_push`/`ring_set_dropped`, `RING_SLOTS`/`RING_SIZE` (Task 3); `Outbox`/`Throttle`/`ProduceError`/`QUEUE_CAP`/`THROTTLE_MAX`/`THROTTLE_WINDOW_MS` (Task 4); `Producer`/`CreateError`/`Consumer`/`OpenError`/`ConsumeError`/`Wake`/`Attached`/`Win32Error` (Task 5) match the probes, the helper's `data.rs` and the test overlay; `Event::{DataConnected, Info, DataEvent, DataLost, DataDisconnected}` and `Event::data_error` (Task 6) match the helper, `uw-host` and every test; `Action::StartHelper { args }`, `Supervisor::data_resume`, `Launch::command(args)` (Task 10) match the runtime and its tests; the test schema (`test`: `ticks` 32, `last_seq` 32) and the env variables (`UW_TEST_OVERLAY_DATA_RESTART_MS`, `UW_TEST_OVERLAY_BURST`) match the tests and the live check.
+**3. Type and name consistency.** `DataObject`/`data_name` (Task 1) are what the producer, the consumer, the test game and `overlay_probe` use; `ReadError` (`Version`/`Layout`, `code()`), `Hello`, `read_hello`/`write_hello`, `Schema`/`SchemaCategory`/`SchemaKey`/`SchemaError` (Task 1); `InfoLayout`/`info_init`/`info_set`/`InfoReader`/`InfoValue` (Task 2); `ResumePoint`/`start_after`/`catch_up`/`CatchUp`, `RingReader`/`Drained`/`RingEvent`/`read_ring_head`/`ring_init`/`ring_push`/`ring_set_dropped`, `RING_SLOTS`/`RING_SIZE` (Task 3); `Outbox`/`Throttle`/`ProduceError`/`QUEUE_CAP`/`THROTTLE_MAX`/`THROTTLE_WINDOW_MS` (Task 4); `Producer`/`CreateError`/`Consumer`/`OpenError`/`ConsumeError`/`Wake`/`Attached`/`Win32Error` (Task 5) match the probes, the helper's `data.rs` and the test overlay; `Woke`/`Owed` (Task 7) match `data.rs`'s relay and Task 9's mutation 4; `Event::{DataConnected, Info, DataEvent, DataLost, DataDisconnected}` and `Event::data_error` (Task 6) match the helper, `uw-host` and every test; `Action::StartHelper { args }`, `Supervisor::data_resume`, `Launch::command(args)` (Task 10) match the runtime and its tests; the test schema (`test`: `ticks` 32, `last_seq` 32) and the env variables (`UW_TEST_OVERLAY_DATA_RESTART_MS`, `UW_TEST_OVERLAY_BURST`) match the tests and the live check.
 
 **Not in this plan, by the design:** the Deadlock collector port and its fixes, plugin loading and the provider's Overwolf shapes (plan 5); more than one data channel per game; resuming across a restart of the whole Linux client.
