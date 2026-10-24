@@ -54,3 +54,20 @@ test('disconnect invalidates queued idle challenges and same-epoch state', async
   await tick();
   assert.equal(sent.length, 0);
 });
+
+test('in-flight paused application is cancelled by a newer epoch', async () => {
+  let resume!: () => void;
+  const applied: any[] = [];
+  const sent: unknown[] = [];
+  const r = new ProductionInput(async (event, application) => {
+    if (event.type === 'records') await new Promise<void>(resolve => { resume = resolve; });
+    if (application.current()) applied.push(event);
+  }, command => sent.push(command), reason => assert.fail(reason));
+  r.consume(state()); await tick();
+  r.consume(batch([{ ...key, kind: 2, a: 120 }]));
+  r.consume(state(2));
+  resume(); await tick();
+  assert.equal(applied.some(e => e.type === 'records'), false);
+  assert.equal(applied.at(-1).state.epoch, 2);
+  assert.equal(sent.length, 0);
+});

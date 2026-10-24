@@ -5,6 +5,11 @@ type State = { epoch: number; active: boolean; width: number; height: number };
 type Challenge = { epoch: number; nonce: number; through_seq: number };
 export type SurfaceEvent = { type: 'state'; state: State } | { type: 'records'; records: Record[]; width: number; height: number }
   | { type: 'challenge'; challenge: Challenge } | { type: 'reset' };
+export type Application = { generation: number; current: () => boolean };
+// The generation barrier and application run in the same renderer JS world.
+export const invalidateSurface = (generation: number) => `window.underwolfGeneration = ${generation}`;
+export const applySurface = (event: SurfaceEvent, generation: number) =>
+  `if (window.underwolfGeneration === ${generation}) window.underwolfConsume(${JSON.stringify(event)})`;
 type Item = { generation: number; event: SurfaceEvent; through?: number };
 const uint = (n: unknown): n is number => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0;
 const positive = (n: unknown): n is number => uint(n) && n > 0;
@@ -36,7 +41,9 @@ export class ProductionInput {
   private running = false;
   private closed = false;
   private requestId = 1;
-  constructor(private apply: (event: SurfaceEvent) => Promise<void>, private send: (command: unknown) => void, private fail: (reason: string) => void) {}
+  constructor(private apply: (event: SurfaceEvent, application: Application) => Promise<void>, private send: (command: unknown) => void, private fail: (reason: string) => void,
+    private invalidate: (generation: number) => void = () => {}) {}
+  private advance(): void { this.generation++; this.invalidate(this.generation); }
   consume(line: string): void {
     if (this.closed) return;
     try {
@@ -44,7 +51,7 @@ export class ProductionInput {
       if (['overlay_disconnected', 'game_exited', 'stopped'].includes(e.event)) {
         this.connected = false;
         if (e.event !== 'overlay_disconnected') this.epoch = 0;
-        this.generation++; this.queue = []; this.heldKeys.clear(); this.received = this.consumed = 0;
+        this.advance(); this.queue = []; this.heldKeys.clear(); this.received = this.consumed = 0;
         this.enqueue({ type: 'reset' }); return;
       }
       if (e.event === 'input_state') {
@@ -52,7 +59,7 @@ export class ProductionInput {
         if (!s || !positive(s.epoch) || typeof s.active !== 'boolean' || !uint(s.width) || !uint(s.height)) throw Error('invalid input state');
         if (s.epoch < this.epoch || (!this.connected && s.epoch === this.epoch)) return;
         if (s.epoch > this.epoch) {
-          this.generation++; this.queue = []; this.received = this.consumed = 0; this.heldKeys.clear();
+          this.advance(); this.queue = []; this.received = this.consumed = 0; this.heldKeys.clear();
         }
         this.connected = true; this.epoch = s.epoch; this.state = s;
         if (!s.active) this.heldKeys.clear();
@@ -76,7 +83,7 @@ export class ProductionInput {
   }
   private close(reason: string): void {
     if (this.closed) return;
-    this.closed = true; this.generation++; this.queue = []; this.heldKeys.clear(); this.fail(reason);
+    this.closed = true; this.advance(); this.queue = []; this.heldKeys.clear(); this.fail(reason);
   }
   private enqueue(event: SurfaceEvent, through?: number): void {
     if (this.queue.length >= 64) { this.close('input queue overflow'); return; }
@@ -89,7 +96,7 @@ export class ProductionInput {
     try {
       while (this.queue.length && !this.closed) {
         const item = this.queue.shift()!;
-        await this.apply(item.event);
+        await this.apply(item.event, { generation: item.generation, current: () => !this.closed && item.generation === this.generation });
         if (item.generation !== this.generation) continue;
         if (item.event.type === 'records') {
           for (const r of item.event.records) if (r.kind === 1) {

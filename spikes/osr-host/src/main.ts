@@ -27,7 +27,7 @@
 import { app, BrowserWindow, ipcMain, screen } from 'electron';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { ProductionInput, productionOptions } from './production-input';
+import { ProductionInput, productionOptions, applySurface, invalidateSurface } from './production-input';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -505,13 +505,17 @@ app.whenReady().then(() => {
     // Test controls deliberately stop consumption, not just logging.
     process.on('SIGUSR1', () => { paused = true; });
     process.on('SIGUSR2', () => { paused = false; resume?.(); resume = undefined; });
-    const receiver = new ProductionInput(async event => {
+    const receiver = new ProductionInput(async (event, application) => {
       if (paused) await new Promise<void>(resolve => { resume = resolve; });
+      if (!application.current()) return;
       const win = widgets[0].win!;
-      await win.webContents.executeJavaScript(`window.underwolfConsume(${JSON.stringify(event)})`, false);
+      await win.webContents.executeJavaScript(applySurface(event, application.generation), false);
     }, command => {
       if (!child.stdin.write(JSON.stringify(command) + '\n')) child.kill();
-    }, reason => { console.error('[production-input]', reason); child.kill(); });
+    }, reason => { console.error('[production-input]', reason); child.kill(); }, generation => {
+      void widgets[0].win!.webContents.executeJavaScript(invalidateSurface(generation), false)
+        .catch(error => { console.error('[production-input]', error); child.kill(); });
+    });
     const lines = createInterface({ input: child.stdout });
     lines.on('line', line => { console.log('[production-input]', line); receiver.consume(line); });
     child.on('error', error => { console.error('[production-input]', error); app.exit(1); });
