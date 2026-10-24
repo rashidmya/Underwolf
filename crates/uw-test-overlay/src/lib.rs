@@ -16,7 +16,9 @@
 //! long (the late-reply test), and `UW_TEST_OVERLAY_BELL_DELAY_MS` makes every bell take that long
 //! to apply: the worker answers no `ping` meanwhile (the ping-timeout test).
 //! `UW_TEST_OVERLAY_DATA_RESTART_MS` drops the producer after that long and creates it again once
-//! the helper has let go of the old objects (the disconnect test).
+//! the helper has let go of the old objects (the disconnect test). `UW_TEST_OVERLAY_BURST=<n>`
+//! pushes n `burst` events (data: the count from 0, zero-padded to 1000 bytes) before each
+//! `state_seen` (the burst test).
 
 #[cfg(windows)]
 mod win {
@@ -63,9 +65,10 @@ mod win {
         }
         let (seen_tx, seen_rx) = channel();
         let restart_after = env_delay("UW_TEST_OVERLAY_DATA_RESTART_MS");
+        let burst = std::env::var("UW_TEST_OVERLAY_BURST").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
         if std::thread::Builder::new()
             .name("uw-test-producer".into())
-            .spawn(move || produce(&seen_rx, restart_after))
+            .spawn(move || produce(&seen_rx, restart_after, burst))
             .is_err()
         {
             return 4;
@@ -107,9 +110,9 @@ mod win {
         p
     }
 
-    /// The test producer's thread: ticks every second, `state_seen` after each applied state,
-    /// a flush every 100 ms.
-    fn produce(seen: &Receiver<u64>, restart_after: Option<Duration>) {
+    /// The test producer's thread: ticks every second, `state_seen` after each applied state
+    /// (after `burst` events, if any), a flush every 100 ms.
+    fn produce(seen: &Receiver<u64>, restart_after: Option<Duration>, burst: usize) {
         let mut ticks = 0u64;
         let mut last_seq = None;
         let mut p = create_producer(ticks, last_seq);
@@ -118,6 +121,11 @@ mod win {
         loop {
             match seen.recv_timeout(FLUSH) {
                 Ok(seq) => {
+                    for i in 0..burst {
+                        if let Err(e) = p.push_event("burst", &format!("{i:0>1000}")) {
+                            eprintln!("[uw-test-overlay] push_event: {e}");
+                        }
+                    }
                     last_seq = Some(seq);
                     let seq = seq.to_string();
                     if let Err(e) = p.push_event("state_seen", &seq) {

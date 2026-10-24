@@ -147,12 +147,14 @@ fn wait_game_in(pfx: &Prefix, within: Duration) {
 /// its stderr diagnostics accumulate in a shared buffer (so a test can assert which hook fired or
 /// that the hook was skipped), commands go to its stdin. The game-data channel's events (design
 /// 2b) arrive on a channel of their own, `data`, so the control-channel tests never see them.
-/// Dropping it kills the helper.
+/// While a test holds `stdout_gate`, the reader stops reading (a host slow to read). Dropping it
+/// kills the helper.
 struct Helper {
     child: Child,
     stdin: Option<ChildStdin>,
     events: Receiver<String>,
     data: Receiver<String>,
+    stdout_gate: Arc<Mutex<()>>,
     stderr: Arc<Mutex<Vec<String>>>,
 }
 
@@ -254,6 +256,11 @@ impl Helper {
         Event::parse(&line).unwrap_or_else(|e| panic!("not an event ({e}): {line}"))
     }
 
+    /// Throw away the game-data events read so far.
+    fn drain_data(&self) {
+        while self.data.try_recv().is_ok() {}
+    }
+
     /// No game-data event within `d`.
     fn expect_data_quiet(&self, d: Duration) {
         if let Ok(line) = self.data.recv_timeout(d) {
@@ -317,9 +324,14 @@ fn start_helper(pfx: &Prefix, extra: &[&str], envs: &[(&str, &str)]) -> Helper {
     let stderr = child.stderr.take().unwrap();
     let (tx, rx) = channel();
     let (data_tx, data_rx) = channel();
+    let stdout_gate = Arc::new(Mutex::new(()));
+    let gate = Arc::clone(&stdout_gate);
     std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            let Ok(line) = line else { break };
+        let mut lines = BufReader::new(stdout).lines();
+        loop {
+            // Wait here while a test holds the gate.
+            drop(gate.lock().unwrap());
+            let Some(Ok(line)) = lines.next() else { break };
             if !line.trim_start().starts_with('{') {
                 continue;
             }
@@ -337,7 +349,7 @@ fn start_helper(pfx: &Prefix, extra: &[&str], envs: &[(&str, &str)]) -> Helper {
             diag2.lock().unwrap().push(line);
         }
     });
-    Helper { child, stdin, events: rx, data: data_rx, stderr: diag }
+    Helper { child, stdin, events: rx, data: data_rx, stdout_gate, stderr: diag }
 }
 
 fn load_overlay_line(path_wine: &str) -> String {
@@ -1058,4 +1070,158 @@ fn a_producer_that_goes_away_is_data_disconnected_and_the_next_one_connects() {
     let seen =
         data_until(&helper, Duration::from_secs(5), |e| matches!(e, Event::DataEvent { name, .. } if name == "tick"));
     assert_eq!(event_seqs(&seen), [from_seq + 1], "{seen:?}");
+}
+
+/// Catches `--data-resume` not honoured (design 2b "Failures": a new helper sends
+/// `data_connected` with `from_seq` the resume seq, the full snapshot, then every event after it,
+/// once each), and a resume point for another producer (a new game, a reused pid) not starting at
+/// the write head.
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn a_new_helper_resumes_after_the_given_seq_only_for_the_same_producer() {
+    let mut pfx = setup("dataresume");
+    pfx.game = Some(wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).spawn().unwrap());
+    let (id, last) = {
+        let helper = start_with_overlay(&pfx);
+        let (id, from_seq, _, _) = expect_test_producer(&helper);
+        data_until(&helper, Duration::from_secs(10), |e| {
+            matches!(e, Event::DataEvent { seq, .. } if *seq == from_seq + 2)
+        });
+        (id, from_seq + 2)
+    }; // the helper is killed here
+    std::thread::sleep(Duration::from_secs(3)); // ticks go on while no helper runs
+
+    let resume = format!("{id}:{last}");
+    let helper = start_helper(&pfx, &["--data-resume", &resume], &[]);
+    helper.expect_event("bootstrap_connected", Duration::from_secs(60));
+    let (again, from_seq, _, _) = expect_test_producer(&helper);
+    assert_eq!((again, from_seq), (id, last), "data_connected must resume at {resume}");
+    let seen =
+        data_until(&helper, Duration::from_secs(10), |e| matches!(e, Event::DataEvent { seq, .. } if *seq == last + 4));
+    assert_eq!(event_seqs(&seen), (last + 1..=last + 4).collect::<Vec<_>>(), "{seen:?}");
+    assert!(!seen.iter().any(|e| matches!(e, Event::DataLost { .. })), "{seen:?}");
+    drop(helper);
+
+    let other = format!("{}:0", id + 1);
+    let helper = start_helper(&pfx, &["--data-resume", &other], &[]);
+    helper.expect_event("bootstrap_connected", Duration::from_secs(60));
+    let (_, from_seq, _, _) = expect_test_producer(&helper);
+    assert!(from_seq > last + 4, "another producer's resume point must start at the write head, not {from_seq}");
+    let seen = data_until(&helper, Duration::from_secs(5), |e| matches!(e, Event::DataEvent { .. }));
+    assert_eq!(event_seqs(&seen), [from_seq + 1], "{seen:?}");
+}
+
+/// Catches lines lost, split or reordered while the host reads slowly (design 2b "Failures":
+/// `emit()` blocks the writer, and control replies still come), the producer's dropped count not
+/// reaching `data_lost` (300 queued at once overflow the queue of 256 by at least 45), or a seq
+/// gap not announced by a `data_lost` before the events after it.
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn a_burst_while_the_host_reads_slowly_loses_nothing_unannounced() {
+    let mut pfx = setup("databurst");
+    pfx.game = Some(
+        wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).env("UW_TEST_OVERLAY_BURST", "300").spawn().unwrap(),
+    );
+    let mut helper = start_with_overlay(&pfx);
+    let (_, from_seq, _, _) = expect_test_producer(&helper);
+    let gate = Arc::clone(&helper.stdout_gate);
+    {
+        // Stop reading the helper's stdout: its pipe fills and its writes block.
+        let _paused = gate.lock().unwrap();
+        helper.send_cmd(&Cmd::SetState { request_id: 2, edit_mode: Some(true), visible: None });
+        helper.send_cmd(&Cmd::Ping { request_id: 3 });
+        std::thread::sleep(Duration::from_secs(3));
+    }
+    // The control replies, late but whole.
+    assert_eq!(helper.next_parsed(Duration::from_secs(30)), Event::StateSet { request_id: 2, seq: 1 });
+    let rest = [helper.next_parsed(Duration::from_secs(30)), helper.next_parsed(Duration::from_secs(30))];
+    assert!(rest.contains(&applied(1)), "{rest:?}");
+    assert!(rest.iter().any(|e| matches!(e, Event::Pong { request_id: 3, .. })), "{rest:?}");
+
+    let seen = data_until(&helper, Duration::from_secs(60), |e| {
+        matches!(e, Event::DataEvent { name, data, .. } if name == "state_seen" && data == "1")
+    });
+    let (mut prev, mut announced, mut lost, mut gaps) = (from_seq, 0u64, 0u64, 0u64);
+    for e in &seen {
+        match e {
+            Event::DataLost { events, .. } => {
+                announced += events;
+                lost += events;
+            }
+            Event::DataEvent { seq, name, data, .. } => {
+                let gap = seq.checked_sub(prev + 1).unwrap_or_else(|| panic!("seq {seq} after {prev}"));
+                assert!(gap <= announced, "seq {seq} after {prev}: a gap of {gap}, but only {announced} announced");
+                if name == "burst" {
+                    assert!(data.len() == 1000 && data.parse::<u64>().is_ok(), "a burst event's data: {data:?}");
+                }
+                (prev, announced, gaps) = (*seq, 0, gaps + gap);
+            }
+            _ => {}
+        }
+    }
+    assert!(lost - gaps >= 45, "the queue's drops were not reported: lost {lost}, gaps {gaps}");
+}
+
+/// Catches a busy info lock stalling the data thread or ending it (design 2b "Failures": a lock
+/// busy for more than 100 ms is skipped and retried on the next pass), and a value committed
+/// meanwhile being lost (design "A busy lock": the producer keeps the newest value and writes it
+/// on the next call). The value is `last_seq`, which only a `state_seen` changes, so no tick can
+/// overtake it.
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn a_busy_info_lock_is_skipped_and_the_newest_value_comes_after() {
+    win_artifact("examples/overlay_probe.exe"); // fail at once if the probe is not built
+    let mut pfx = setup("databusy");
+    pfx.game = Some(wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).spawn().unwrap());
+    let mut helper = start_with_overlay(&pfx);
+    expect_test_producer(&helper);
+    // The probe holds the info lock for 4 s and rings the info bell every 200 ms.
+    let p = Probe::start(&pfx, &["hold-info-lock", "4000"]);
+    p.expect_line("locked", Duration::from_secs(60));
+    std::thread::sleep(Duration::from_millis(300));
+    helper.drain_data();
+    // A state applied while the info lock is held: its event gets through, its `last_seq` waits.
+    helper.send_cmd(&Cmd::SetState { request_id: 2, edit_mode: Some(true), visible: None });
+    helper.expect_all(&[Event::StateSet { request_id: 2, seq: 1 }, applied(1)], Duration::from_secs(10));
+    let held = data_until(&helper, Duration::from_secs(3), |e| {
+        matches!(e, Event::DataEvent { name, data, .. } if name == "state_seen" && data == "1")
+    });
+    assert!(!held.iter().any(|e| matches!(e, Event::Info { .. })), "info while the lock was held: {held:?}");
+    p.expect_line("released", Duration::from_secs(10));
+    data_until(&helper, Duration::from_secs(5), |e| {
+        matches!(e, Event::Info { key, value: Some(v), .. } if key == "last_seq" && v == "1")
+    });
+}
+
+/// Catches a store that stops fitting after `data_connected` being read on, reported again and
+/// again, or re-attached (design 2b "Failures": `data_bad_layout` once per producer, then only the
+/// wait for `disconnect`), and the next producer not being relayed after it.
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn a_store_broken_after_data_connected_is_reported_once_until_disconnect() {
+    win_artifact("examples/overlay_probe.exe"); // fail at once if the probe is not built
+    let mut pfx = setup("databroken");
+    // The producer goes away 15 s after it starts, and a new one comes.
+    pfx.game = Some(
+        wine_cmd(&pfx, &win_artifact("uw-test-game.exe"))
+            .env("UW_TEST_OVERLAY_DATA_RESTART_MS", "15000")
+            .spawn()
+            .unwrap(),
+    );
+    let helper = start_with_overlay(&pfx);
+    let (first, _, _, _) = expect_test_producer(&helper);
+    let p = Probe::start(&pfx, &["break-info-magic"]);
+    p.expect_line("broken", Duration::from_secs(60));
+    // The next info read finds the broken header.
+    data_until(&helper, Duration::from_secs(5), |e| *e == Event::data_error("data_bad_layout", 1));
+    assert!(
+        helper.wait_stderr("data channel 1: info store magic is not UWDI", Duration::from_secs(2)),
+        "stderr: {:?}",
+        helper.stderr_lines()
+    );
+    // Once per producer: nothing more from it, though it keeps ticking.
+    helper.expect_data_quiet(Duration::from_secs(3));
+    data_until(&helper, Duration::from_secs(20), |e| *e == Event::DataDisconnected { channel: 1 });
+    let (second, _, _, _) = expect_test_producer(&helper);
+    assert_ne!(second, first, "the next producer is relayed");
 }

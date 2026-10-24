@@ -9,6 +9,11 @@
 //! - `hold [ms]`: say hello, hold the state lock for `ms` (default 3000) with `applied_seq`
 //!   set to 42 and `state_applied` rung, then act as the game side: answer each `bell-game`
 //!   by applying the current `seq` and ringing `state_applied`, printing `bell <bits> seq <n>`.
+//! - `hold-info-lock [ms]`: without touching the overlay pipe, hold the game's data channel 1
+//!   info lock for `ms` (default 3000), ringing its info bell every 200 ms meanwhile; prints
+//!   `locked`, then `released` (design 2b: a busy lock).
+//! - `break-info-magic`: without touching the overlay pipe, break the magic of the game's data
+//!   channel 1 info store, under its lock, as a producer gone wrong would; prints `broken`.
 //!
 //! Runs under Wine in the game's prefix. It does nothing on other platforms.
 
@@ -28,7 +33,8 @@ mod win {
 
     use uw_game_channel::objects::{LOCK_TIMEOUT_MS, Objects};
     use uw_pipe_proto::bells::to_host;
-    use uw_pipe_proto::names::overlay_pipe_name;
+    use uw_pipe_proto::data::DEFAULT_CHANNEL;
+    use uw_pipe_proto::names::{DataObject, data_name, overlay_pipe_name};
     use uw_pipe_proto::pipe::{OverlayMessage, encode_overlay};
     use uw_pipe_proto::state;
     use windows_sys::Win32::Foundation::{
@@ -42,8 +48,14 @@ mod win {
         CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
         TH32CS_SNAPPROCESS,
     };
+    use windows_sys::Win32::System::Memory::{
+        FILE_MAP_WRITE, MapViewOfFile, OpenFileMappingW, UnmapViewOfFile,
+    };
     use windows_sys::Win32::System::Pipes::{PIPE_READMODE_MESSAGE, SetNamedPipeHandleState};
-    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+    use windows_sys::Win32::System::Threading::{
+        EVENT_MODIFY_STATE, MUTEX_MODIFY_STATE, OpenEventW, OpenMutexW, ReleaseMutex,
+        SYNCHRONIZATION_SYNCHRONIZE, SetEvent, WaitForSingleObject,
+    };
 
     fn say(s: &str) {
         use std::io::Write;
@@ -184,6 +196,94 @@ mod win {
         }
     }
 
+    /// Hold the game's data channel 1 info lock for `ms`, ringing its info bell every 200 ms, as a
+    /// producer that holds the lock too long would.
+    fn hold_info_lock(pid: u32, ms: u64) -> i32 {
+        let lock = wide(&data_name(pid, DEFAULT_CHANNEL, DataObject::InfoLock));
+        let bell = wide(&data_name(pid, DEFAULT_CHANNEL, DataObject::InfoBell));
+        // SAFETY: opens the game's named mutex and event; both names are NUL-terminated.
+        let (l, b) = unsafe {
+            (
+                OpenMutexW(
+                    SYNCHRONIZATION_SYNCHRONIZE | MUTEX_MODIFY_STATE,
+                    0,
+                    lock.as_ptr(),
+                ),
+                OpenEventW(EVENT_MODIFY_STATE, 0, bell.as_ptr()),
+            )
+        };
+        if l.is_null() || b.is_null() {
+            say("no data channel");
+            return 7;
+        }
+        // SAFETY: waits on the mutex handle opened above.
+        if unsafe { WaitForSingleObject(l, 5000) } != WAIT_OBJECT_0 {
+            say("lock busy");
+            return 8;
+        }
+        say("locked");
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(ms) {
+            // SAFETY: signals the event handle opened above.
+            unsafe { SetEvent(b) };
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        // SAFETY: releases the mutex this thread acquired above, then closes both handles.
+        unsafe {
+            ReleaseMutex(l);
+            CloseHandle(l);
+            CloseHandle(b);
+        }
+        say("released");
+        0
+    }
+
+    /// Break the first byte of the game's data channel 1 info store, under the info lock.
+    fn break_info_magic(pid: u32) -> i32 {
+        let lock = wide(&data_name(pid, DEFAULT_CHANNEL, DataObject::InfoLock));
+        let info = wide(&data_name(pid, DEFAULT_CHANNEL, DataObject::Info));
+        // SAFETY: opens the game's named mutex and mapping; both names are NUL-terminated.
+        let (l, m) = unsafe {
+            (
+                OpenMutexW(
+                    SYNCHRONIZATION_SYNCHRONIZE | MUTEX_MODIFY_STATE,
+                    0,
+                    lock.as_ptr(),
+                ),
+                OpenFileMappingW(FILE_MAP_WRITE, 0, info.as_ptr()),
+            )
+        };
+        if l.is_null() || m.is_null() {
+            say("no data channel");
+            return 7;
+        }
+        // SAFETY: waits on the mutex handle opened above.
+        if unsafe { WaitForSingleObject(l, 5000) } != WAIT_OBJECT_0 {
+            say("lock busy");
+            return 8;
+        }
+        // SAFETY: maps the store for writing and, if that worked, writes its first byte while the
+        // lock is held; then unmaps it, releases the lock and closes both handles.
+        let mapped = unsafe {
+            let view = MapViewOfFile(m, FILE_MAP_WRITE, 0, 0, 0);
+            let mapped = !view.Value.is_null();
+            if mapped {
+                *view.Value.cast::<u8>() = b'X';
+                UnmapViewOfFile(view);
+            }
+            ReleaseMutex(l);
+            CloseHandle(l);
+            CloseHandle(m);
+            mapped
+        };
+        if !mapped {
+            say("map failed");
+            return 9;
+        }
+        say("broken");
+        0
+    }
+
     pub fn main() -> i32 {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let mode = args.first().cloned().unwrap_or_default();
@@ -192,6 +292,12 @@ mod win {
             say("no game");
             return 4;
         };
+        if mode == "hold-info-lock" {
+            return hold_info_lock(pid, ms);
+        }
+        if mode == "break-info-magic" {
+            return break_info_magic(pid);
+        }
         let p = connect(pid);
         match mode.as_str() {
             "bad-first" => {
