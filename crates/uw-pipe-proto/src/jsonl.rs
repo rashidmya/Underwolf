@@ -69,7 +69,8 @@ pub enum Event {
     /// The producer set `disconnect`.
     DataDisconnected { channel: u32 },
     /// A failure. `request_id` is set when it answers a command; `detail` carries a
-    /// `GetLastError` where there is one.
+    /// `GetLastError` where there is one (the channel id for `data_version_mismatch` /
+    /// `data_bad_layout`).
     Error {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<u32>,

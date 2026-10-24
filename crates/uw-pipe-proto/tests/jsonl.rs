@@ -126,13 +126,13 @@ fn data_events() -> Vec<Event> {
     vec![
         Event::DataConnected {
             channel: 1,
-            producer_id: 123_456,
+            producer_id: u64::MAX,
             from_seq: 7,
             schema: vec![SchemaCategory::new("test", &[("ticks", 32), ("last_seq", 32)])],
         },
         Event::Info { channel: 1, category: "test".into(), key: "ticks".into(), value: Some("3".into()), ts: 40 },
         Event::Info { channel: 1, category: "test".into(), key: "last_seq".into(), value: None, ts: 41 },
-        Event::DataEvent { channel: 1, seq: 8, name: "tick".into(), data: "3".into(), ts: 42 },
+        Event::DataEvent { channel: 1, seq: 8, name: "tick".into(), data: "3".into(), ts: 1 << 60 },
         Event::DataLost { channel: 1, events: 12 },
         Event::DataDisconnected { channel: 1 },
         Event::data_error("data_bad_layout", 1),
@@ -147,10 +147,10 @@ fn data_events_have_the_design_wire_form() {
     assert_eq!(
         lines,
         [
-            r#"{"event":"data_connected","channel":1,"producer_id":123456,"from_seq":7,"schema":[{"category":"test","keys":[{"key":"ticks","max_len":32},{"key":"last_seq","max_len":32}]}]}"#,
+            r#"{"event":"data_connected","channel":1,"producer_id":18446744073709551615,"from_seq":7,"schema":[{"category":"test","keys":[{"key":"ticks","max_len":32},{"key":"last_seq","max_len":32}]}]}"#,
             r#"{"event":"info","channel":1,"category":"test","key":"ticks","value":"3","ts":40}"#,
             r#"{"event":"info","channel":1,"category":"test","key":"last_seq","value":null,"ts":41}"#,
-            r#"{"event":"data_event","channel":1,"seq":8,"name":"tick","data":"3","ts":42}"#,
+            r#"{"event":"data_event","channel":1,"seq":8,"name":"tick","data":"3","ts":1152921504606846976}"#,
             r#"{"event":"data_lost","channel":1,"events":12}"#,
             r#"{"event":"data_disconnected","channel":1}"#,
             r#"{"event":"error","code":"data_bad_layout","detail":1}"#,
