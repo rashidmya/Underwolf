@@ -2,7 +2,7 @@
 //! `data_consumer_probe`, in the same prefix. It creates channel 1 of its own process
 //! (`Producer::create`) with the schema `probe` {`a`: 16, `b`: 16}, commits `a = "1"` and
 //! `b = null`, pushes three events (`first`/`a`, `second`/`b`, `third`/`c`), flushes, and prints
-//! `ready pid=<windows pid>`. Then it runs one command per stdin line and answers each with one
+//! `ready pid=<windows pid> producer_id=<the producer's own id>`. Then it runs one command per stdin line and answers each with one
 //! line, `ok` unless said otherwise:
 //! - `delta`: commit `a = "2"`, push `fourth`/`d`, flush;
 //! - `burst <n>`: push n events `burst` (data `0`, `1`, …), then flush until all are written (the
@@ -37,7 +37,7 @@ mod win {
     use uw_game_channel::data::{CreateError, Producer};
     use uw_pipe_proto::data::{Schema, SchemaCategory};
     use uw_pipe_proto::names::{DataObject, data_name};
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0};
     use windows_sys::Win32::System::Memory::{
         FILE_MAP_WRITE, MapViewOfFile, OpenFileMappingW, UnmapViewOfFile,
     };
@@ -91,7 +91,11 @@ mod win {
         let t = std::thread::spawn(move || {
             let h = open_lock(object);
             // SAFETY: waits on the mutex handle opened just above.
-            unsafe { WaitForSingleObject(h, INFINITE) };
+            let r = unsafe { WaitForSingleObject(h, INFINITE) };
+            if r != WAIT_OBJECT_0 && r != WAIT_ABANDONED {
+                // Dropping `tx` unsent makes the caller answer the failure.
+                return;
+            }
             then();
             let _ = tx.send(());
             if let Some(ms) = hold_ms {
@@ -103,7 +107,10 @@ mod win {
             // thread ends.
             unsafe { CloseHandle(h) };
         });
-        let _ = rx.recv();
+        if rx.recv().is_err() {
+            say("error lock thread failed");
+            return;
+        }
         if hold_ms.is_none() {
             let _ = t.join();
         }
@@ -144,8 +151,10 @@ mod win {
                 return 3;
             }
         };
+        let producer_id = producer.as_ref().map_or(0, Producer::producer_id);
         // SAFETY: no arguments.
-        say(&format!("ready pid={}", unsafe { GetCurrentProcessId() }));
+        let pid = unsafe { GetCurrentProcessId() };
+        say(&format!("ready pid={pid} producer_id={producer_id}"));
         for line in std::io::stdin().lock().lines() {
             let Ok(line) = line else { break };
             let mut words = line.split_whitespace();

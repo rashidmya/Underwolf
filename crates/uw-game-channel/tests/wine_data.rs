@@ -2,10 +2,11 @@
 //! The plan 2b gate under plain Wine (system `/usr/bin/wine`, not Proton): two Wine processes in
 //! one scratch prefix share a data channel. `data_producer_probe.exe` creates it as the in-game
 //! producer will; `data_consumer_probe.exe` reads it as the helper's data thread will. The test
-//! drives both, one command at a time, and checks every answer: the snapshot, deltas, events in
-//! order, a resume, ring wraparound giving a loss, a busy lock, an abandoned lock with and without
-//! a broken header, `disconnect` winning a tie, a channel refused once `connect` is reset, and
-//! `Exists` until the consumer lets go.
+//! drives both, one command at a time, and checks every answer: the snapshot, the producer's own
+//! id in the hello block, deltas, events in order, a resume, ring wraparound giving a loss, a busy
+//! lock, an abandoned lock with and without a broken header, `disconnect` winning a tie, a channel
+//! refused once `connect` is reset (with an object left, and with none), and `Exists` until the
+//! consumer lets go.
 //!
 //! Ignored by default (needs Wine and the Windows artifacts). Build and run:
 //!   cargo build --release --target x86_64-pc-windows-gnu -p uw-game-channel --examples
@@ -141,12 +142,13 @@ fn burst(seqs: std::ops::RangeInclusive<u64>) -> String {
 }
 
 /// Catches the design's Win32 objects failing between two Wine processes: the snapshot (nulls
-/// included) or a delta not seen, a first attach replaying the ring instead of starting at the
-/// write head, events out of order or twice, a resume that misses or repeats events, ring
-/// wraparound not counted as lost, a lock wait longer than 100 ms, an abandoned lock treated as
-/// busy or used without re-checking the header, `disconnect` losing a tie to a stale bell, a
-/// channel opened although `connect` is not set (a producer still creating it, or one that went
-/// away), or a producer re-created while the consumer still holds the old objects.
+/// included) or a delta not seen, a hello block that carries another producer's id, a first attach
+/// replaying the ring instead of starting at the write head, events out of order or twice, a
+/// resume that misses or repeats events, ring wraparound not counted as lost, a lock wait longer
+/// than 100 ms, an abandoned lock treated as busy or used without re-checking the header,
+/// `disconnect` losing a tie to a stale bell, a channel opened although `connect` is not set (a
+/// producer still creating it, or one that went away, even with no object left), or a producer
+/// re-created while the consumer still holds the old objects.
 #[test]
 #[ignore = "needs Wine and the x86_64-pc-windows-gnu examples"]
 fn the_data_channel_works_between_two_wine_processes() {
@@ -162,10 +164,9 @@ fn the_data_channel_works_between_two_wine_processes() {
         .push(Probe::start(&fx.dir, "data_producer_probe", &[]));
     // The first run boots the prefix, so allow up to 200 s.
     let ready = fx.probes[0].line(Duration::from_secs(200));
-    let pid = ready
-        .strip_prefix("ready pid=")
-        .unwrap_or_else(|| panic!("producer: {ready:?}"))
-        .to_string();
+    assert!(ready.starts_with("ready pid="), "producer: {ready:?}");
+    let pid = field(&ready, "pid").to_string();
+    let producer_id = field(&ready, "producer_id").to_string();
     fx.probes
         .push(Probe::start(&fx.dir, "data_consumer_probe", &[&pid]));
     // A second consumer, only to check that a channel whose `connect` is not set is refused.
@@ -181,6 +182,10 @@ fn the_data_channel_works_between_two_wine_processes() {
     let attached = consumer.ask("attach");
     let id = field(&attached, "producer_id").to_string();
     assert_ne!(id, "0");
+    assert_eq!(
+        id, producer_id,
+        "the hello block carries the producer's own id"
+    );
     assert_eq!(
         attached,
         format!(
@@ -259,6 +264,8 @@ fn the_data_channel_works_between_two_wine_processes() {
     assert_eq!(late.ask("open-once"), "not ready");
     assert_eq!(producer.ask("recreate"), "exists");
     assert_eq!(consumer.ask("close"), "closed");
+    // No object is left now: the channel is not ready at all.
+    assert_eq!(late.ask("open-once"), "not ready");
     assert_eq!(producer.ask("recreate"), "ok");
     assert_eq!(late.ask("open-once"), "opened");
 }
