@@ -3,6 +3,7 @@
 //! starts `uw-helper64.exe` in that Wine session, the bootstrap connects, and the test overlay is
 //! loaded. A second `uw-inject` run (a client restart) reconnects without reloading. A helper
 //! killed under a running `uw-inject` is restarted, and the overlay gets the reconciled state.
+//! The test overlay's producer reaches `uw-inject`'s user through the game-data channel (2b).
 //! Ignored by default (needs Wine and the Windows artifacts).
 //!
 //!   cargo build --release --target x86_64-pc-windows-gnu -p uw-test-game -p uw-bootstrap \
@@ -17,6 +18,7 @@ use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant, SystemTime};
 
 use uw_host::discovery::find_pids;
+use uw_pipe_proto::data::SchemaCategory;
 use uw_pipe_proto::jsonl::Event;
 
 fn wine() -> String {
@@ -349,4 +351,93 @@ fn a_killed_helper_is_restarted_and_the_overlay_gets_the_reconciled_state() {
     // The pinned bootstrap kept the overlay: no second load.
     assert!(!inj.seen[killed_at..].iter().any(|l| l.contains(r#""event":"status""#)), "reloaded: {:#?}", inj.seen);
     assert!(pid_in(&fx.prefix, "uw-test-game.exe").is_some(), "the game stopped");
+}
+
+fn is_data(e: &Event) -> bool {
+    matches!(
+        e,
+        Event::DataConnected { .. }
+            | Event::Info { .. }
+            | Event::DataEvent { .. }
+            | Event::DataLost { .. }
+            | Event::DataDisconnected { .. }
+    )
+}
+
+/// Read events until `done` holds for one; return the game-data events read, in order.
+fn data_until(inj: &mut Inject, within: Duration, done: impl Fn(&Event) -> bool) -> Vec<Event> {
+    let deadline = Instant::now() + within;
+    let mut seen = Vec::new();
+    loop {
+        let e = inj.next(deadline);
+        let stop = done(&e);
+        if is_data(&e) {
+            seen.push(e);
+        }
+        if stop {
+            return seen;
+        }
+    }
+}
+
+/// The seqs of the `data_event`s in `events`, in order.
+fn event_seqs(events: &[Event]) -> Vec<u64> {
+    events.iter().filter_map(|e| if let Event::DataEvent { seq, .. } = e { Some(*seq) } else { None }).collect()
+}
+
+/// `data_connected` and the snapshot after it: the producer id, `from_seq`, and the snapshot's
+/// `info` events.
+fn expect_connected(inj: &mut Inject, within: Duration) -> (u64, u64, Vec<Event>) {
+    let seen = data_until(inj, within, |e| matches!(e, Event::DataConnected { .. }));
+    let Some(Event::DataConnected { channel: 1, producer_id, from_seq, schema }) = seen.last().cloned() else {
+        panic!("no data_connected: {seen:?}");
+    };
+    assert_eq!(schema, [SchemaCategory::new("test", &[("ticks", 32), ("last_seq", 32)])]);
+    let snapshot =
+        data_until(inj, Duration::from_secs(5), |e| matches!(e, Event::Info { key, .. } if key == "last_seq"));
+    (producer_id, from_seq, snapshot)
+}
+
+/// Catches the game-data channel not reaching `uw-inject`'s user (design 2b "Testing" 3): no
+/// `data_connected` with the test schema, a snapshot without both keys, no `tick` events, no
+/// `state_seen` after a `set_state`, or seqs that skip or repeat. Also catches a restarted client
+/// (a new `uw-inject`, so a new `uw-host` without a resume point) replaying old events instead of
+/// starting at the write head, or a snapshot that does not restore the current values (design
+/// "Failures": the whole Linux client restarts).
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn uw_inject_relays_the_test_producer_and_a_new_client_starts_at_the_write_head() {
+    let fx = start_game("data");
+    let last = {
+        let mut inj = Inject::start(&fx);
+        let (_, from_seq, snapshot) = expect_connected(&mut inj, Duration::from_secs(200));
+        let keys: Vec<&str> = snapshot
+            .iter()
+            .filter_map(|e| if let Event::Info { key, .. } = e { Some(key.as_str()) } else { None })
+            .collect();
+        assert_eq!(keys, ["ticks", "last_seq"], "{snapshot:?}");
+        let mut seen = data_until(&mut inj, Duration::from_secs(10), |e| {
+            matches!(e, Event::DataEvent { name, .. } if name == "tick")
+        });
+        // The host's reconcile applied seq 1; edit mode on applies seq 2.
+        inj.send(r#"{"cmd":"set_state","edit_mode":true}"#);
+        seen.extend(data_until(&mut inj, Duration::from_secs(20), |e| {
+            matches!(e, Event::DataEvent { name, data, .. } if name == "state_seen" && data == "2")
+        }));
+        let seqs = event_seqs(&seen);
+        let want: Vec<u64> = (from_seq + 1..).take(seqs.len()).collect();
+        assert_eq!(seqs, want, "seqs skip or repeat: {seen:?}");
+        *seqs.last().unwrap()
+    };
+
+    // A new client: no resume point, so the write head, and the snapshot holds the current values.
+    let mut inj = Inject::start(&fx);
+    let (_, from_seq, snapshot) = expect_connected(&mut inj, Duration::from_secs(60));
+    assert!(from_seq >= last, "from_seq {from_seq}, but {last} was delivered before");
+    assert!(
+        snapshot.iter().any(|e| matches!(e, Event::Info { key, value: Some(_), .. } if key == "last_seq")),
+        "the snapshot lost last_seq: {snapshot:?}"
+    );
+    let seen = data_until(&mut inj, Duration::from_secs(10), |e| matches!(e, Event::DataEvent { .. }));
+    assert_eq!(event_seqs(&seen), [from_seq + 1], "{seen:?}");
 }

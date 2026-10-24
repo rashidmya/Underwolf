@@ -6,15 +6,17 @@ license.workspace = true
 publish.workspace = true
 
 # A stand-in overlay for the Wine end-to-end tests. `uw_overlay_start` writes
-# `%TEMP%\uw-test-overlay-<pid>.txt`, starts the control channel (`uw-game-channel`) and returns 0;
-# on each bell it writes `%TEMP%\uw-test-state-<pid>.txt` and acknowledges the state. The tests
-# read both files through the prefix's TEMP. Built for x86_64-pc-windows-gnu.
+# `%TEMP%\uw-test-overlay-<pid>.txt`, starts the control channel (`uw-game-channel`) and the test
+# producer on data channel 1, and returns 0; on each bell it writes `%TEMP%\uw-test-state-<pid>.txt`
+# and acknowledges the state. The tests read both files through the prefix's TEMP. Built for
+# x86_64-pc-windows-gnu.
 [lib]
 name = "uw_test_overlay"
 crate-type = ["cdylib"]
 
 [dependencies]
 uw-game-channel = { path = "../uw-game-channel" }
+uw-pipe-proto = { path = "../uw-pipe-proto" }
 
 [target.'cfg(windows)'.dependencies]
 # `CreateFileW` needs `Win32_Security`, `WriteFile` needs `Win32_System_IO` (see the bootstrap).

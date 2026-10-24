@@ -18,6 +18,7 @@ use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+use uw_pipe_proto::data::SchemaCategory;
 use uw_pipe_proto::jsonl::{Command as Cmd, Event};
 
 fn wine() -> String {
@@ -501,6 +502,9 @@ fn killing_the_game_reports_game_exited() {
     helper.expect_event("bootstrap_connected", Duration::from_secs(200));
     helper.send(&load_overlay_line(&overlay));
     helper.expect_event(r#""code":"ok""#, Duration::from_secs(30));
+    // The data thread relays the test producer (design 2b "Failures": `game_exited` still stops
+    // everything).
+    assert!(matches!(helper.next_data(Duration::from_secs(10)), Event::DataConnected { .. }));
 
     // Kill the game while the helper is idle; the watcher thread must notice and report
     // `game_exited` (design failure table), without waiting for the next stdin command. The relay
@@ -720,13 +724,15 @@ fn closing_stdin_ends_the_helper_while_it_waits_for_a_window() {
     assert!(helper.wait_stderr("stdin closed; exiting", Duration::from_secs(2)));
 }
 
-/// The same once the bootstrap is connected and the relay runs.
+/// The same once the bootstrap is connected and the relay runs, and while the data thread relays
+/// the test producer (design 2b "Failures": stdin closing ends the helper in every phase).
 #[test]
 #[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
 fn closing_stdin_ends_the_helper_after_it_connected() {
     let mut pfx = setup("stdinrelay");
     pfx.game = Some(wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).spawn().unwrap());
     let mut helper = start_with_overlay(&pfx);
+    assert!(matches!(helper.next_data(Duration::from_secs(10)), Event::DataConnected { .. }));
     helper.close_stdin();
     let status = helper.wait_exit(Duration::from_secs(10));
     assert_eq!(status.and_then(|s| s.code()), Some(0), "stderr: {:?}", helper.stderr_lines());
@@ -921,4 +927,135 @@ fn a_data_channel_with_a_bad_layout_is_data_bad_layout_once() {
         helper.stderr_lines()
     );
     helper.expect_data_quiet(Duration::from_secs(3));
+}
+
+/// The test producer's schema (`uw-test-overlay`).
+fn test_schema() -> Vec<SchemaCategory> {
+    vec![SchemaCategory::new("test", &[("ticks", 32), ("last_seq", 32)])]
+}
+
+/// Read data events until `done` holds for one; return them all.
+fn data_until(helper: &Helper, within: Duration, done: impl Fn(&Event) -> bool) -> Vec<Event> {
+    let deadline = Instant::now() + within;
+    let mut seen = Vec::new();
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(!left.is_zero(), "data: no match within {within:?}; saw {seen:?}");
+        let e = helper.next_data(left);
+        let stop = done(&e);
+        seen.push(e);
+        if stop {
+            return seen;
+        }
+    }
+}
+
+/// The seqs of the `data_event`s in `events`, in order.
+fn event_seqs(events: &[Event]) -> Vec<u64> {
+    events.iter().filter_map(|e| if let Event::DataEvent { seq, .. } = e { Some(*seq) } else { None }).collect()
+}
+
+/// Expect `data_connected` with the test schema, then the two-key snapshot. Returns the producer
+/// id, `from_seq`, and the snapshot's `ticks` and `last_seq` values.
+fn expect_test_producer(helper: &Helper) -> (u64, u64, String, Option<String>) {
+    let connected = helper.next_data(Duration::from_secs(10));
+    let Event::DataConnected { channel: 1, producer_id, from_seq, schema } = connected else {
+        panic!("expected data_connected, got {connected:?}");
+    };
+    assert_eq!(schema, test_schema());
+    let ticks = match helper.next_data(Duration::from_secs(5)) {
+        Event::Info { channel: 1, category, key, value: Some(v), .. } if category == "test" && key == "ticks" => v,
+        other => panic!("expected the ticks snapshot, got {other:?}"),
+    };
+    let last_seq = match helper.next_data(Duration::from_secs(5)) {
+        Event::Info { channel: 1, key, value, .. } if key == "last_seq" => value,
+        other => panic!("expected the last_seq snapshot, got {other:?}"),
+    };
+    (producer_id, from_seq, ticks, last_seq)
+}
+
+/// Catches the design's main data flow breaking at the helper (design 2b flow steps 2-5): data
+/// events before any producer exists, no `data_connected` with the test schema once the overlay
+/// creates it, a snapshot without both keys (`last_seq` still null), ticks that do not follow
+/// `from_seq` with contiguous seqs, `ticks` info not following them, or no `state_seen` (and no
+/// `last_seq`) after a `set_state`.
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn the_data_thread_waits_for_the_producer_then_relays_it() {
+    let mut pfx = setup("data");
+    pfx.game = Some(wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).spawn().unwrap());
+    let overlay = to_wine_path(&win_artifact("uw_test_overlay.dll"));
+    let mut helper = start_helper(&pfx, &[], &[]);
+    helper.expect_event("bootstrap_connected", Duration::from_secs(200));
+    // No producer yet: the data thread looks once a second and says nothing.
+    helper.expect_data_quiet(Duration::from_secs(3));
+    helper.send_cmd(&load(&overlay));
+    helper.expect_all(&[ok(1), Event::OverlayConnected { module_version: OVERLAY_VERSION }], Duration::from_secs(30));
+
+    let (_, from_seq, ticks, snapshot_last_seq) = expect_test_producer(&helper);
+    assert_eq!(snapshot_last_seq, None, "no state was seen yet");
+    let ticks: u64 = ticks.parse().unwrap_or_else(|_| panic!("ticks {ticks:?}"));
+    // Two more ticks: each a `tick` event (data: the count), after a `ticks` info with that count.
+    let seen = data_until(&helper, Duration::from_secs(10), |e| {
+        matches!(e, Event::DataEvent { name, data, .. } if name == "tick" && *data == (ticks + 2).to_string())
+    });
+    let numbers = |want_event: bool| -> Vec<u64> {
+        seen.iter()
+            .filter_map(|e| match e {
+                Event::DataEvent { name, data, .. } if want_event && name == "tick" => data.parse().ok(),
+                Event::Info { key, value: Some(v), .. } if !want_event && key == "ticks" => v.parse().ok(),
+                _ => None,
+            })
+            .collect()
+    };
+    // Attach reads the snapshot under the info lock and the start point under the events lock, a
+    // moment apart, and a tick commits `ticks` just before it writes its event. So the ring may be
+    // a tick behind the snapshot (events from `ticks` on) or a tick ahead (only `ticks + 2`).
+    let events = numbers(true);
+    let fits = [vec![ticks + 1, ticks + 2], vec![ticks, ticks + 1, ticks + 2], vec![ticks + 2]];
+    assert!(fits.contains(&events), "{seen:?}");
+    assert_eq!(numbers(false), [ticks + 1, ticks + 2], "{seen:?}");
+
+    // `set_state` -> `state_applied` -> a `state_seen` event and `last_seq`, both with seq 1 (the
+    // info and the event come in either order).
+    fn state_seen(e: &Event) -> bool {
+        matches!(e, Event::DataEvent { name, data, .. } if name == "state_seen" && data == "1")
+    }
+    fn last_seq(e: &Event) -> bool {
+        matches!(e, Event::Info { key, value: Some(v), .. } if key == "last_seq" && v == "1")
+    }
+    helper.send_cmd(&Cmd::SetState { request_id: 2, edit_mode: Some(true), visible: None });
+    helper.expect_all(&[Event::StateSet { request_id: 2, seq: 1 }, applied(1)], Duration::from_secs(10));
+    let mut more = data_until(&helper, Duration::from_secs(10), |e| state_seen(e) || last_seq(e));
+    let rest: fn(&Event) -> bool = if more.iter().any(state_seen) { last_seq } else { state_seen };
+    more.extend(data_until(&helper, Duration::from_secs(5), rest));
+    let all = [seen, more].concat();
+    let seqs = event_seqs(&all);
+    let want: Vec<u64> = (from_seq + 1..).take(seqs.len()).collect();
+    assert_eq!(seqs, want, "seqs skip or repeat: {all:?}");
+}
+
+/// Catches a producer that goes away not reported (design 2b flow step 6: `data_disconnected`),
+/// or the data thread not closing everything and going back to waiting: the test producer, made
+/// again in the same game, would then fail with `Exists` for good, and no second `data_connected`
+/// (a new `producer_id`, the full snapshot, ticks from its own `from_seq`) would come.
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn a_producer_that_goes_away_is_data_disconnected_and_the_next_one_connects() {
+    let mut pfx = setup("datarestart");
+    pfx.game = Some(
+        wine_cmd(&pfx, &win_artifact("uw-test-game.exe"))
+            .env("UW_TEST_OVERLAY_DATA_RESTART_MS", "4000")
+            .spawn()
+            .unwrap(),
+    );
+    let helper = start_with_overlay(&pfx);
+    let (first, _, _, _) = expect_test_producer(&helper);
+    data_until(&helper, Duration::from_secs(15), |e| *e == Event::DataDisconnected { channel: 1 });
+    let (second, from_seq, ticks, _) = expect_test_producer(&helper);
+    assert_ne!(second, first, "the new producer has its own id");
+    assert!(ticks.parse::<u64>().is_ok_and(|t| t >= 3), "the snapshot holds the current count: {ticks:?}");
+    let seen =
+        data_until(&helper, Duration::from_secs(5), |e| matches!(e, Event::DataEvent { name, .. } if name == "tick"));
+    assert_eq!(event_seqs(&seen), [from_seq + 1], "{seen:?}");
 }
