@@ -6,6 +6,8 @@ pub enum SessionEvent {
     Disconnected,
     State { bits: u64, state: StateV1 },
     Capture(CaptureRequest),
+    Visibility { state_seq: u64, on: bool },
+    ApplyCapture { request: CaptureRequest, visible: bool, state_seq: u64 },
     Ack(InputAck),
     Ping(u32),
 }
@@ -41,6 +43,12 @@ impl Session {
             };
         }
         match message {
+            OverlayMessage::Input(InputMessage::Visibility { state_seq, on }) => {
+                Ok(SessionEvent::Visibility { state_seq, on })
+            }
+            OverlayMessage::Input(InputMessage::ApplyCapture { request, visible }) => {
+                Ok(SessionEvent::ApplyCapture { request, visible, state_seq: request.state_seq })
+            }
             OverlayMessage::Input(InputMessage::Capture(r)) => Ok(SessionEvent::Capture(r)),
             OverlayMessage::Input(InputMessage::Ack(a)) => Ok(SessionEvent::Ack(a)),
             OverlayMessage::Ping { nonce } => Ok(SessionEvent::Ping(nonce)),
@@ -201,8 +209,11 @@ mod win {
                             let Ok(g) = o.lock(100) else { return };
                             let state = state::read(g.bytes());
                             drop(g);
-                            callback(SessionEvent::State { bits: 0, state });
-                            callback(SessionEvent::Capture(r));
+                            callback(SessionEvent::ApplyCapture {
+                                request: r,
+                                visible: state.visible,
+                                state_seq: state.seq,
+                            });
                         }
                         other => callback(other),
                     }

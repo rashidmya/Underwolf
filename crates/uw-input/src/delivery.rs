@@ -94,6 +94,30 @@ impl Outbox {
         }
     }
 }
+/// Worker-owned progress keeps a sequence inseparable from its epoch.
+#[derive(Default)]
+pub struct SentProgress {
+    epoch: u64,
+    through: u64,
+}
+impl SentProgress {
+    pub fn announce(&mut self, epoch: u64) {
+        if epoch > self.epoch {
+            self.epoch = epoch;
+            self.through = 0;
+        }
+    }
+    pub fn sent(&mut self, epoch: u64, through: u64) -> bool {
+        if epoch != self.epoch || through < self.through {
+            return false;
+        }
+        self.through = through;
+        true
+    }
+    pub fn through(&self, epoch: u64) -> u64 {
+        if epoch == self.epoch { self.through } else { 0 }
+    }
+}
 #[derive(Clone, Copy)]
 struct Issued {
     challenge: InputChallenge,
@@ -167,6 +191,9 @@ impl Lease {
         }
         self.accepted = Some((ack.nonce, issued.at));
         true
+    }
+    pub fn healthy_in(&self, epoch: u64, now_ms: u64) -> bool {
+        self.epoch == epoch && self.healthy(now_ms)
     }
     pub fn healthy(&self, now_ms: u64) -> bool {
         now_ms >= self.clock && self.accepted.is_some_and(|(_, at)| now_ms >= at && now_ms - at < LEASE_MS)

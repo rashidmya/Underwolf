@@ -26,8 +26,10 @@ pub enum PolicyEvent {
     Destroyed,
     Input(InputRecord),
     Observed(InputRecord),
+    Snapshot(InputRecord),
     Char(u16),
     Request(CaptureRequest),
+    CaptureState { request: CaptureRequest, visible: bool, state_seq: u64 },
     SetupFinished { epoch: u64, success: bool },
     Restored { epoch: u64 },
     Failure(InputReason),
@@ -162,6 +164,24 @@ impl Policy {
         self.suppressed_buttons = self.buttons;
         e.transition = Some(Transition::Enter { epoch: self.epoch, reason });
     }
+    /// The owner samples the current epoch's lease at execution, never at enqueue time.
+    pub fn event_with_lease(&mut self, event: PolicyEvent, healthy: bool) -> Effects {
+        if matches!(event, PolicyEvent::Healthy(true)) {
+            return self.event(PolicyEvent::Healthy(healthy));
+        }
+        if matches!(
+            event,
+            PolicyEvent::Input(_)
+                | PolicyEvent::Observed(_)
+                | PolicyEvent::Snapshot(_)
+                | PolicyEvent::Request(_)
+                | PolicyEvent::CaptureState { .. }
+                | PolicyEvent::SetupFinished { .. }
+        ) {
+            self.healthy = healthy;
+        }
+        self.event(event)
+    }
     pub fn event(&mut self, event: PolicyEvent) -> Effects {
         let mut e = Effects::default();
         match event {
@@ -244,13 +264,38 @@ impl Policy {
                 }
             }
             PolicyEvent::Destroyed => {
+                if self.mode == Mode::Inactive {
+                    self.bump();
+                }
+                self.healthy = false;
                 self.foreground = false;
                 self.installed = false;
-                self.release(InputReason::WindowDestroyed, &mut e)
+                self.release(InputReason::WindowDestroyed, &mut e);
+                self.keys = [false; 256];
+                self.game_keys = [None; 256];
+                self.suppressed_keys = [false; 256];
+                self.buttons = [false; 5];
+                self.game_buttons = [None; 5];
+                self.suppressed_buttons = [false; 5];
+                self.text.reset();
             }
             PolicyEvent::Failure(reason) => {
                 self.healthy = false;
                 self.release(reason, &mut e)
+            }
+            PolicyEvent::CaptureState { request, visible, state_seq } => {
+                if request.epoch != self.epoch {
+                    e.result = Some(result(request, CaptureCode::StaleEpoch));
+                } else if request.state_seq != state_seq {
+                    e.result = Some(result(request, CaptureCode::Superseded));
+                } else {
+                    // Validate the caller's epoch before visibility can invalidate it.
+                    self.visible = visible;
+                    e = self.event(PolicyEvent::Request(request));
+                    if !visible {
+                        self.release(InputReason::Hidden, &mut e);
+                    }
+                }
             }
             PolicyEvent::Request(r) => {
                 if r.epoch != self.epoch {
@@ -303,6 +348,13 @@ impl Policy {
                     e.host = self.text.push(unit).map(|c| c.map(|c| InputRecord::text(c, self.modifiers())))
                 } else {
                     e.pass = self.mode == Mode::Inactive
+                }
+            }
+            PolicyEvent::Snapshot(r) => {
+                // Query APIs report generic modifier aliases as well as left/right
+                // keys. Subsequent events use only left/right, so seed them once.
+                if r.kind != 1 || !matches!(r.a, 16..=18) {
+                    return self.event(PolicyEvent::Input(r));
                 }
             }
             PolicyEvent::Observed(r) => {

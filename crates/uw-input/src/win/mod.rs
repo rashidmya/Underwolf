@@ -5,7 +5,7 @@ mod keyboard;
 mod raw;
 mod registration;
 mod window;
-use crate::delivery::Lease;
+use crate::delivery::{Lease, SentProgress};
 use crate::{
     delivery::Outbox,
     policy::{Effects, Policy, PolicyEvent, Transition},
@@ -15,7 +15,7 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 use std::sync::{
     Arc, Mutex, OnceLock,
-    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 use uw_pipe_proto::input::*;
 thread_local! { static BYPASS:Cell<bool>=const{Cell::new(false)}; }
@@ -66,8 +66,8 @@ pub struct InputHandle {
     shared: Arc<Shared>,
 }
 pub(super) struct Shared {
-    hwnd: usize,
-    thread: u32,
+    hwnd: AtomicUsize,
+    thread: AtomicU32,
     message: u32,
     policy: Mutex<Policy>,
     requests: RequestQueue,
@@ -75,13 +75,14 @@ pub(super) struct Shared {
     state: Mutex<Option<InputState>>,
     session_failed: AtomicBool,
     permit: AtomicBool,
+    setting_up: AtomicBool,
     epoch: AtomicU64,
     release: AtomicUsize,
     restore_epoch: AtomicU64,
     restore_intent: AtomicBool,
     pub outbox: Outbox,
     lease: Mutex<Lease>,
-    through: AtomicU64,
+    progress: Mutex<SentProgress>,
     announced_epoch: AtomicU64,
     installed: AtomicBool,
     owner_events: Mutex<VecDeque<(Option<u64>, PolicyEvent)>>,
@@ -91,6 +92,9 @@ impl InputRuntime {
     // HWND is an opaque OS handle, validated before use; we never dereference it.
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn install(hwnd: HWND) -> Result<Self, InstallError> {
+        if !crate::cursor::CursorJournal::lock_free() {
+            return Err(InstallError("128-bit hardware atomics required for cursor intent".into()));
+        }
         use windows_sys::Win32::{
             System::Threading::GetCurrentProcessId, UI::WindowsAndMessaging::GetWindowThreadProcessId,
         };
@@ -103,8 +107,8 @@ impl InputRuntime {
         }
         let message = window::message()?;
         let shared = Arc::new(Shared {
-            hwnd: hwnd as usize,
-            thread,
+            hwnd: AtomicUsize::new(hwnd as usize),
+            thread: AtomicU32::new(thread),
             message,
             policy: Mutex::new(Policy::new()),
             requests: RequestQueue::new(),
@@ -112,13 +116,14 @@ impl InputRuntime {
             state: Mutex::new(None),
             session_failed: AtomicBool::new(false),
             permit: AtomicBool::new(false),
+            setting_up: AtomicBool::new(false),
             epoch: AtomicU64::new(1),
             release: AtomicUsize::new(0),
             restore_epoch: AtomicU64::new(0),
             restore_intent: AtomicBool::new(false),
             outbox: Outbox::new(),
             lease: Mutex::new(Lease::new(1)),
-            through: AtomicU64::new(0),
+            progress: Mutex::new(SentProgress::default()),
             announced_epoch: AtomicU64::new(0),
             installed: AtomicBool::new(false),
             owner_events: Mutex::new(VecDeque::with_capacity(32)),
@@ -131,6 +136,7 @@ impl InputRuntime {
             .spawn(move || {
                 loop {
                     std::thread::sleep(std::time::Duration::from_millis(10));
+                    window::rediscover(&watchdog);
                     if watchdog.restore_epoch.load(Ordering::Acquire) != 0 {
                         window::wake(&watchdog);
                     }
@@ -163,9 +169,15 @@ impl InputHandle {
     }
     pub fn set_visible_state(&self, on: bool, state_seq: u64) {
         self.shared.submit(PolicyEvent::VisibleState { on, state_seq });
+        if !on {
+            self.shared.revoke(InputReason::Hidden);
+        }
     }
     pub fn set_visible(&self, on: bool) {
         self.shared.submit(PolicyEvent::Visible(on));
+        if !on {
+            self.shared.revoke(InputReason::Hidden);
+        }
     }
     pub fn acknowledge(&self, ack: InputAck) {
         let healthy = self.shared.lease.try_lock().is_ok_and(|mut l| l.ack(ack, now()));
@@ -182,7 +194,13 @@ impl InputHandle {
         }
         let mut lease = self.shared.lease.try_lock().ok()?;
         lease.reset(epoch);
-        lease.challenge(now(), self.shared.through.load(Ordering::Acquire))
+        lease.challenge(now(), self.shared.progress.lock().ok()?.through(epoch))
+    }
+    pub fn apply_capture(&self, request: CaptureRequest, visible: bool, state_seq: u64) {
+        self.shared.submit(PolicyEvent::CaptureState { request, visible, state_seq });
+        if !visible && request.epoch == self.shared.epoch.load(Ordering::Acquire) {
+            self.shared.revoke(InputReason::Hidden);
+        }
     }
     pub fn request(&self, r: CaptureRequest) -> Result<(), Full> {
         let result = self.shared.requests.try_push(r);
@@ -210,6 +228,9 @@ impl InputHandle {
         }
         for event in &events {
             if let RuntimeEvent::State(state) = event {
+                if let Ok(mut progress) = self.shared.progress.lock() {
+                    progress.announce(state.epoch);
+                }
                 self.shared.announced_epoch.store(state.epoch, Ordering::Release);
             }
         }
@@ -219,7 +240,9 @@ impl InputHandle {
         }
         self.shared.outbox.reset(epoch);
         if let Some(b) = self.shared.outbox.take_batch(epoch) {
-            self.shared.through.store(b.first_seq + b.records.len() as u64 - 1, Ordering::Release);
+            if let Ok(mut progress) = self.shared.progress.lock() {
+                progress.sent(b.epoch, b.first_seq + b.records.len() as u64 - 1);
+            }
             events.push(RuntimeEvent::Batch(b))
         }
         events
@@ -229,6 +252,13 @@ impl InputHandle {
     }
 }
 impl Shared {
+    fn hwnd(&self) -> usize {
+        self.hwnd.load(Ordering::Acquire)
+    }
+    fn thread(&self) -> u32 {
+        self.thread.load(Ordering::Acquire)
+    }
+
     fn revoke(&self, reason: InputReason) {
         if reason == InputReason::Overflow {
             self.session_failed.store(true, Ordering::Release);
@@ -242,7 +272,7 @@ impl Shared {
             return false;
         }
         // SAFETY: foreground query has no pointer preconditions.
-        if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() } as usize != self.hwnd {
+        if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() } as usize != self.hwnd() {
             self.revoke(InputReason::FocusLost);
             return false;
         }
@@ -288,8 +318,8 @@ impl Shared {
             self.revoke(InputReason::Overflow);
             return None;
         };
-        let old = p.epoch();
-        let effects = p.event(event);
+        let healthy = self.lease.try_lock().is_ok_and(|lease| lease.healthy_in(p.epoch(), now()));
+        let effects = p.event_with_lease(event, healthy);
         let epoch = p.epoch();
         self.epoch.store(epoch, Ordering::Release);
         self.permit.store(
@@ -297,16 +327,13 @@ impl Shared {
             Ordering::Release,
         );
         drop(p);
-        if old != epoch {
-            self.through.store(0, Ordering::Release);
-        }
         Some(effects)
     }
     fn report(&self, reason: InputReason, state_seq: Option<u64>) {
         let mut rect = windows_sys::Win32::Foundation::RECT::default();
         // SAFETY: target belongs to this process; rect is writable.
         unsafe {
-            windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(self.hwnd as HWND, &mut rect);
+            windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(self.hwnd() as HWND, &mut rect);
         }
         let state = InputState {
             epoch: self.epoch.load(Ordering::Acquire),
@@ -334,27 +361,43 @@ impl Shared {
         }
         if let Some(seq) = e.applied {
             self.emit(RuntimeEvent::Applied(seq));
+            self.report(InputReason::Requested, Some(seq));
         }
         if let Some(result) = e.result {
             self.emit(RuntimeEvent::Result(result));
             if result.code == CaptureCode::Applied {
                 self.emit(RuntimeEvent::Applied(result.state_seq));
+                self.report(InputReason::Requested, Some(result.state_seq));
             }
         }
         if let Some(Transition::Enter { epoch, reason }) = e.transition {
-            let success =
-                bypass(|| registration::enter() && cursor::enter() && window::release_held(self, &e.releases));
-            if let Some(done) = self.event(PolicyEvent::SetupFinished { epoch, success }) {
+            let token = registration::prepare();
+            let cursor_token = token.and_then(|_| cursor::prepare());
+            self.setting_up.store(cursor_token.is_some(), Ordering::Release);
+            // Both transactions span arbitrary game WndProc cleanup callbacks.
+            let setup = cursor_token.is_some()
+                && window::release_held(self, &e.releases)
+                && self.release.load(Ordering::Acquire) == 0
+                && !self.session_failed.load(Ordering::Acquire);
+            let cursor_ready = cursor_token.is_some_and(|token| cursor::activate(token, setup));
+            let success = token.is_some_and(|token| registration::activate(token, cursor_ready));
+            let done = self.event(PolicyEvent::SetupFinished { epoch, success });
+            self.setting_up.store(false, Ordering::Release);
+            if let Some(done) = done {
                 self.effects(done)
             }
-            self.report(if success { reason } else { InputReason::SetupFailed }, None);
+            if !success {
+                self.report(InputReason::SetupFailed, None);
+            } else if reason != InputReason::Requested {
+                self.report(reason, None);
+            }
         }
         if let Some(Transition::Release { epoch, reason }) = e.transition {
             self.restore_intent
                 .store(!matches!(reason, InputReason::FocusLost | InputReason::WindowDestroyed), Ordering::Release);
             self.restore_epoch.store(epoch, Ordering::Release);
-            self.retry_restore();
             self.report(reason, None);
+            self.retry_restore();
         }
     }
     fn retry_restore(&self) {
@@ -365,9 +408,9 @@ impl Shared {
         // SAFETY: window queries have no pointer preconditions.
         let foreground = self.restore_intent.load(Ordering::Acquire)
             // SAFETY: foreground query has no arguments.
-            && unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() } as usize == self.hwnd;
+            && unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() } as usize == self.hwnd();
         // SAFETY: opaque handle is only queried.
-        let alive = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(self.hwnd as HWND) } != 0;
+        let alive = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(self.hwnd() as HWND) } != 0;
         let restored = bypass(|| {
             let raw = registration::restore();
             let cursor = cursor::restore(foreground, alive);

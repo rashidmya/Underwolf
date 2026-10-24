@@ -35,3 +35,32 @@ impl HookBackend for Backend<'_> {
         unsafe { MinHook::disable_hook(target as *mut _) }.map_err(|e| format!("disable: {e:?}"))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    static ORIGINAL: AtomicUsize = AtomicUsize::new(0);
+    unsafe extern "system" fn detour(vk: i32) -> i16 {
+        // SAFETY: published native GetKeyState trampoline has this exact ABI.
+        unsafe {
+            std::mem::transmute::<usize, unsafe extern "system" fn(i32) -> i16>(ORIGINAL.load(Ordering::Acquire))(vk)
+        }
+    }
+    #[test]
+    fn native_partial_create_failure_retains_callable_original() {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
+        let target = GetKeyState as *const () as usize;
+        let targets = [Target { address: target, detour: detour as *const () as usize, original: &ORIGINAL }];
+        let result = crate::hooks::HookSet::install(
+            &mut Backend(&targets),
+            &[(target, targets[0].detour), (1, targets[0].detour)],
+        );
+        let failure = result.expect_err("invalid second native target must fail");
+        assert_eq!(failure.retained.len(), 1);
+        assert_ne!(ORIGINAL.load(Ordering::Acquire), 0);
+        // SAFETY: scalar native query and ABI-correct retained trampoline remain callable after rollback.
+        unsafe {
+            assert_eq!(detour(0), GetKeyState(0));
+        }
+    }
+}

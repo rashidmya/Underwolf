@@ -121,9 +121,13 @@ impl Relay<'_> {
     fn command(&mut self, cmd: Command) {
         match cmd {
             Command::InputAck { request_id, ack } => {
+                let Ok(frame) = encode_input(&OverlayMessage::Input(InputMessage::Ack(ack))) else {
+                    emit(&Event::reply_error(request_id, "input_bad_ack"));
+                    return;
+                };
                 if self.input.as_ref().is_none_or(|r| r.request_epoch(Some(ack.epoch)).is_err()) {
                     emit(&Event::reply_error(request_id, "input_stale_epoch"));
-                } else if self.overlay.write(&encode_input(&OverlayMessage::Input(InputMessage::Ack(ack))).unwrap()) {
+                } else if self.overlay.write(&frame) {
                     emit(&Event::InputAcked { request_id });
                 } else {
                     emit(&Event::reply_error(request_id, "overlay_not_connected"));
@@ -157,8 +161,11 @@ impl Relay<'_> {
                     emit(&Event::reply_error(request_id, "input_requests_full"));
                     return;
                 }
-                let change = match self.objects.lock(LOCK_TIMEOUT_MS) {
-                    Ok(mut g) => state::apply(g.bytes_mut(), edit_mode, visible),
+                let (change, applied_visible) = match self.objects.lock(LOCK_TIMEOUT_MS) {
+                    Ok(mut g) => {
+                        let change = state::apply(g.bytes_mut(), edit_mode, visible);
+                        (change, state::read(g.bytes()).visible)
+                    }
                     Err(LockError::Busy) => {
                         emit(&Event::reply_error(request_id, "state_busy"));
                         return;
@@ -189,12 +196,26 @@ impl Relay<'_> {
                         emit(&Event::reply_error(request_id, code));
                         return;
                     }
-                    if !self
-                        .overlay
-                        .write(&encode_input(&OverlayMessage::Input(InputMessage::Capture(request))).unwrap())
-                    {
+                    if !self.overlay.write(
+                        &encode_input(&OverlayMessage::Input(InputMessage::ApplyCapture {
+                            request,
+                            visible: applied_visible,
+                        }))
+                        .unwrap(),
+                    ) {
                         self.drop_overlay();
                     }
+                } else if self.input.is_some()
+                    && visible.is_some()
+                    && !self.overlay.write(
+                        &encode_input(&OverlayMessage::Input(InputMessage::Visibility {
+                            state_seq: change.seq,
+                            on: applied_visible,
+                        }))
+                        .unwrap(),
+                    )
+                {
+                    self.drop_overlay();
                 }
             }
             Command::Ping { request_id } => {

@@ -344,7 +344,7 @@ pub fn encode_input(m: &OverlayMessage) -> Result<Vec<u8>, ProtoError> {
 
 pub fn decode_overlay(bytes: &[u8]) -> Result<OverlayMessage, ProtoError> {
     let (ty, payload) = unframe(bytes)?;
-    if (0x110..=0x117).contains(&ty) {
+    if (0x110..=0x119).contains(&ty) {
         if bytes.len() != HEADER_LEN + payload.len() {
             return Err(ProtoError::BadInput);
         }

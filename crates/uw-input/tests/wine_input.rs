@@ -71,3 +71,71 @@ fn destruction_does_not_restore_old_clip() {
 fn five_buttons_wheels_unicode_and_held_key_polling() {
     probe(&["--mouse", "--unicode"]);
 }
+
+#[test]
+#[ignore = "build Windows input_probe; run under xvfb-run"]
+fn held_key_remains_quarantined_after_exit() {
+    probe(&["--held"]);
+}
+#[test]
+#[ignore = "build Windows input_probe; run under xvfb-run"]
+fn startup_ctrl_release_does_not_leave_a_phantom_modifier() {
+    probe(&["--startup-ctrl"]);
+}
+#[test]
+#[ignore = "build Windows input_probe; run under xvfb-run"]
+fn replacement_window_requires_explicit_recapture() {
+    probe(&["--replace"]);
+}
+
+#[test]
+#[ignore = "build Windows input_probe; run under xvfb-run"]
+fn idle_expired_lease_rejects_entry() {
+    probe(&["--expired-entry"]);
+}
+
+#[test]
+#[ignore = "build Windows input_probe; run under xvfb-run"]
+fn actual_focus_transfer_releases_without_recapture() {
+    probe(&["--focus", "--cursor"]);
+}
+
+#[test]
+#[ignore = "build Windows input_probe; run under xvfb-run"]
+fn hide_revokes_before_stalled_ui_can_restore() {
+    probe(&["--hide-stall", "--visibility-only"]);
+}
+#[test]
+#[ignore = "build Windows input_probe; run under xvfb-run"]
+fn combined_hide_revokes_without_invalidating_its_own_request() {
+    probe(&["--hide-stall"]);
+}
+
+#[test]
+#[ignore = "build Windows input_probe; run under xvfb-run"]
+fn replacement_preserves_pending_owner_restoration() {
+    probe(&["--replace-pending"]);
+}
+
+#[test]
+#[ignore = "build Windows input_probe; run under xvfb-run"]
+fn reentrant_game_registration_cancels_entry() {
+    probe(&["--reentrant-register"]);
+}
+
+#[test]
+#[ignore = "build Windows input_probe; run under xvfb-run"]
+fn reentrant_cursor_changes_cannot_activate_capture() {
+    probe(&["--reentrant-cursor"]);
+}
+#[test]
+#[ignore = "build Windows input_probe; run under xvfb-run"]
+fn cleanup_callback_focus_change_prevents_synthetic_injection() {
+    probe(&["--release-focus"]);
+}
+
+#[test]
+#[ignore = "build Windows input_probe; run under xvfb-run"]
+fn double_clicks_are_captured_as_button_edges() {
+    probe(&["--mouse", "--double-click"]);
+}

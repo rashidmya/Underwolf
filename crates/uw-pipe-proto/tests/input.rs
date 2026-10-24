@@ -29,6 +29,11 @@ fn messages() -> Vec<InputMessage> {
         InputMessage::Ack(InputAck { epoch: 1, nonce: 3, through_seq: 5 }),
         InputMessage::Capture(CaptureRequest { epoch: 1, state_seq: 9, request_id: 7, on: true }),
         InputMessage::Result(CaptureResult { epoch: 1, state_seq: 9, request_id: 7, code: CaptureCode::Applied }),
+        InputMessage::Visibility { state_seq: 8, on: false },
+        InputMessage::ApplyCapture {
+            request: CaptureRequest { epoch: 1, state_seq: 9, request_id: 7, on: false },
+            visible: false,
+        },
     ]
 }
 fn wire(m: InputMessage) -> Vec<u8> {
@@ -79,6 +84,10 @@ fn malformed_input_is_rejected() {
         (6, 37, 1),
         (7, 36, 255),
         (7, 38, 1),
+        (8, 24, 2),
+        (8, 25, 1),
+        (9, 37, 2),
+        (9, 38, 1),
     ] {
         let mut bytes = wire(messages()[index].clone());
         bytes[offset] = value;

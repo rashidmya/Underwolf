@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+portable-atomic = "=1.15.0"
 uw-pipe-proto = { path = "../uw-pipe-proto" }
 
 [target.'cfg(windows)'.dependencies]

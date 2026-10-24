@@ -1,6 +1,6 @@
 //! Cursor originals and game-visible intent. Restoration runs on the captured GUI thread.
 use super::*;
-use crate::cursor::{CursorAction, CursorLedger, CursorSnapshot, Point, Rect, RestorePlan};
+use crate::cursor::{CursorAction, CursorJournal, CursorLedger, CursorSnapshot, Point, Rect, RestorePlan};
 use windows_sys::Win32::{
     Foundation::{GetLastError, POINT, RECT, SetLastError},
     System::Threading::GetCurrentThreadId,
@@ -13,6 +13,8 @@ static GET_CLIP: AtomicUsize = AtomicUsize::new(0);
 static SHOW: AtomicUsize = AtomicUsize::new(0);
 static SET_SHAPE: AtomicUsize = AtomicUsize::new(0);
 static GET_SHAPE: AtomicUsize = AtomicUsize::new(0);
+static JOURNAL: CursorJournal = CursorJournal::new();
+static BASELINE: Mutex<[u64; 3]> = Mutex::new([0; 3]);
 static RESTORE: Mutex<Option<RestorePlan>> = Mutex::new(None);
 static CURSOR: Mutex<Option<CursorLedger>> = Mutex::new(None);
 macro_rules! original {
@@ -61,14 +63,20 @@ pub(super) fn targets() -> Vec<hooks::Target> {
     ]
 }
 fn captured() -> bool {
-    !bypassed() && SHARED.get().is_some_and(|s| s.capture())
+    !bypassed()
+        && SHARED.get().is_some_and(|s| {
+            s.capture()
+                || (s.setting_up.load(Ordering::Acquire) && s.release.load(Ordering::Acquire) == 0
+                // SAFETY: setup virtualization still requires the owner foreground window.
+                && unsafe { GetForegroundWindow() as usize == s.hwnd() })
+        })
 }
 // ShowCursor and cursor shape belong to an input queue, not the process.
 // Attached threads share the focused window and the owner's cursor count.
 fn owner_queue() -> bool {
     SHARED.get().is_some_and(|s| {
         // SAFETY: thread-local queries take no pointer arguments.
-        unsafe { GetCurrentThreadId() == s.thread || GetFocus() as usize == s.hwnd }
+        unsafe { GetCurrentThreadId() == s.thread() || (s.hwnd() != 0 && GetFocus() as usize == s.hwnd()) }
     })
 }
 fn access<T>(f: impl FnOnce(&mut CursorLedger) -> T) -> Option<T> {
@@ -86,7 +94,39 @@ pub(super) fn real_position() -> Option<POINT> {
     // SAFETY: valid writable point and published trampoline.
     (unsafe { f(&mut p) } != 0).then_some(p)
 }
-pub(super) fn enter() -> bool {
+pub(super) fn prepare() -> Option<u64> {
+    let token = JOURNAL.begin_restore()?;
+    let Ok(mut baseline) = BASELINE.try_lock() else {
+        JOURNAL.cancel_restore();
+        return None;
+    };
+    *baseline = JOURNAL.checkpoint();
+    let success = enter_inner();
+    if success {
+        Some(token)
+    } else {
+        JOURNAL.cancel_restore();
+        None
+    }
+}
+pub(super) fn activate(token: u64, success: bool) -> bool {
+    if success {
+        JOURNAL.commit_restore(token)
+    } else {
+        JOURNAL.cancel_restore();
+        false
+    }
+}
+fn track() -> crate::cursor::CursorCall<'static> {
+    let transaction = JOURNAL.begin_call();
+    if transaction.interfered()
+        && let Some(s) = SHARED.get()
+    {
+        s.revoke(InputReason::Unavailable);
+    }
+    transaction
+}
+fn enter_inner() -> bool {
     let Some(position) = real_position() else { return false };
     let mut clip = RECT::default();
     let get = original!(GET_CLIP, unsafe extern "system" fn(*mut RECT) -> i32);
@@ -152,6 +192,15 @@ pub(super) fn enter() -> bool {
     }
 }
 pub(super) fn restore(foreground: bool, alive: bool) -> bool {
+    let Some(token) = JOURNAL.begin_restore() else { return false };
+    struct Attempt;
+    impl Drop for Attempt {
+        fn drop(&mut self) {
+            JOURNAL.cancel_restore();
+        }
+    }
+    let _attempt = Attempt;
+    let Ok(baseline) = BASELINE.try_lock() else { return false };
     let Ok(mut pending) = RESTORE.try_lock() else { return false };
     if pending.is_none() {
         let Ok(mut slot) = CURSOR.try_lock() else { return false };
@@ -159,6 +208,8 @@ pub(super) fn restore(foreground: bool, alive: bool) -> bool {
         *pending = Some(RestorePlan::new(ledger.release(foreground, alive)));
     }
     let plan = pending.as_mut().unwrap();
+    plan.retry(foreground, alive);
+    JOURNAL.merge(plan, *baseline);
     let pos = original!(SET_POS, unsafe extern "system" fn(i32, i32) -> i32);
     let clip = original!(CLIP, unsafe extern "system" fn(*const RECT) -> i32);
     let shape = original!(SET_SHAPE, unsafe extern "system" fn(HCURSOR) -> HCURSOR);
@@ -193,6 +244,9 @@ pub(super) fn restore(foreground: bool, alive: bool) -> bool {
             return false;
         }
     }
+    if !JOURNAL.commit_restore(token) {
+        return false;
+    }
     *pending = None;
     true
 }
@@ -218,12 +272,16 @@ unsafe extern "system" fn get_pos(out: *mut POINT) -> i32 {
 unsafe extern "system" fn set_pos(x: i32, y: i32) -> i32 {
     boundary(0, || {
         let f = original!(SET_POS, unsafe extern "system" fn(i32, i32) -> i32);
+        let transaction = track();
         let active = captured();
         let before = if active { real_position() } else { None };
         // SAFETY: scalar API arguments forwarded unchanged.
         let result = unsafe { f(x, y) };
         // SAFETY: thread-local error query takes no arguments.
         let error = unsafe { GetLastError() };
+        if result != 0 {
+            transaction.position(Point { x, y });
+        }
         if result != 0 && active {
             access(|l| l.position(Point { x, y }));
             if let Some(p) = before {
@@ -233,6 +291,7 @@ unsafe extern "system" fn set_pos(x: i32, y: i32) -> i32 {
                 }
             }
         }
+        drop(transaction);
         // SAFETY: preserve the original request's error state.
         unsafe { SetLastError(error) };
         result
@@ -241,11 +300,12 @@ unsafe extern "system" fn set_pos(x: i32, y: i32) -> i32 {
 unsafe extern "system" fn clip(rect: *const RECT) -> i32 {
     boundary(0, || {
         let f = original!(CLIP, unsafe extern "system" fn(*const RECT) -> i32);
+        let transaction = track();
         // SAFETY: forwards caller pointer to original validation.
         let result = unsafe { f(rect) };
         // SAFETY: thread-local error query takes no arguments.
         let error = unsafe { GetLastError() };
-        if result != 0 && captured() {
+        if result != 0 {
             let r = if rect.is_null() {
                 None
             } else {
@@ -253,12 +313,16 @@ unsafe extern "system" fn clip(rect: *const RECT) -> i32 {
                 let r = unsafe { *rect };
                 Some(Rect { left: r.left, top: r.top, right: r.right, bottom: r.bottom })
             };
-            access(|l| l.clip(r));
-            // SAFETY: release the clip imposed by the just-validated request while overlay owns pointer.
-            unsafe {
-                f(std::ptr::null());
+            transaction.clip(r);
+            if captured() {
+                access(|l| l.clip(r));
+                // SAFETY: release the clip imposed by the just-validated request while overlay owns pointer.
+                unsafe {
+                    f(std::ptr::null());
+                }
             }
         }
+        drop(transaction);
         // SAFETY: preserve original error state.
         unsafe { SetLastError(error) };
         result
@@ -286,6 +350,7 @@ unsafe extern "system" fn get_clip(out: *mut RECT) -> i32 {
 unsafe extern "system" fn show(on: i32) -> i32 {
     boundary(0, || {
         let f = original!(SHOW, unsafe extern "system" fn(i32) -> i32);
+        let _transaction = owner_queue().then(track);
         if captured()
             && owner_queue()
             && let Some(count) = access(|l| l.show(on != 0))
@@ -299,14 +364,28 @@ unsafe extern "system" fn show(on: i32) -> i32 {
 unsafe extern "system" fn set_shape(shape: HCURSOR) -> HCURSOR {
     boundary(std::ptr::null_mut(), || {
         let f = original!(SET_SHAPE, unsafe extern "system" fn(HCURSOR) -> HCURSOR);
+        if !owner_queue() {
+            // SAFETY: independent input queues retain native cursor ownership.
+            return unsafe { f(shape) };
+        }
+        let transaction = track();
         if captured()
-            && owner_queue()
             && let Some(old) = access(|l| l.shape(shape as usize))
         {
+            transaction.shape(shape as usize);
             return old as HCURSOR;
         }
-        // SAFETY: forwards caller cursor handle to the original.
-        unsafe { f(shape) }
+        // SAFETY: original scalar cursor handle; return is the previous cursor, including null.
+        let old = unsafe { f(shape) };
+        // SAFETY: immediate caller-visible native error snapshot.
+        let error = unsafe { GetLastError() };
+        transaction.shape(shape as usize);
+        drop(transaction);
+        // SAFETY: preserve native error state through bookkeeping.
+        unsafe {
+            SetLastError(error);
+        }
+        old
     })
 }
 unsafe extern "system" fn get_shape() -> HCURSOR {
@@ -321,4 +400,110 @@ unsafe extern "system" fn get_shape() -> HCURSOR {
         // SAFETY: original takes no arguments.
         unsafe { f() }
     })
+}
+
+/// The old input queue has terminated; its display counter no longer belongs to a live owner.
+/// Global confinement still needs releasing, but no old warp/shape/count is applied to a new queue.
+pub(super) fn abandon_queue() -> bool {
+    let Ok(mut pending) = RESTORE.try_lock() else { return false };
+    let Ok(mut ledger) = CURSOR.try_lock() else { return false };
+    let clip = original!(CLIP, unsafe extern "system" fn(*const RECT) -> i32);
+    // SAFETY: releasing process-global confinement is valid on this surviving worker thread.
+    if unsafe { clip(std::ptr::null()) } == 0 {
+        return false;
+    }
+    *pending = None;
+    *ledger = None;
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Barrier, OnceLock};
+    static FAIL: AtomicBool = AtomicBool::new(false);
+    static PAUSE: AtomicBool = AtomicBool::new(false);
+    static PAUSE_CLIP: AtomicBool = AtomicBool::new(false);
+    static BARRIERS: OnceLock<(Arc<Barrier>, Arc<Barrier>)> = OnceLock::new();
+    unsafe extern "system" fn controlled_position(x: i32, y: i32) -> i32 {
+        if x == 50 && FAIL.swap(false, Ordering::AcqRel) {
+            // SAFETY: simulate a native failure with its thread-local error.
+            unsafe {
+                SetLastError(5);
+            }
+            return 0;
+        }
+        if x == 50 && PAUSE.swap(false, Ordering::AcqRel) {
+            let (entered, resume) = BARRIERS.get().unwrap();
+            entered.wait();
+            resume.wait();
+        }
+        // SAFETY: test trampoline forwards the scalar native position request.
+        unsafe { SetCursorPos(x, y) }
+    }
+    unsafe extern "system" fn controlled_clip(rect: *const RECT) -> i32 {
+        // SAFETY: forward valid native clip arguments from the adapter/test owner.
+        let result = unsafe { ClipCursor(rect) };
+        // SAFETY: preserve native error through barrier synchronization.
+        let error = unsafe { GetLastError() };
+        if rect.is_null() && PAUSE_CLIP.swap(false, Ordering::AcqRel) {
+            let (entered, resume) = BARRIERS.get().unwrap();
+            entered.wait();
+            resume.wait();
+        }
+        // SAFETY: restore the native caller's thread-local error.
+        unsafe {
+            SetLastError(error);
+        }
+        result
+    }
+    fn pending_warp() {
+        *BASELINE.lock().unwrap() = JOURNAL.checkpoint();
+        *RESTORE.lock().unwrap() = Some(RestorePlan::new(vec![CursorAction::Warp(Point { x: 50, y: 60 })]));
+    }
+    #[test]
+    fn native_pending_and_inflight_restore_preserve_new_game_position() {
+        assert!(CursorJournal::lock_free());
+        for target in targets() {
+            target.original.store(target.address, Ordering::Release);
+        }
+        SET_POS.store(controlled_position as *const () as usize, Ordering::Release);
+        BARRIERS.set((Arc::new(Barrier::new(2)), Arc::new(Barrier::new(2)))).unwrap();
+        pending_warp();
+        FAIL.store(true, Ordering::Release);
+        assert!(!restore(true, true));
+        // SAFETY: scalar game call during pending restoration, through the adapter.
+        assert_ne!(unsafe { set_pos(100, 110) }, 0);
+        assert!(restore(true, true));
+        let actual = real_position().unwrap();
+        assert_eq!((actual.x, actual.y), (100, 110));
+        pending_warp();
+        PAUSE.store(true, Ordering::Release);
+        let owner = std::thread::spawn(|| restore(true, true));
+        let (entered, resume) = BARRIERS.get().unwrap();
+        entered.wait();
+        // SAFETY: a successful game request overlaps an already-issued owner restore.
+        assert_ne!(unsafe { set_pos(120, 130) }, 0);
+        resume.wait();
+        assert!(!owner.join().unwrap());
+        assert!(restore(true, true));
+        let actual = real_position().unwrap();
+        assert_eq!((actual.x, actual.y), (120, 130));
+        CLIP.store(controlled_clip as *const () as usize, Ordering::Release);
+        *BASELINE.lock().unwrap() = JOURNAL.checkpoint();
+        *RESTORE.lock().unwrap() = Some(RestorePlan::new(vec![CursorAction::Clip(None)]));
+        PAUSE_CLIP.store(true, Ordering::Release);
+        let owner = std::thread::spawn(|| restore(false, true));
+        entered.wait();
+        let r = RECT { left: 70, top: 80, right: 300, bottom: 320 };
+        // SAFETY: valid game clip arriving after owner unclip but before transaction commit.
+        assert_ne!(unsafe { clip(&r) }, 0);
+        resume.wait();
+        assert!(!owner.join().unwrap());
+        assert!(restore(false, true));
+        let mut actual = RECT::default();
+        // SAFETY: writable native rectangle for the final confinement query.
+        assert_ne!(unsafe { GetClipCursor(&mut actual) }, 0);
+        assert_ne!((actual.left, actual.top, actual.right, actual.bottom), (70, 80, 300, 320));
+    }
 }

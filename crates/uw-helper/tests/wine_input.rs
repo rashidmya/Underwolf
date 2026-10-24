@@ -371,3 +371,132 @@ fn receiver_stall_releases_even_when_helper_stdout_blocks() {
     assert!(helper.child.try_wait().unwrap().is_none(), "helper exited instead of remaining blocked");
     drop(paused);
 }
+
+fn visibility_commands(separate: bool) {
+    use uw_pipe_proto::input::{CaptureCode, InputAck};
+    let mut pfx = setup(if separate { "separate-hide" } else { "combined-hide" });
+    pfx.game = Some(wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).spawn().unwrap());
+    let mut helper = start_helper(&pfx, &[], &[]);
+    let connected = helper.next_event(Duration::from_secs(200));
+    assert!(connected.contains("bootstrap_connected"), "{connected}");
+    helper.send(&load_overlay_line(&to_wine_path(&win_artifact("uw_overlay.dll"))));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut ready = false;
+    let mut visible = false;
+    let mut entering = false;
+    let mut captured = false;
+    let mut applied = false;
+    let mut ack_id = 100;
+    let mut capture_seq = None;
+    let mut bad_ack = false;
+    let mut pong = false;
+    let mut off_seq = None;
+    let mut off_result = false;
+    let mut off_state = false;
+    let mut off_bell = false;
+    loop {
+        assert!(Instant::now() < deadline, "input session timed out; stderr: {:?}", helper.stderr_lines());
+        let event = helper.next_parsed(deadline.saturating_duration_since(Instant::now()));
+        eprintln!("input integration: {event:?}");
+        match event {
+            Event::StateSet { request_id: 4, seq } => {
+                capture_seq = Some(seq);
+                if !separate {
+                    off_seq = Some(seq);
+                }
+            }
+            Event::StateSet { request_id: 5, seq } => off_seq = Some(seq),
+            Event::Error { request_id: Some(700), code, .. } => {
+                assert_eq!(code, "input_bad_ack");
+                bad_ack = true;
+            }
+            Event::Pong { request_id: 701, .. } => pong = true,
+            Event::CaptureResult { capture_request_id: 4, state_seq, code, .. } => {
+                assert_eq!(code, CaptureCode::Applied);
+                assert_eq!(Some(state_seq), capture_seq);
+                off_result = true;
+            }
+            Event::Bell { applied_seq, .. } if off_seq == Some(applied_seq) => off_bell = true,
+            Event::InputReady { version: 1 } => ready = true,
+            Event::InputState { state } => {
+                if !visible {
+                    helper.send_cmd(&Cmd::SetState {
+                        request_id: 2,
+                        input_epoch: None,
+                        edit_mode: None,
+                        visible: Some(true),
+                    });
+                    visible = true;
+                }
+                captured |= state.active;
+                if off_seq.is_some() && !state.active && state.state_seq == off_seq {
+                    off_state = true;
+                }
+            }
+            Event::InputChallenge { challenge } => {
+                if ack_id == 100 {
+                    helper.send_cmd(&Cmd::InputAck {
+                        request_id: 700,
+                        ack: InputAck { epoch: challenge.epoch, nonce: 0, through_seq: 0 },
+                    });
+                    helper.send_cmd(&Cmd::Ping { request_id: 701 });
+                }
+                ack_id += 1;
+                helper.send_cmd(&Cmd::InputAck {
+                    request_id: ack_id,
+                    ack: InputAck {
+                        epoch: challenge.epoch,
+                        nonce: challenge.nonce,
+                        through_seq: challenge.through_seq,
+                    },
+                });
+
+                // Give the ack a full worker/owner turn before asking to capture.
+                if visible && !entering && ack_id >= 103 {
+                    helper.send_cmd(&Cmd::SetState {
+                        request_id: 3,
+                        input_epoch: Some(challenge.epoch),
+                        edit_mode: Some(true),
+                        visible: None,
+                    });
+                    entering = true;
+                }
+            }
+            Event::CaptureResult { capture_request_id: 3, epoch, code, .. } => {
+                assert_eq!(code, CaptureCode::Applied);
+                applied = true;
+                helper.send_cmd(&Cmd::SetState {
+                    request_id: 4,
+                    input_epoch: Some(epoch),
+                    edit_mode: Some(false),
+                    visible: if separate { None } else { Some(false) },
+                });
+                if separate {
+                    helper.send_cmd(&Cmd::SetState {
+                        request_id: 5,
+                        input_epoch: None,
+                        edit_mode: None,
+                        visible: Some(false),
+                    });
+                }
+            }
+            Event::Error { .. } => panic!("{event:?}; stderr: {:?}", helper.stderr_lines()),
+            _ => {}
+        }
+        if off_result && off_state && off_bell {
+            assert!(ready && applied && captured && bad_ack && pong);
+            break;
+        }
+    }
+}
+
+#[test]
+#[ignore = "needs production Windows artifacts; run under xvfb-run"]
+fn hide_and_edit_off_acknowledge_the_same_applied_sequence() {
+    visibility_commands(false);
+}
+#[test]
+#[ignore = "needs production Windows artifacts; run under xvfb-run"]
+fn separate_edit_and_hide_preserve_visibility_and_reject_malformed_ack() {
+    visibility_commands(true);
+}

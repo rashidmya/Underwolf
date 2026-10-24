@@ -54,3 +54,42 @@ fn failed_restoration_retries_without_rebalancing_completed_steps() {
     // Focus lost while the failed step was waiting: stale warp/clip/shape must disappear.
     assert_eq!(restore.next(false, true), None);
 }
+
+#[test]
+fn pending_cursor_restore_uses_later_successful_intent() {
+    let journal = CursorJournal::new();
+    let baseline = journal.checkpoint();
+    let mut plan = RestorePlan::new(vec![CursorAction::Warp(Point { x: 10, y: 20 })]);
+    let token = journal.begin_restore().unwrap();
+    let call = journal.begin_call();
+    call.position(Point { x: 30, y: 40 });
+    drop(call);
+    assert!(!journal.commit_restore(token));
+    journal.merge(&mut plan, baseline);
+    assert_eq!(plan.next(true, true), Some(CursorAction::Warp(Point { x: 30, y: 40 })));
+    let token = journal.begin_restore().unwrap();
+    assert!(journal.commit_restore(token));
+}
+
+#[test]
+fn merged_game_clip_cannot_remove_focus_loss_unclip() {
+    let journal = CursorJournal::new();
+    let baseline = journal.checkpoint();
+    let mut plan = RestorePlan::new(vec![CursorAction::Clip(None), CursorAction::Balance(0)]);
+    journal.begin_call().clip(Some(Rect { left: 10, top: 10, right: 100, bottom: 100 }));
+    journal.merge(&mut plan, baseline);
+    assert_eq!(plan.next(false, true), Some(CursorAction::Clip(None)));
+}
+
+#[test]
+fn focus_loss_retry_renews_unclip_after_completed_cleanup_was_overwritten() {
+    let journal = CursorJournal::new();
+    let baseline = journal.checkpoint();
+    let mut plan = RestorePlan::new(vec![CursorAction::Clip(None)]);
+    assert_eq!(plan.next(false, true), Some(CursorAction::Clip(None)));
+    plan.complete();
+    journal.begin_call().clip(Some(Rect { left: 10, top: 10, right: 100, bottom: 100 }));
+    plan.retry(false, true);
+    journal.merge(&mut plan, baseline);
+    assert_eq!(plan.next(false, true), Some(CursorAction::Clip(None)));
+}

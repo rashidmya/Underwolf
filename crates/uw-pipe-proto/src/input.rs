@@ -124,6 +124,8 @@ pub enum InputMessage {
     Challenge(InputChallenge),
     Ack(InputAck),
     Capture(CaptureRequest),
+    Visibility { state_seq: u64, on: bool },
+    ApplyCapture { request: CaptureRequest, visible: bool },
     Result(CaptureResult),
 }
 fn nonzero(n: u64) -> Result<(), ProtoError> {
@@ -156,7 +158,8 @@ impl InputMessage {
                 nonzero(c.epoch)?;
                 nonzero(c.nonce)
             }
-            Self::Capture(c) => nonzero(c.epoch),
+            Self::Capture(c) | Self::ApplyCapture { request: c, .. } => nonzero(c.epoch),
+            Self::Visibility { .. } => Ok(()),
             Self::Result(c) => nonzero(c.epoch),
         }
     }
@@ -215,6 +218,18 @@ impl InputMessage {
                 put(&mut p, c.request_id.to_le_bytes());
                 put(&mut p, [c.on as u8, 0, 0, 0]);
                 0x116
+            }
+            Self::Visibility { state_seq, on } => {
+                put(&mut p, state_seq.to_le_bytes());
+                put(&mut p, [*on as u8, 0, 0, 0]);
+                0x118
+            }
+            Self::ApplyCapture { request: c, visible } => {
+                put(&mut p, c.epoch.to_le_bytes());
+                put(&mut p, c.state_seq.to_le_bytes());
+                put(&mut p, c.request_id.to_le_bytes());
+                put(&mut p, [c.on as u8, *visible as u8, 0, 0]);
+                0x119
             }
             Self::Result(c) => {
                 put(&mut p, c.epoch.to_le_bytes());
@@ -286,6 +301,19 @@ impl InputMessage {
                 let r = CaptureRequest { epoch: c.u64()?, state_seq: c.u64()?, request_id: c.u32()?, on: c.boolean()? };
                 c.zero(3)?;
                 Self::Capture(r)
+            }
+            0x118 => {
+                let state_seq = c.u64()?;
+                let on = c.boolean()?;
+                c.zero(3)?;
+                Self::Visibility { state_seq, on }
+            }
+            0x119 => {
+                let request =
+                    CaptureRequest { epoch: c.u64()?, state_seq: c.u64()?, request_id: c.u32()?, on: c.boolean()? };
+                let visible = c.boolean()?;
+                c.zero(2)?;
+                Self::ApplyCapture { request, visible }
             }
             0x117 => {
                 let epoch = c.u64()?;

@@ -195,3 +195,55 @@ pub(super) fn expect_releases(records: &[Option<InputRecord>; 261]) -> bool {
     *slot = Some(pending);
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn native_raw_size_queries_and_failures_match_originals() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::*;
+        // SAFETY: initialize this test thread's UI queue before querying the raw buffer.
+        unsafe {
+            let mut message = MSG::default();
+            PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_NOREMOVE);
+        }
+        DATA.store(GetRawInputData as *const () as usize, Ordering::Release);
+        BUFFER.store(GetRawInputBuffer as *const () as usize, Ordering::Release);
+        for header in [1, std::mem::size_of::<RAWINPUTHEADER>() as u32] {
+            for hooked in [false, true] {
+                let mut size = 0;
+                // SAFETY: native null-buffer size query; deliberate invalid handle/header are API errors.
+                unsafe {
+                    SetLastError(0x1234);
+                    let result = if hooked {
+                        data(std::ptr::null_mut(), RID_INPUT, std::ptr::null_mut(), &mut size, header)
+                    } else {
+                        GetRawInputData(std::ptr::null_mut(), RID_INPUT, std::ptr::null_mut(), &mut size, header)
+                    };
+                    let error = GetLastError();
+                    let mut expected_size = 0;
+                    SetLastError(0x1234);
+                    let expected = GetRawInputData(
+                        std::ptr::null_mut(),
+                        RID_INPUT,
+                        std::ptr::null_mut(),
+                        &mut expected_size,
+                        header,
+                    );
+                    assert_eq!((result, size, error), (expected, expected_size, GetLastError()));
+                }
+            }
+            let mut size = 0;
+            // SAFETY: both calls use valid size pointers and a documented null output buffer.
+            unsafe {
+                SetLastError(0x1234);
+                let result = buffer(std::ptr::null_mut(), &mut size, header);
+                let error = GetLastError();
+                let mut expected_size = 0;
+                SetLastError(0x1234);
+                let expected = GetRawInputBuffer(std::ptr::null_mut(), &mut expected_size, header);
+                assert_eq!((result, size, error), (expected, expected_size, GetLastError()));
+            }
+        }
+    }
+}

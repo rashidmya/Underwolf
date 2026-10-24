@@ -86,3 +86,17 @@ fn healthy_idle_receiver_keeps_lease_and_challenges_are_bounded() {
     }
     assert!(!stalled.healthy(10000));
 }
+#[test]
+fn late_old_batch_cannot_publish_progress_into_a_new_epoch() {
+    let mut progress = SentProgress::default();
+    progress.announce(1);
+    assert!(progress.sent(1, 17));
+    // UI epoch changed before the old worker completion; no new epoch batch was sent.
+    assert_eq!(progress.through(2), 0);
+    progress.announce(2);
+    assert!(!progress.sent(1, 18));
+    assert_eq!(progress.through(2), 0);
+    assert!(progress.sent(2, 3));
+    progress.announce(1);
+    assert_eq!(progress.through(2), 3);
+}

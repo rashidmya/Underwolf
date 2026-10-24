@@ -94,13 +94,11 @@ fn run() {
         Box::new(move |event| match event {
             SessionEvent::Connected => callbacks.connect(),
             SessionEvent::Disconnected => callbacks.disconnect(),
-            SessionEvent::State { state, bits } => {
-                use uw_pipe_proto::bells::to_game::*;
-                if bits & (SHOW | HIDE) != 0 && bits & (EDIT_MODE_ON | EDIT_MODE_OFF) == 0 {
-                    callbacks.set_visible_state(state.visible, state.seq);
-                } else {
-                    callbacks.set_visible(state.visible);
-                }
+            // Input-capable state commands carry their own ordered snapshots; legacy bells coalesce.
+            SessionEvent::State { .. } => {}
+            SessionEvent::Visibility { state_seq, on } => callbacks.set_visible_state(on, state_seq),
+            SessionEvent::ApplyCapture { request, visible, state_seq } => {
+                callbacks.apply_capture(request, visible, state_seq);
             }
             SessionEvent::Capture(r) => {
                 let _ = callbacks.request(r);

@@ -201,3 +201,61 @@ fn reconnect_while_restoring_reissues_restore_for_the_new_epoch() {
     p.event(PolicyEvent::Restored { epoch: p.epoch() });
     assert_eq!(p.mode(), Mode::Inactive);
 }
+#[test]
+fn startup_modifier_aliases_do_not_leave_a_phantom_ctrl() {
+    let mut p = ready();
+    for vk in [17, 162] {
+        p.event(PolicyEvent::Snapshot(InputRecord::key(vk, 29, true, false, false, 0)));
+    }
+    key(&mut p, 162, false);
+    assert_eq!(p.modifiers() & 2, 0);
+    assert!(key(&mut p, 9, true).transition.is_none());
+}
+
+#[test]
+fn capture_entry_uses_current_lease_not_queued_health() {
+    let mut p = ready();
+    p.event_with_lease(PolicyEvent::Healthy(true), false);
+    let r = CaptureRequest { epoch: p.epoch(), state_seq: 7, request_id: 9, on: true };
+    let e = p.event_with_lease(PolicyEvent::Request(r), false);
+    assert_eq!(e.result.unwrap().code, CaptureCode::Unavailable);
+    assert!(e.transition.is_none());
+    p.event_with_lease(PolicyEvent::Input(InputRecord::key(0xa2, 0, true, false, false, 0)), false);
+    let e = p.event_with_lease(PolicyEvent::Input(InputRecord::key(9, 0, true, false, false, 0)), false);
+    assert!(e.transition.is_none());
+    assert!(!p.active());
+}
+
+#[test]
+fn lease_expiring_during_setup_never_reports_applied() {
+    let mut p = ready();
+    request(&mut p, true);
+    let e = p.event_with_lease(PolicyEvent::SetupFinished { epoch: p.epoch(), success: true }, false);
+    assert_eq!(e.result.unwrap().code, CaptureCode::SetupFailed);
+    assert!(!p.active());
+}
+
+#[test]
+fn hide_and_edit_off_apply_as_one_correlated_transaction() {
+    let mut p = ready();
+    enter(&mut p);
+    let r = CaptureRequest { epoch: p.epoch(), state_seq: 42, request_id: 19, on: false };
+    let e = p.event(PolicyEvent::CaptureState { request: r, visible: false, state_seq: 42 });
+    assert!(e.result.is_none());
+    assert!(matches!(e.transition, Some(Transition::Release { .. })));
+    let e = p.event(PolicyEvent::Restored { epoch: p.epoch() });
+    let result = e.result.unwrap();
+    assert_eq!(result.code, CaptureCode::Applied);
+    assert_eq!(result.state_seq, 42);
+    assert_eq!(result.request_id, 19);
+    assert_eq!(result.epoch, r.epoch);
+}
+
+#[test]
+fn overwritten_capture_state_never_applies_later_visibility() {
+    let mut p = ready();
+    let r = CaptureRequest { epoch: p.epoch(), state_seq: 42, request_id: 19, on: true };
+    let e = p.event(PolicyEvent::CaptureState { request: r, visible: false, state_seq: 43 });
+    assert_eq!(e.result.unwrap().code, CaptureCode::Superseded);
+    assert!(request(&mut p, true).transition.is_some());
+}
