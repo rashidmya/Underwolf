@@ -130,6 +130,22 @@ fn timestamps_only_move_forward_and_an_unchanged_value_keeps_its_own() {
         r.changes(&region).unwrap(),
         [value("match", "id", Some("123456789012"), 600)]
     );
+    // An unchanged null keeps its timestamp too.
+    assert!(info_set(&mut region, &layout, 2, None, 700));
+    assert_eq!(
+        r.changes(&region).unwrap(),
+        [value("match", "score", None, 700)]
+    );
+    assert!(!info_set(&mut region, &layout, 2, None, 800));
+    assert_eq!(r.changes(&region).unwrap(), []);
+}
+
+/// Catches `info_set` writing a value longer than its slot (it would run into the next slot).
+#[test]
+#[should_panic(expected = "info_set: a value over its max_len")]
+fn info_set_refuses_a_value_over_its_max_len() {
+    let (_, layout, mut region) = store();
+    info_set(&mut region, &layout, 1, Some("1234567890123"), 1);
 }
 
 /// Catches `changes` reporting a key twice, or one that did not move since the last read.
@@ -252,6 +268,14 @@ fn every_read_checks_the_header_and_each_slot() {
     assert_eq!(r.changes(&b), Err(ReadError::Version(2)));
     let mut b = region.clone();
     b[20] = 1; // a reserved byte: still a different header from the one attached
+    assert_eq!(
+        r.changes(&b),
+        Err(ReadError::Layout(
+            "info header changed under the same producer".into()
+        ))
+    );
+    let mut b = region.clone();
+    b[32 + 4 + 2] ^= 1; // a byte of a schema name: the schema still parses, but is not the one attached
     assert_eq!(
         r.changes(&b),
         Err(ReadError::Layout(
