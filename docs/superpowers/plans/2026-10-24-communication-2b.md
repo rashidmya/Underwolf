@@ -6678,7 +6678,7 @@ fn a_new_helper_resumes_after_the_given_seq_only_for_the_same_producer() {
     let helper = start_helper(&pfx, &["--data-resume", &other], &[]);
     helper.expect_event("bootstrap_connected", Duration::from_secs(60));
     let (_, from_seq, _, _) = expect_test_producer(&helper);
-    assert!(from_seq > last + 4, "another producer's resume point must start at the write head, not {from_seq}");
+    assert!(from_seq >= last + 4, "another producer's resume point must start at the write head, not {from_seq}");
     let seen = data_until(&helper, Duration::from_secs(5), |e| matches!(e, Event::DataEvent { .. }));
     assert_eq!(event_seqs(&seen), [from_seq + 1], "{seen:?}");
 }

@@ -39,7 +39,7 @@ mod win {
     use uw_pipe_proto::state;
     use windows_sys::Win32::Foundation::{
         CloseHandle, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
-        WAIT_OBJECT_0,
+        WAIT_ABANDONED, WAIT_OBJECT_0,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, OPEN_EXISTING, ReadFile, WriteFile,
@@ -213,11 +213,26 @@ mod win {
             )
         };
         if l.is_null() || b.is_null() {
+            // SAFETY: closes the handles that did open; each non-null handle is valid and owned here.
+            unsafe {
+                if !l.is_null() {
+                    CloseHandle(l);
+                }
+                if !b.is_null() {
+                    CloseHandle(b);
+                }
+            }
             say("no data channel");
             return 7;
         }
         // SAFETY: waits on the mutex handle opened above.
-        if unsafe { WaitForSingleObject(l, 5000) } != WAIT_OBJECT_0 {
+        let waited = unsafe { WaitForSingleObject(l, 5000) };
+        if !matches!(waited, WAIT_OBJECT_0 | WAIT_ABANDONED) {
+            // SAFETY: closes the handles opened above.
+            unsafe {
+                CloseHandle(l);
+                CloseHandle(b);
+            }
             say("lock busy");
             return 8;
         }
@@ -254,11 +269,26 @@ mod win {
             )
         };
         if l.is_null() || m.is_null() {
+            // SAFETY: closes the handles that did open; each non-null handle is valid and owned here.
+            unsafe {
+                if !l.is_null() {
+                    CloseHandle(l);
+                }
+                if !m.is_null() {
+                    CloseHandle(m);
+                }
+            }
             say("no data channel");
             return 7;
         }
         // SAFETY: waits on the mutex handle opened above.
-        if unsafe { WaitForSingleObject(l, 5000) } != WAIT_OBJECT_0 {
+        let waited = unsafe { WaitForSingleObject(l, 5000) };
+        if !matches!(waited, WAIT_OBJECT_0 | WAIT_ABANDONED) {
+            // SAFETY: closes the handles opened above.
+            unsafe {
+                CloseHandle(l);
+                CloseHandle(m);
+            }
             say("lock busy");
             return 8;
         }
