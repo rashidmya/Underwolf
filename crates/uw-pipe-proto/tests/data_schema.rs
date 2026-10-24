@@ -1,6 +1,6 @@
 use uw_pipe_proto::data::{
-    FORMAT_VERSION, HELLO_SIZE, Hello, MAX_KEYS, MAX_NAME_LEN, MAX_VALUE_LEN, ReadError, Schema,
-    SchemaCategory, SchemaError, SchemaKey, read_hello, write_hello,
+    FORMAT_VERSION, HELLO_SIZE, Hello, MAX_CATEGORIES, MAX_KEYS, MAX_NAME_LEN, MAX_VALUE_LEN,
+    ReadError, Schema, SchemaCategory, SchemaError, SchemaKey, read_hello, write_hello,
 };
 
 fn test_schema() -> Schema {
@@ -206,9 +206,45 @@ fn schema_bytes_that_do_not_fit_are_refused() {
         Schema::parse(&too_big),
         Err(SchemaError::MaxLenTooLarge { .. })
     ));
-    // A huge category count with nothing behind it ends early instead of looping.
+    // A huge category count with nothing behind it is refused before anything is allocated.
     assert_eq!(
         Schema::parse(&u32::MAX.to_le_bytes()),
-        Err(SchemaError::Malformed("the schema ends early"))
+        Err(SchemaError::TooManyCategories(u32::MAX as usize))
     );
+}
+
+/// Catches a schema with more categories than `MAX_CATEGORIES`, or one category with more keys
+/// than `MAX_KEYS`, being accepted by `new` or `parse`.
+#[test]
+fn too_many_categories_or_keys_are_refused() {
+    let over = MAX_CATEGORIES + 1;
+    let mut bytes = (over as u32).to_le_bytes().to_vec();
+    for _ in 0..over {
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // an empty name
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // no keys
+    }
+    assert_eq!(
+        Schema::parse(&bytes),
+        Err(SchemaError::TooManyCategories(over))
+    );
+    let categories: Vec<SchemaCategory> = (0..over)
+        .map(|i| SchemaCategory::new(&format!("c{i}"), &[]))
+        .collect();
+    assert_eq!(
+        Schema::new(categories),
+        Err(SchemaError::TooManyCategories(over))
+    );
+
+    let over = MAX_KEYS + 1;
+    let mut bytes = 1u32.to_le_bytes().to_vec();
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.push(b'c');
+    bytes.extend_from_slice(&(over as u32).to_le_bytes());
+    // Bytes for MAX_KEYS keys only: the cap must fire on the count, before the next key is read.
+    for _ in 0..MAX_KEYS {
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.push(b'k');
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+    }
+    assert_eq!(Schema::parse(&bytes), Err(SchemaError::TooManyKeys(over)));
 }

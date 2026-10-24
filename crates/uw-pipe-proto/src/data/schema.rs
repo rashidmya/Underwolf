@@ -5,7 +5,8 @@
 //!
 //! The producer builds it once, at create (`Schema::new`); the helper parses the copy it finds in
 //! the info store (`Schema::parse`). Both apply the design's limits: names of at most
-//! `MAX_NAME_LEN` bytes, a `max_len` of at most `MAX_VALUE_LEN`, at most `MAX_KEYS` keys. A name
+//! `MAX_NAME_LEN` bytes, a `max_len` of at most `MAX_VALUE_LEN`, at most `MAX_KEYS` keys and at most
+//! `MAX_CATEGORIES` categories. A name
 //! used twice (a category, or a key within its category) does not fit either.
 
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,7 @@ use serde::{Deserialize, Serialize};
 pub const MAX_NAME_LEN: usize = 255;
 pub const MAX_VALUE_LEN: u32 = 64 * 1024;
 pub const MAX_KEYS: usize = 1024;
+pub const MAX_CATEGORIES: usize = 1024;
 
 /// One key and the most bytes its value may have. The same shape is in `data_connected`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +55,7 @@ pub enum SchemaError {
         max_len: u32,
     },
     TooManyKeys(usize),
+    TooManyCategories(usize),
     /// A category, or a key within its category (`category.key`), named twice.
     Duplicate(String),
     /// Serialized bytes that end early, run on, or hold a name that is not UTF-8.
@@ -67,6 +70,9 @@ impl std::fmt::Display for SchemaError {
                 write!(f, "{key}: max_len {max_len}, over {MAX_VALUE_LEN}")
             }
             SchemaError::TooManyKeys(n) => write!(f, "{n} keys, over {MAX_KEYS}"),
+            SchemaError::TooManyCategories(n) => {
+                write!(f, "{n} categories, over {MAX_CATEGORIES}")
+            }
             SchemaError::Duplicate(name) => write!(f, "{name} is named twice"),
             SchemaError::Malformed(why) => f.write_str(why),
         }
@@ -82,6 +88,9 @@ pub struct Schema {
 }
 
 fn check(categories: &[SchemaCategory]) -> Result<usize, SchemaError> {
+    if categories.len() > MAX_CATEGORIES {
+        return Err(SchemaError::TooManyCategories(categories.len()));
+    }
     let key_count: usize = categories.iter().map(|c| c.keys.len()).sum();
     if key_count > MAX_KEYS {
         return Err(SchemaError::TooManyKeys(key_count));
@@ -208,7 +217,11 @@ impl Schema {
         let mut c = Cursor(b);
         let mut categories = Vec::new();
         let mut keys_seen = 0usize;
-        for _ in 0..c.u32()? {
+        let category_count = c.u32()? as usize;
+        if category_count > MAX_CATEGORIES {
+            return Err(SchemaError::TooManyCategories(category_count));
+        }
+        for _ in 0..category_count {
             let category = c.name()?;
             let mut keys = Vec::new();
             for _ in 0..c.u32()? {

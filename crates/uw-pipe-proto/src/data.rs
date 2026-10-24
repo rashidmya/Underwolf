@@ -16,7 +16,8 @@ pub use info::{
     INFO_HEADER_SIZE, INFO_MAGIC, InfoLayout, InfoReader, InfoValue, info_init, info_set,
 };
 pub use schema::{
-    MAX_KEYS, MAX_NAME_LEN, MAX_VALUE_LEN, Schema, SchemaCategory, SchemaError, SchemaKey,
+    MAX_CATEGORIES, MAX_KEYS, MAX_NAME_LEN, MAX_VALUE_LEN, Schema, SchemaCategory, SchemaError,
+    SchemaKey,
 };
 
 /// The format version of the hello block, the info store and the event ring.

@@ -130,7 +130,7 @@ The rules:
   value keeps its slot and its timestamp.
 - **A busy lock:** the producer keeps the newest value per key, each with its own timestamp, and
   writes them on the next call.
-- **Limits:** names of at most 255 bytes, `max_len` of at most 64 KiB, at most 1024 keys.
+- **Limits:** names of at most 255 bytes, `max_len` of at most 64 KiB, at most 1024 keys, at most 1024 categories.
 
 **Event ring:** a header, then 30 records.
 - **The header:** magic `UWDE`, version u32 (1), `write_seq u64 @8` (the last seq written), and
