@@ -144,11 +144,14 @@ fn wait_game_in(pfx: &Prefix, within: Duration) {
 
 /// A running `uw-helper64.exe`: its JSON-lines events arrive on a channel from a reader thread,
 /// its stderr diagnostics accumulate in a shared buffer (so a test can assert which hook fired or
-/// that the hook was skipped), commands go to its stdin. Dropping it kills the helper.
+/// that the hook was skipped), commands go to its stdin. The game-data channel's events (design
+/// 2b) arrive on a channel of their own, `data`, so the control-channel tests never see them.
+/// Dropping it kills the helper.
 struct Helper {
     child: Child,
     stdin: Option<ChildStdin>,
     events: Receiver<String>,
+    data: Receiver<String>,
     stderr: Arc<Mutex<Vec<String>>>,
 }
 
@@ -241,6 +244,22 @@ impl Helper {
         self.send(&line);
     }
 
+    /// The next game-data event, parsed (a line that is not an event fails the test).
+    fn next_data(&self, within: Duration) -> Event {
+        let line = self
+            .data
+            .recv_timeout(within)
+            .unwrap_or_else(|_| panic!("no data event within {within:?}; stderr: {:?}", self.stderr_lines()));
+        Event::parse(&line).unwrap_or_else(|e| panic!("not an event ({e}): {line}"))
+    }
+
+    /// No game-data event within `d`.
+    fn expect_data_quiet(&self, d: Duration) {
+        if let Ok(line) = self.data.recv_timeout(d) {
+            panic!("expected no data event, got {line}");
+        }
+    }
+
     /// Wait up to `within` for a stderr diagnostic line containing `needle`.
     fn wait_stderr(&self, needle: &str, within: Duration) -> bool {
         let start = Instant::now();
@@ -264,6 +283,22 @@ impl Drop for Helper {
     }
 }
 
+/// Whether an event line is the game-data channel's (design 2b): its five events, and the errors
+/// whose code starts with `data_`.
+fn is_data_line(line: &str) -> bool {
+    match Event::parse(line) {
+        Ok(
+            Event::DataConnected { .. }
+            | Event::Info { .. }
+            | Event::DataEvent { .. }
+            | Event::DataLost { .. }
+            | Event::DataDisconnected { .. },
+        ) => true,
+        Ok(Event::Error { code, .. }) => code.starts_with("data_"),
+        _ => false,
+    }
+}
+
 /// Start the helper against `uw-test-game.exe` in `pfx`, with extra args and environment.
 fn start_helper(pfx: &Prefix, extra: &[&str], envs: &[(&str, &str)]) -> Helper {
     let mut cmd = wine_cmd(pfx, &win_artifact("uw-helper64.exe"));
@@ -280,10 +315,15 @@ fn start_helper(pfx: &Prefix, extra: &[&str], envs: &[(&str, &str)]) -> Helper {
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
     let (tx, rx) = channel();
+    let (data_tx, data_rx) = channel();
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
             let Ok(line) = line else { break };
-            if line.trim_start().starts_with('{') && tx.send(line).is_err() {
+            if !line.trim_start().starts_with('{') {
+                continue;
+            }
+            let to = if is_data_line(&line) { &data_tx } else { &tx };
+            if to.send(line).is_err() {
                 break;
             }
         }
@@ -296,7 +336,7 @@ fn start_helper(pfx: &Prefix, extra: &[&str], envs: &[(&str, &str)]) -> Helper {
             diag2.lock().unwrap().push(line);
         }
     });
-    Helper { child, stdin, events: rx, stderr: diag }
+    Helper { child, stdin, events: rx, data: data_rx, stderr: diag }
 }
 
 fn load_overlay_line(path_wine: &str) -> String {
@@ -822,4 +862,63 @@ fn set_state_is_busy_under_the_lock_and_a_busy_bell_is_retried() {
     assert_eq!(helper.next_parsed(Duration::from_secs(5)), Event::StateSet { request_id: 5, seq: 2 });
     p.expect_line("bell 6 seq 2", Duration::from_secs(5));
     assert_eq!(helper.next_parsed(Duration::from_secs(5)), applied(2));
+}
+
+// --- The game-data channel (plan 2b) ---
+
+/// The helper with `args` must exit 2 at once and say `why` (design 2b: a malformed data argument
+/// is a usage error, like the helper's other arguments).
+fn assert_usage_error(pfx: &Prefix, args: &[&str], why: &str) {
+    let mut h = start_helper(pfx, args, &[]);
+    let status = h.wait_exit(Duration::from_secs(30));
+    assert_eq!(status.and_then(|s| s.code()), Some(2), "{args:?}: stderr: {:?}", h.stderr_lines());
+    assert!(h.wait_stderr(why, Duration::from_secs(2)), "{args:?}: stderr: {:?}", h.stderr_lines());
+}
+
+/// Catches a data channel of another format version being read (design 2b "Failures": `error
+/// data_version_mismatch`, `detail` the channel id, once per producer, then nothing more from
+/// it), the data thread not starting with the relay, and a malformed `--data-channel` or
+/// `--data-resume` being accepted.
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn a_data_channel_of_another_version_is_data_version_mismatch_once() {
+    let mut pfx = setup("dataversion");
+    pfx.game = Some(
+        wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).args(["--bad-data-channel", "version"]).spawn().unwrap(),
+    );
+    wait_game_in(&pfx, Duration::from_secs(180));
+    assert_usage_error(&pfx, &["--data-channel", "x"], "--data-channel needs a channel number");
+    assert_usage_error(&pfx, &["--data-resume", "7"], r#"--data-resume: "7" is not <producer_id>:<seq>"#);
+    assert_usage_error(&pfx, &["--data-resume"], "--data-resume needs <producer_id>:<seq>");
+
+    let helper = start_helper(&pfx, &[], &[]);
+    helper.expect_event("bootstrap_connected", Duration::from_secs(200));
+    assert_eq!(helper.next_data(Duration::from_secs(10)), Event::data_error("data_version_mismatch", 1));
+    assert!(
+        helper.wait_stderr("data channel 1: format version 2, not 1", Duration::from_secs(2)),
+        "stderr: {:?}",
+        helper.stderr_lines()
+    );
+    // Once per producer: it now only waits for `disconnect`.
+    helper.expect_data_quiet(Duration::from_secs(3));
+}
+
+/// Catches a data channel whose layout does not fit being read (design 2b "Failures": `error
+/// data_bad_layout`, `detail` the channel id, once per producer, then nothing more from it).
+#[test]
+#[ignore = "needs Wine and the x86_64-pc-windows-gnu artifacts"]
+fn a_data_channel_with_a_bad_layout_is_data_bad_layout_once() {
+    let mut pfx = setup("datalayout");
+    pfx.game = Some(
+        wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).args(["--bad-data-channel", "layout"]).spawn().unwrap(),
+    );
+    let helper = start_helper(&pfx, &[], &[]);
+    helper.expect_event("bootstrap_connected", Duration::from_secs(200));
+    assert_eq!(helper.next_data(Duration::from_secs(10)), Event::data_error("data_bad_layout", 1));
+    assert!(
+        helper.wait_stderr("data channel 1: hello block magic is not UWDH", Duration::from_secs(2)),
+        "stderr: {:?}",
+        helper.stderr_lines()
+    );
+    helper.expect_data_quiet(Duration::from_secs(3));
 }

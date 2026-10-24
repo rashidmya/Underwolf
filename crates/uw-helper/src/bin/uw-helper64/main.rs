@@ -1,15 +1,19 @@
-//! `uw-helper64 <game-exe> --bootstrap <windows path> [--fallback]`
+//! `uw-helper64 <game-exe> --bootstrap <windows path> [--fallback] [--data-channel <n>]
+//!   [--data-resume <producer_id>:<seq>]`
 //!
 //! Runs inside the game's Wine session. Creates the control channel (doorbells, mask region,
 //! state block, overlay pipe) and the bootstrap pipe, finds the game's UI thread and sets a thread
 //! hook that makes Wine load `uw_bootstrap64.dll` into the game (or, if a bootstrap is already
 //! pinned, skips the hook), then serves both pipes and relays JSON lines: commands
 //! (`load_overlay`, `set_state`, `ping`) on stdin, events on stdout, each reply echoing its
-//! command's `request_id`; diagnostics on stderr.
+//! command's `request_id`; diagnostics on stderr. With the relay it starts the data thread, which
+//! reads the game-data channel `--data-channel` (default 1) and relays it on the same stdout,
+//! resuming after `--data-resume` when that names the same producer (design 2b).
 //!
 //! Modules: `win32` (the real `Win32` for `decide`, and the channel), `pipe_server` (the
 //! overlapped pipe server both pipes use), `commands` (the stdin reader; stdin closing ends the
-//! helper in every phase), `relay` (the one wait loop, and the game watcher).
+//! helper in every phase), `relay` (the one wait loop, and the game watcher), `data` (the data
+//! thread).
 
 #[cfg(not(windows))]
 fn main() {
@@ -19,6 +23,8 @@ fn main() {
 
 #[cfg(windows)]
 mod commands;
+#[cfg(windows)]
+mod data;
 #[cfg(windows)]
 mod pipe_server;
 #[cfg(windows)]
@@ -46,15 +52,39 @@ pub(crate) fn wait_ms(ms: u64) -> u32 {
 #[cfg(windows)]
 fn helper_main() -> i32 {
     use uw_helper::decide::{run, Config, Outcome};
+    use uw_pipe_proto::data::{ResumePoint, DEFAULT_CHANNEL};
 
+    const USAGE: &str = "usage: uw-helper64 <game-exe> --bootstrap <path> [--fallback] \
+                         [--data-channel <n>] [--data-resume <producer_id>:<seq>]";
     let mut args = std::env::args().skip(1);
     let exe = args.next().unwrap_or_default();
     let mut bootstrap = String::new();
     let mut force_fallback = false;
+    let mut data_channel = DEFAULT_CHANNEL;
+    let mut data_resume: Option<ResumePoint> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--bootstrap" => bootstrap = args.next().unwrap_or_default(),
             "--fallback" => force_fallback = true,
+            // A malformed value is a usage error, like the other arguments (design 2b).
+            "--data-channel" => match args.next().and_then(|v| v.parse().ok()) {
+                Some(n) => data_channel = n,
+                None => {
+                    eprintln!("[uw-helper64] --data-channel needs a channel number; {USAGE}");
+                    return 2;
+                }
+            },
+            "--data-resume" => match args.next().map(|v| v.parse::<ResumePoint>()) {
+                Some(Ok(r)) => data_resume = Some(r),
+                Some(Err(e)) => {
+                    eprintln!("[uw-helper64] --data-resume: {e}; {USAGE}");
+                    return 2;
+                }
+                None => {
+                    eprintln!("[uw-helper64] --data-resume needs <producer_id>:<seq>; {USAGE}");
+                    return 2;
+                }
+            },
             other => {
                 eprintln!("[uw-helper64] unknown argument {other}");
                 return 2;
@@ -62,7 +92,7 @@ fn helper_main() -> i32 {
         }
     }
     if exe.is_empty() || bootstrap.is_empty() {
-        eprintln!("usage: uw-helper64 <game-exe> --bootstrap <path> [--fallback]");
+        eprintln!("{USAGE}");
         return 2;
     }
 
@@ -95,6 +125,8 @@ fn helper_main() -> i32 {
         Outcome::Connected { .. } => {
             let pid = w.pid;
             if let (Some(channel), Some(pipe)) = (w.channel.as_mut(), w.pipe.as_mut()) {
+                // The data thread starts with the relay (design 2b flow step 2).
+                data::spawn(pid, data_channel, data_resume);
                 relay::run(pid, &commands, channel, pipe, status_timeout_ms, ping_timeout_ms);
             }
             0
