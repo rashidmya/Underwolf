@@ -337,7 +337,9 @@ pub fn encode_input(m: &OverlayMessage) -> Result<Vec<u8>, ProtoError> {
     match m {
         OverlayMessage::Routing(m) => {
             let (tag, payload) = m.encode_payload()?;
-            if payload.len() > MAX_PAYLOAD { return Err(ProtoError::PayloadTooLarge); }
+            if payload.len() > MAX_PAYLOAD {
+                return Err(ProtoError::PayloadTooLarge);
+            }
             Ok(frame(tag, &payload))
         }
         OverlayMessage::Input(m) => {
@@ -351,7 +353,9 @@ pub fn encode_input(m: &OverlayMessage) -> Result<Vec<u8>, ProtoError> {
 pub fn decode_overlay(bytes: &[u8]) -> Result<OverlayMessage, ProtoError> {
     let (ty, payload) = unframe(bytes)?;
     if (0x120..=0x12b).contains(&ty) {
-        if bytes.len() != HEADER_LEN + payload.len() { return Err(ProtoError::BadInput); }
+        if bytes.len() != HEADER_LEN + payload.len() {
+            return Err(ProtoError::BadInput);
+        }
         return crate::routing::RoutingMessage::decode(ty, payload).map(OverlayMessage::Routing);
     }
     if (0x110..=0x119).contains(&ty) {

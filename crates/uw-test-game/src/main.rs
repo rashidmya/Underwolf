@@ -37,9 +37,8 @@ mod win {
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostQuitMessage,
-        RegisterClassW, ShowWindow, TranslateMessage, CW_USEDEFAULT, MSG, SW_SHOW, WM_DESTROY,
-        WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+        CW_USEDEFAULT, CreateWindowExW, DispatchMessageW, GetMessageW, MSG, RegisterClassW, SW_SHOW, ShowWindow,
+        TranslateMessage, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
     };
     use windows_sys::core::w;
 
@@ -47,9 +46,9 @@ mod win {
     /// and size, layout version 2. The handle and view are kept for the life of the process.
     pub fn hold_bad_state_block() {
         use uw_pipe_proto::names::state_name;
-        use uw_pipe_proto::state::{init_header, BLOCK_SIZE};
+        use uw_pipe_proto::state::{BLOCK_SIZE, init_header};
         use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
-        use windows_sys::Win32::System::Memory::{CreateFileMappingW, MapViewOfFile, FILE_MAP_WRITE, PAGE_READWRITE};
+        use windows_sys::Win32::System::Memory::{CreateFileMappingW, FILE_MAP_WRITE, MapViewOfFile, PAGE_READWRITE};
         use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 
         // SAFETY: no arguments.
@@ -58,7 +57,14 @@ mod win {
         // SAFETY: a named paging-file mapping and a write view of it, both deliberately kept open
         // (never closed or unmapped) until the process exits.
         unsafe {
-            let h = CreateFileMappingW(INVALID_HANDLE_VALUE, std::ptr::null(), PAGE_READWRITE, 0, BLOCK_SIZE as u32, name.as_ptr());
+            let h = CreateFileMappingW(
+                INVALID_HANDLE_VALUE,
+                std::ptr::null(),
+                PAGE_READWRITE,
+                0,
+                BLOCK_SIZE as u32,
+                name.as_ptr(),
+            );
             assert!(!h.is_null(), "CreateFileMappingW failed");
             let view = MapViewOfFile(h, FILE_MAP_WRITE, 0, 0, 0);
             assert!(!view.Value.is_null(), "MapViewOfFile failed");
@@ -73,10 +79,10 @@ mod win {
     /// format version 2 (`version`) or a wrong magic (`layout`). `connect` is created set. The
     /// handles and the view are kept for the life of the process.
     pub fn hold_bad_data_channel(kind: &str) {
-        use uw_pipe_proto::data::{write_hello, DEFAULT_CHANNEL, HELLO_SIZE};
-        use uw_pipe_proto::names::{data_name, DataObject};
+        use uw_pipe_proto::data::{DEFAULT_CHANNEL, HELLO_SIZE, write_hello};
+        use uw_pipe_proto::names::{DataObject, data_name};
         use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
-        use windows_sys::Win32::System::Memory::{CreateFileMappingW, MapViewOfFile, FILE_MAP_WRITE, PAGE_READWRITE};
+        use windows_sys::Win32::System::Memory::{CreateFileMappingW, FILE_MAP_WRITE, MapViewOfFile, PAGE_READWRITE};
         use windows_sys::Win32::System::Threading::{CreateEventW, CreateMutexW, GetCurrentProcessId};
 
         // SAFETY: no arguments.
@@ -125,14 +131,98 @@ mod win {
     }
 
     static INPUT_LOG: std::sync::OnceLock<std::sync::Mutex<std::fs::File>> = std::sync::OnceLock::new();
+    static REPLACING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    fn trace(message: &str) {
+        use std::io::Write;
+        if let Some(log) = INPUT_LOG.get()
+            && let Ok(mut log) = log.lock()
+        {
+            let _ = writeln!(log, "{message}");
+        }
+    }
     unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        use windows_sys::Win32::UI::WindowsAndMessaging::*;
+        if msg == WM_APP + 27 && std::env::var_os("UW_TEST_ROUTING_CONTROLS").is_some() {
+            // SAFETY: these controls operate only on the stand-in game's own UI thread/windows.
+            unsafe {
+                match wparam {
+                    1 => {
+                        let away = CreateWindowExW(
+                            0,
+                            w!("STATIC"),
+                            w!("uw-test-away"),
+                            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                            0,
+                            0,
+                            200,
+                            150,
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                            GetModuleHandleW(std::ptr::null()),
+                            std::ptr::null(),
+                        );
+                        assert!(!away.is_null());
+                        SetForegroundWindow(away);
+                        assert_ne!(SetTimer(hwnd, 27, 350, None), 0);
+                        trace("control focus-away");
+                    }
+                    2 => {
+                        SetWindowTextW(hwnd, w!("uw-test-retiring"));
+                        let replacement = CreateWindowExW(
+                            0,
+                            w!("UwTestGameWindow"),
+                            w!("uw-test-game"),
+                            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                            40,
+                            40,
+                            640,
+                            480,
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                            GetModuleHandleW(std::ptr::null()),
+                            std::ptr::null(),
+                        );
+                        assert!(!replacement.is_null());
+                        REPLACING.store(true, std::sync::atomic::Ordering::Release);
+                        DestroyWindow(hwnd);
+                        REPLACING.store(false, std::sync::atomic::Ordering::Release);
+                        SetForegroundWindow(replacement);
+                        trace("control replacement");
+                    }
+                    3 => {
+                        assert!(!windows_sys::Win32::System::LibraryLoader::LoadLibraryW(w!("dinput8.dll")).is_null());
+                        trace("control optional-loaded");
+                    }
+                    _ => {}
+                }
+            }
+            return 0;
+        }
+        if msg == WM_TIMER && wparam == 27 {
+            // SAFETY: timer and temporary STATIC window belong to this scratch fixture.
+            unsafe {
+                KillTimer(hwnd, 27);
+                let away = FindWindowW(w!("STATIC"), w!("uw-test-away"));
+                if !away.is_null() {
+                    DestroyWindow(away);
+                }
+                SetForegroundWindow(hwnd);
+            }
+            trace("control focus-restored");
+            return 0;
+        }
         if msg == windows_sys::Win32::UI::WindowsAndMessaging::WM_KEYDOWN {
             use std::io::Write;
-            if let Some(log) = INPUT_LOG.get() && let Ok(mut log) = log.lock() {
+            if let Some(log) = INPUT_LOG.get()
+                && let Ok(mut log) = log.lock()
+            {
                 let _ = writeln!(log, "key {wparam}");
             }
         }
         if msg == WM_DESTROY {
+            if REPLACING.load(std::sync::atomic::Ordering::Acquire) {
+                return 0;
+            }
             // SAFETY: standard teardown.
             unsafe { PostQuitMessage(0) };
             return 0;

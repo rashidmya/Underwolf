@@ -283,7 +283,7 @@ pub fn run() {
         unsafe {
             DestroyWindow(hwnd);
         }
-        println!("PASS routing probe directinput");
+        println!("PASS routing probe {case}");
         return;
     }
     if case == "sequence-reentrant" {

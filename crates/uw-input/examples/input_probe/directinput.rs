@@ -13,11 +13,14 @@ use windows_sys::{
     core::{GUID, w},
 };
 fn key(down: bool) {
+    scan_key(0x1e, down);
+}
+fn scan_key(scan: u16, down: bool) {
     let input = INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
-                wScan: 0x1e,
+                wScan: scan,
                 dwFlags: KEYEVENTF_SCANCODE | if down { 0 } else { KEYEVENTF_KEYUP },
                 ..Default::default()
             },
@@ -210,6 +213,7 @@ impl Device {
 pub(super) struct Fixture {
     factories: Vec<Reference>,
     devices: Vec<Device>,
+    late_devices: Vec<Device>,
     hwnd: HWND,
     counts: Vec<(u32, u32)>,
     _observer: Observer,
@@ -230,8 +234,14 @@ impl Fixture {
         let observer =
             unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(observe_keyboard), GetModuleHandleW(std::ptr::null()), 0) };
         assert!(!observer.is_null());
-        let mut fixture =
-            Self { factories: vec![], devices: vec![], hwnd, counts: vec![], _observer: Observer(observer) };
+        let mut fixture = Self {
+            factories: vec![],
+            devices: vec![],
+            late_devices: vec![],
+            hwnd,
+            counts: vec![],
+            _observer: Observer(observer),
+        };
         for iid in [
             GUID::from_u128(0xbf798030_483a_4da2_aa99_5d64ed369700),
             GUID::from_u128(0xbf798031_483a_4da2_aa99_5d64ed369700),
@@ -271,9 +281,18 @@ impl Fixture {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         fixture.counts = fixture.devices.iter().map(Device::refcounts).collect();
+        for factory in &fixture.factories {
+            let late = Self::device_key(factory, hwnd, false, 0x38);
+            assert!(late.change(7) >= 0);
+            assert!(late.flush() >= 0);
+            fixture.late_devices.push(late);
+        }
         fixture
     }
     fn device(factory: &Reference, hwnd: HWND, mouse: bool) -> Device {
+        Self::device_key(factory, hwnd, mouse, 0x1e)
+    }
+    fn device_key(factory: &Reference, hwnd: HWND, mouse: bool, scan: u32) -> Device {
         let guid = GUID::from_u128(if mouse {
             0x6f1d2b60_d5a0_11cf_bfc7_444553540000
         } else {
@@ -298,7 +317,7 @@ impl Fixture {
         let object = Object {
             guid: &object_guid,
             offset: if mouse { 4 } else { 3 },
-            kind: if mouse { 0x8000_0001 } else { 0x8000_1e0c },
+            kind: if mouse { 0x8000_0001 } else { 0x8000_000c | (scan << 8) },
             flags: 0,
         };
         let format = Format {
@@ -362,6 +381,30 @@ impl Fixture {
             self.counts,
             "adapter changed native object reference counts"
         );
+        // These acquired custom-format objects have made no hooked call at all.
+        // Desktop modifiers must still reach the OS, but cannot enter a later game read.
+        Self::request(h, epoch, true, 28);
+        scan_key(0x38, true);
+        drive(h, 30);
+        scan_key(0x38, false);
+        drive(h, 30);
+        Self::request(h, epoch, false, 29);
+        for late in &self.late_devices {
+            let (hr, records) = late.data(1);
+            assert_eq!(hr, 0, "late pre-existing native device failed to recover");
+            assert!(records.is_empty(), "unobserved pre-existing device replayed captured modifier edges: {records:?}");
+        }
+        scan_key(0x38, true);
+        drive(h, 30);
+        for late in &self.late_devices {
+            assert_eq!(late.state(late.size).1[3], 0x80, "late device lost fresh input");
+            assert_eq!(late.data(0).1.iter().map(|record| record.data).collect::<Vec<_>>(), vec![0x80]);
+        }
+        scan_key(0x38, false);
+        drive(h, 30);
+        for late in &self.late_devices {
+            assert_eq!(late.data(0).1.iter().map(|record| record.data).collect::<Vec<_>>(), vec![0]);
+        }
         if std::env::args().any(|a| a == "directinput-exclusive") {
             super::key_vk(113, true);
             let mut events = drive(h, 40);
