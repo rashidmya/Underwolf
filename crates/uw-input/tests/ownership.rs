@@ -54,6 +54,20 @@ fn domain_application_rechecks_the_current_lease_before_retaining_ownership() {
 }
 
 #[test]
+fn background_physical_release_clears_quarantine_without_inventing_game_delivery() {
+    let mut p = ready();
+    p.event(PolicyEvent::Input(key(65, true)));
+    p.physical_release(key(65, false));
+    assert!(!p.physical_keys()[65]);
+    let effects =
+        p.event(PolicyEvent::Request(CaptureRequest { epoch: p.epoch(), state_seq: 1, request_id: 1, on: true }));
+    assert!(effects.releases.iter().flatten().any(|r| r.a == 65), "the game never observed that background release");
+    p.event(PolicyEvent::SetupFinished { epoch: p.epoch(), success: true });
+    p.physical_release(key(65, false));
+    assert!(!p.key_suppressed(65));
+}
+
+#[test]
 fn mouse_ownership_does_not_release_or_filter_game_keyboard() {
     let mut p = ready();
     p.event(PolicyEvent::Input(key(87, true)));

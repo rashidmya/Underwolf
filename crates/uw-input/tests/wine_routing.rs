@@ -1,31 +1,7 @@
 #![cfg(unix)]
-use std::{path::PathBuf, process::Command};
-fn probe(case: &str) {
-    let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/x86_64-pc-windows-gnu/release/examples/input_probe.exe")
-        .canonicalize()
-        .expect("build input_probe first");
-    let prefix = std::env::temp_dir().join(format!("uw-routing-{}-{case}", std::process::id()));
-    std::fs::create_dir_all(&prefix).unwrap();
-    let result = Command::new("timeout")
-        .args(["60", "wine"])
-        .arg(binary)
-        .args(["--routing", case])
-        .env("WINEPREFIX", &prefix)
-        .env("WINEDEBUG", "-all")
-        .env("WINEDLLOVERRIDES", "mscoree,mshtml=")
-        .output()
-        .unwrap();
-    let _ = Command::new("wineserver").arg("-k").env("WINEPREFIX", &prefix).status();
-    let _ = std::fs::remove_dir_all(prefix);
-    assert!(
-        result.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&result.stdout),
-        String::from_utf8_lossy(&result.stderr)
-    );
-    assert!(String::from_utf8_lossy(&result.stdout).contains("PASS routing probe"));
-}
+#[path = "support/wine.rs"]
+mod fixture;
+use fixture::probe;
 #[test]
 #[ignore = "Windows input_probe under xvfb-run"]
 fn mouse_only_keeps_keyboard_original() {
@@ -70,4 +46,15 @@ fn raw_notification_preserves_original_input() {
 #[ignore = "Windows input_probe under xvfb-run"]
 fn raw_and_legacy_cycles_have_one_named_activation() {
     probe("raw-block");
+}
+#[test]
+#[ignore = "Windows input_probe under xvfb-run"]
+fn continuing_mouse_domain_stays_blocked_during_keyboard_gain() {
+    probe("partial");
+}
+
+#[test]
+#[ignore = "Windows input_probe under xvfb-run"]
+fn host_focus_change_resets_pending_utf16_text() {
+    probe("focus-text");
 }

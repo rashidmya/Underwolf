@@ -78,6 +78,16 @@ fn synchronized_safety_epoch_keeps_table_but_requires_a_fresh_click() {
     r.input(InputRecord::button(0, false, 20, 20, 0), ctx);
     assert!(r.input(InputRecord::button(0, true, 20, 20, 0), ctx).domains.mouse);
 }
+
+#[test]
+fn a_background_release_cannot_leave_a_cancelled_button_latched_forever() {
+    let mut r = Router::new();
+    r.configure(&table(InputMode::Block));
+    r.input(InputRecord::button(0, true, 20, 20, 0), context());
+    r.revoke(InputReason::FocusLost);
+    r.physical_release(InputRecord::button(0, false, 20, 20, 0));
+    assert!(r.input(InputRecord::button(0, true, 20, 20, 0), context()).domains.mouse);
+}
 fn body(router: &mut Router, button: usize, down: bool, x: i32, y: i32) -> RouteEffects {
     let mut c = context();
     c.physical_buttons[button] = down;

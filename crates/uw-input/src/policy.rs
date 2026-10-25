@@ -108,6 +108,23 @@ impl Policy {
     pub fn physical_buttons(&self) -> [bool; 5] {
         self.buttons
     }
+    /// A previously tracked physical release outside the game changes no game-delivery history.
+    pub fn physical_release(&mut self, record: InputRecord) {
+        if record.validate().is_err() || record.flags & 1 != 0 {
+            return;
+        }
+        match record.kind {
+            1 => {
+                self.keys[record.a as usize] = false;
+                self.suppressed_keys[record.a as usize] = false;
+            }
+            4 => {
+                self.buttons[record.a as usize] = false;
+                self.suppressed_buttons[record.a as usize] = false;
+            }
+            _ => {}
+        }
+    }
     pub fn domains(&self) -> Domains {
         self.domains
     }

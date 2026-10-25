@@ -80,17 +80,31 @@ pub(super) fn observe_modules(shared: &super::Shared) -> Result<(), super::Insta
     Ok(())
 }
 pub(super) fn ready() -> bool {
-    READY.load(Ordering::Acquire) && !PENDING.load(Ordering::Acquire)
+    READY.load(Ordering::Acquire)
+        && !PENDING.load(Ordering::Acquire)
+        && super::directinput::healthy()
+        && super::lowlevel::ready()
 }
 pub(super) fn request_coverage() {
     COVERAGE_PENDING.store(true, Ordering::Release);
 }
 /// Watchdog only. No discovery, allocation, locks or OS calls occur in the notification callback.
 pub(super) fn poll(shared: &super::Shared) {
+    super::directinput::drain_deferred();
     if PENDING.swap(false, Ordering::AcqRel) {
         super::window::wake(shared);
-        let report = discover();
-        let ready = report.directinput.status != DiscoveryStatus::Discovered
+        let mut report = discover();
+        if report.directinput.status == DiscoveryStatus::Discovered {
+            report.directinput = super::directinput::install(&report).unwrap_or_else(|error| {
+                report.diagnostics.push(error.0);
+                AdapterCoverage {
+                    status: DiscoveryStatus::Failed,
+                    abi_mask: report.directinput.abi_mask,
+                    detail: 0x8000_ffffu32 as i32,
+                }
+            });
+        }
+        let ready = matches!(report.directinput.status, DiscoveryStatus::Absent | DiscoveryStatus::Supported)
             && report.gameinput.status != DiscoveryStatus::Discovered;
         if let Ok(mut current) = DISCOVERY.lock() {
             *current = Some(report);
@@ -112,7 +126,13 @@ pub(super) fn poll(shared: &super::Shared) {
         r.as_ref().map(|r| uw_pipe_proto::routing::NativeCoverage {
             epoch,
             revision,
-            directinput: api_coverage(r.directinput),
+            directinput: api_coverage(if !super::directinput::healthy() {
+                AdapterCoverage { status: DiscoveryStatus::Failed, ..r.directinput }
+            } else if !super::lowlevel::ready() && r.directinput.status == DiscoveryStatus::Supported {
+                AdapterCoverage { status: DiscoveryStatus::Discovered, ..r.directinput }
+            } else {
+                r.directinput
+            }),
             gameinput: api_coverage(r.gameinput),
         })
     });
@@ -126,10 +146,20 @@ fn api_coverage(coverage: AdapterCoverage) -> uw_pipe_proto::routing::ApiCoverag
     let status = match coverage.status {
         DiscoveryStatus::Absent => NativeStatus::Absent,
         DiscoveryStatus::Discovered => NativeStatus::Installing,
+        DiscoveryStatus::Supported => NativeStatus::Supported,
         DiscoveryStatus::Unsupported => NativeStatus::Unsupported,
         DiscoveryStatus::Failed => NativeStatus::Failed,
     };
-    ApiCoverage { status, domains: Domains::default(), abi_mask: coverage.abi_mask, detail: coverage.detail as u32 }
+    ApiCoverage {
+        status,
+        domains: if status == NativeStatus::Supported {
+            Domains { keyboard: true, mouse: true }
+        } else {
+            Domains::default()
+        },
+        abi_mask: coverage.abi_mask,
+        detail: coverage.detail as u32,
+    }
 }
 pub fn publish_ownership(epoch: u64, domains: uw_pipe_proto::routing::Domains, exclusive: bool) -> bool {
     let ticket = OWNERSHIP.ticket();
@@ -228,6 +258,21 @@ fn discover_directinput(report: &mut DiscoveryReport, registry: &mut TargetRegis
         }
         // SAFETY: a successful system factory returns one owned COM reference.
         let factory = unsafe { OwnedCom::from_owned(factory) }.ok_or(0x8000_4003u32 as i32)?;
+        let unknown = factory.query(&GUID::from_u128(0x00000000_0000_0000_c000_000000000046))?;
+        for (index, name, signature) in
+            [(0, "FactoryUnknownQuery", 1), (1, "FactoryUnknownAddRef", 2), (2, "FactoryUnknownRelease", 3)]
+        {
+            // SAFETY: QI(IUnknown) may return a different factory prefix; it still has exactly these slots.
+            let address = unsafe { unknown.slot(index) };
+            target(report, registry, NativeApi::DirectInput, abi, name, address, signature)?;
+        }
+        for (index, name, signature) in
+            [(0, "FactoryQueryInterface", 1), (1, "FactoryAddRef", 2), (2, "FactoryRelease", 3)]
+        {
+            // SAFETY: both successfully selected factory IIDs have the IUnknown prefix.
+            let address = unsafe { factory.slot(index) };
+            target(report, registry, NativeApi::DirectInput, abi, name, address, signature)?;
+        }
         // SAFETY: verified DirectInput 8A/W interface has CreateDevice at slot 3.
         let create_address = unsafe { factory.slot(3) };
         target(report, registry, NativeApi::DirectInput, abi, "CreateDevice", create_address, 11)?;

@@ -77,6 +77,7 @@ fn install_thread_hooks(s: &Shared) -> bool {
     true
 }
 fn retire_thread_hooks(owner: bool) {
+    lowlevel::retire();
     for slot in [&KEY_HOOK, &MOUSE_HOOK].into_iter().chain(owner.then_some(&OWNER_HOOK)) {
         let hook = slot.swap(0, Ordering::AcqRel);
         if hook != 0 {
@@ -252,11 +253,12 @@ unsafe extern "system" fn owner_hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT
     // SAFETY: forwards all untouched hook arguments, including negative codes.
     unsafe { CallNextHookEx(std::ptr::null_mut(), code, w, l) }
 }
-fn service(s: &Shared) {
+pub(super) fn service(s: &Shared) {
     // SAFETY: no arguments.
     if unsafe { GetCurrentThreadId() } != s.thread() {
         return;
     }
+    lowlevel::ensure(s);
     s.retry_restore();
     // Hide is already an atomic revocation. Apply its queued state transaction before
     // invalidating the epoch, so its own edit-off request remains correlated.
@@ -294,18 +296,19 @@ fn service(s: &Shared) {
         s.effects(e);
     }
     s.service_routing();
+    directinput::synchronize(false);
 }
 fn original(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     // SAFETY: opaque per-window procedure pointer is never dereferenced as data.
     let p = unsafe { GetPropW(hwnd, ORIGINAL_PROPERTY) } as usize;
     // SAFETY: original procedure is published on the owner thread before subsequent dispatches.
-    unsafe {
+    directinput::game_callback(|| unsafe {
         if p == 0 {
             DefWindowProcW(hwnd, msg, w, l)
         } else {
             CallWindowProcW(std::mem::transmute::<usize, WNDPROC>(p), hwnd, msg, w, l)
         }
-    }
+    })
 }
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     if msg == WM_NCDESTROY {
@@ -333,6 +336,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             return Some(0);
         }
         if msg == WM_SETFOCUS || msg == WM_KILLFOCUS || msg == WM_DESTROY {
+            if msg == WM_SETFOCUS && lowlevel::active() {
+                lowlevel::seed(s);
+            }
             if msg == WM_DESTROY {
                 registration::retire_window(hwnd as usize);
             }
@@ -651,6 +657,9 @@ pub(super) fn release_held(s: &Shared, releases: &[Option<InputRecord>; 261]) ->
 }
 
 pub(super) fn observe(s: &Shared, record: InputRecord) -> bool {
+    if lowlevel::active() {
+        return s.capture_domain(record.kind != 1) || (record.kind == 1 && s.blocks_key(record.a));
+    }
     // SAFETY: current thread query has no arguments.
     if unsafe { GetCurrentThreadId() } == s.thread() {
         if let Some(effects) = s.ingress(record, true) {

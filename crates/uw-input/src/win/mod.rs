@@ -1,8 +1,10 @@
 //! Windows ownership shell. Capture remains unavailable until all required adapters install.
 pub mod abi;
 mod cursor;
+pub mod directinput;
 pub mod hooks;
 mod keyboard;
+mod lowlevel;
 pub mod native;
 mod raw;
 mod registration;
@@ -90,6 +92,7 @@ pub(super) struct Shared {
     session_failed: AtomicBool,
     permit: AtomicBool,
     setting_up: AtomicBool,
+    updating_domains: AtomicBool,
     epoch: AtomicU64,
     release: AtomicUsize,
     restore_epoch: AtomicU64,
@@ -137,6 +140,7 @@ impl InputRuntime {
             session_failed: AtomicBool::new(false),
             permit: AtomicBool::new(false),
             setting_up: AtomicBool::new(false),
+            updating_domains: AtomicBool::new(false),
             epoch: AtomicU64::new(1),
             release: AtomicUsize::new(0),
             restore_epoch: AtomicU64::new(0),
@@ -297,7 +301,9 @@ impl InputHandle {
         events
     }
     pub fn capture_permitted(&self) -> bool {
-        self.shared.permit.load(Ordering::Acquire) && self.shared.release.load(Ordering::Acquire) == 0
+        self.shared.permit.load(Ordering::Acquire)
+            && self.shared.release.load(Ordering::Acquire) == 0
+            && (!self.shared.routing_mode.load(Ordering::Acquire) || native::ownership().1.bits() != 0)
     }
 }
 impl Shared {
@@ -309,6 +315,9 @@ impl Shared {
     }
 
     fn revoke(&self, reason: InputReason) {
+        if !matches!(reason, InputReason::Requested | InputReason::Hotkey | InputReason::Ready) {
+            lowlevel::invalidate();
+        }
         if reason == InputReason::Overflow {
             self.session_failed.store(true, Ordering::Release);
         }
@@ -364,6 +373,7 @@ impl Shared {
         self.revoke(InputReason::Overflow);
     }
     fn event(&self, event: PolicyEvent) -> Option<Effects> {
+        let at = now();
         let Ok(mut p) = self.policy.try_lock() else {
             self.revoke(InputReason::Overflow);
             return None;
@@ -371,7 +381,7 @@ impl Shared {
         if self.routing_mode.load(Ordering::Acquire) {
             p.use_configured_hotkeys();
         }
-        let healthy = self.lease.try_lock().is_ok_and(|lease| lease.healthy_in(p.epoch(), now()));
+        let healthy = self.lease.try_lock().is_ok_and(|lease| lease.healthy_in(p.epoch(), at));
         let effects = p.event_with_lease(event, healthy);
         let epoch = p.epoch();
         if self.routing_mode.load(Ordering::Acquire) {

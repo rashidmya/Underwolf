@@ -88,6 +88,7 @@ pub enum NativeApi {
 pub enum DiscoveryStatus {
     Absent,
     Discovered,
+    Supported,
     Unsupported,
     Failed,
 }

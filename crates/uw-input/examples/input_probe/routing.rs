@@ -1,4 +1,6 @@
 //! Independent real-API driver for the production v2 routing runtime.
+#[path = "directinput.rs"]
+mod directinput;
 use std::{
     sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, Instant},
@@ -17,11 +19,23 @@ use windows_sys::{
     },
     core::w,
 };
+static CLICK_TARGET: AtomicUsize = AtomicUsize::new(0);
 static GAME_KEYS: AtomicUsize = AtomicUsize::new(0);
+static PARTIAL_QUERY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static MOUSE_LEAK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static RAW_KEYS: AtomicUsize = AtomicUsize::new(0);
 static RAW_MOUSE: AtomicUsize = AtomicUsize::new(0);
 static ROLLBACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    if msg == WM_LBUTTONDOWN {
+        CLICK_TARGET.store(h as usize, Ordering::Release);
+    }
+    if msg == WM_KEYUP && w == 87 && PARTIAL_QUERY.load(Ordering::Acquire) {
+        // SAFETY: real state query during reentrant game cleanup for a continuing mouse domain.
+        if unsafe { GetAsyncKeyState(2) } & i16::MIN != 0 {
+            MOUSE_LEAK.store(true, Ordering::Release);
+        }
+    }
     if msg == WM_KEYDOWN && w == 65 {
         GAME_KEYS.fetch_add(1, Ordering::Relaxed);
     }
@@ -171,6 +185,7 @@ pub fn run() {
             0
         );
     }
+    let directinput = if case.starts_with("directinput") { Some(directinput::Fixture::create(hwnd)) } else { None };
     let runtime = InputRuntime::install(hwnd).expect("install");
     let h = runtime.handle();
     h.connect_routing();
@@ -196,8 +211,21 @@ pub fn run() {
             z: 1,
             mode: if case.ends_with("notify") { InputMode::Notify } else { InputMode::Block },
             visible: true,
-            keyboard: !case.ends_with("mouse-only"),
-        }],
+            keyboard: !case.ends_with("mouse-only") && case != "partial",
+        }]
+        .into_iter()
+        .chain(matches!(case.as_str(), "partial" | "focus-text").then_some(WidgetSpec {
+            instance: WidgetRef { id: 2, generation: 1 },
+            x: 200,
+            y: 0,
+            width: 100,
+            height: 100,
+            z: 2,
+            mode: InputMode::Block,
+            visible: true,
+            keyboard: true,
+        }))
+        .collect(),
         hotkeys: vec![
             HotkeySpec { id: 1, vk: 9, modifiers: 8, flags: 0, action: HotkeyAction::ToggleEdit, target: None },
             HotkeySpec { id: 2, vk: 113, modifiers: 0, flags: 1, action: HotkeyAction::Notify, target: None },
@@ -206,11 +234,23 @@ pub fn run() {
     })
     .unwrap();
     h.configure(config).unwrap();
+    let configured = drive(&h, 80);
     assert!(
-        drive(&h, 80)
+        configured
             .iter()
             .any(|e| matches!(e, RuntimeEvent::Configured(r) if r.code == RoutingCode::Applied && r.request_id == 1))
     );
+    if let Some(fixture) = directinput {
+        fixture.exercise(&h, epoch, configured);
+        h.disconnect();
+        drive(&h, 50);
+        // SAFETY: destroy only this fixture's window after native objects are released.
+        unsafe {
+            DestroyWindow(hwnd);
+        }
+        println!("PASS routing probe directinput");
+        return;
+    }
     if case == "rollback" {
         key(true);
         drive(&h, 40);
@@ -247,6 +287,89 @@ pub fn run() {
     drive(&h, 40);
     click(false);
     drive(&h, 40);
+    if case == "focus-text" {
+        // SAFETY: post UTF-16 units only to this fixture's live window.
+        unsafe {
+            PostMessageW(hwnd, WM_CHAR, 0xd83d, 0);
+        }
+        drive(&h, 30);
+        h.route_request(RoutingRequest {
+            epoch,
+            revision: 1,
+            request_id: 2,
+            target: Some(WidgetRef { id: 2, generation: 1 }),
+            action: RoutingAction::Takeover,
+            state_seq: None,
+        })
+        .unwrap();
+        let applied = drive(&h, 50);
+        assert!(applied.iter().any(|e| matches!(e, RuntimeEvent::RoutingResult(r) if r.code == RoutingCode::Applied)));
+        // SAFETY: the low surrogate arrives after the owner has committed a different target.
+        unsafe {
+            PostMessageW(hwnd, WM_CHAR, 0xde00, 0);
+        }
+        let events = drive(&h, 50);
+        let chars = events
+            .iter()
+            .filter_map(|e| if let RuntimeEvent::RoutedBatch(b) = e { Some(b) } else { None })
+            .flat_map(|b| &b.events)
+            .filter(|e| e.target == Some(WidgetRef { id: 2, generation: 1 }))
+            .filter_map(|e| e.input.filter(|r| r.kind == 2).map(|r| r.a))
+            .collect::<Vec<_>>();
+        assert_eq!(chars, vec![0xfffd], "text decoder paired UTF-16 across a host focus change");
+        h.disconnect();
+        drive(&h, 30);
+        // SAFETY: destroy only this fixture's window.
+        unsafe {
+            DestroyWindow(hwnd);
+        }
+        println!("PASS routing probe focus-text");
+        return;
+    }
+    if case == "partial" {
+        let input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 { mi: MOUSEINPUT { dwFlags: MOUSEEVENTF_RIGHTDOWN, ..Default::default() } },
+        };
+        // SAFETY: initialized held right-button input in the mouse-owned widget.
+        assert_eq!(unsafe { SendInput(1, &input, std::mem::size_of::<INPUT>() as i32) }, 1);
+        drive(&h, 30);
+        key_vk(87, true);
+        drive(&h, 30);
+        PARTIAL_QUERY.store(true, Ordering::Release);
+        h.route_request(RoutingRequest {
+            epoch,
+            revision: 1,
+            request_id: 2,
+            target: Some(WidgetRef { id: 2, generation: 1 }),
+            action: RoutingAction::Takeover,
+            state_seq: None,
+        })
+        .unwrap();
+        assert!(
+            drive(&h, 80).iter().any(|e| matches!(e, RuntimeEvent::RoutingResult(r) if r.code == RoutingCode::Applied))
+        );
+        PARTIAL_QUERY.store(false, Ordering::Release);
+        assert!(!MOUSE_LEAK.load(Ordering::Acquire), "gaining keyboard exposed the continuing mouse domain");
+        let input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 { mi: MOUSEINPUT { dwFlags: MOUSEEVENTF_RIGHTUP, ..Default::default() } },
+        };
+        // SAFETY: balance only the fixture's own right-button press.
+        unsafe {
+            SendInput(1, &input, std::mem::size_of::<INPUT>() as i32);
+        }
+        key_vk(87, false);
+        drive(&h, 40);
+        h.disconnect();
+        drive(&h, 40);
+        // SAFETY: destroy only this fixture's window.
+        unsafe {
+            DestroyWindow(hwnd);
+        }
+        println!("PASS routing probe partial");
+        return;
+    }
     if case == "keyboard-only" {
         // SAFETY: fixture-local point outside the widget, inside the same window.
         let point = unsafe {

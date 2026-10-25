@@ -73,10 +73,16 @@ impl Shared {
         if !self.routing_mode.load(Ordering::Acquire) {
             return true;
         }
-        let (_, domains, _) = native::ownership();
+        let (epoch, domains, _) = native::ownership();
+        if epoch != self.epoch.load(Ordering::Acquire) {
+            return false;
+        }
         if mouse { domains.mouse } else { domains.keyboard }
     }
     pub(super) fn publish_route_permission(&self) {
+        if self.updating_domains.load(Ordering::Acquire) {
+            return;
+        }
         if !self.routing_mode.load(Ordering::Acquire) {
             return;
         }
@@ -95,13 +101,15 @@ impl Shared {
             native::revoke(InputReason::Unavailable);
         }
     }
-    fn context(&self, p: &Owner, cursor: bool) -> RouteContext {
-        let healthy = self.lease.try_lock().is_ok_and(|lease| lease.healthy_in(p.epoch(), now()));
+    fn context(&self, p: &Owner, cursor: bool, at: u64) -> RouteContext {
+        let healthy = self.lease.try_lock().is_ok_and(|lease| lease.healthy_in(p.epoch(), at));
         p.route_context(healthy && native::ready(), cursor)
     }
     pub(super) fn report_routing(&self, state: InputState) {
         if let Ok(p) = self.policy.try_lock() {
-            let domains = if state.active { p.domains() } else { Domains::default() };
+            let (epoch, published, exclusive) = native::ownership();
+            let active = state.active && epoch == state.epoch;
+            let domains = if active { published } else { Domains::default() };
             let report = RoutingState {
                 epoch: state.epoch,
                 revision: p.router.revision(),
@@ -110,8 +118,8 @@ impl Shared {
                 height: state.height,
                 pointer: p.router.pointer(),
                 focus: p.router.focus(),
-                takeover: p.router.takeover(),
-                exclusive: state.active && p.router.exclusive(),
+                takeover: if active && exclusive { p.router.takeover() } else { None },
+                exclusive: active && exclusive,
                 domains,
                 reason: state.reason,
             };
@@ -157,12 +165,24 @@ impl Shared {
     }
     /// Native effects run after the policy guard has been released, including reentrant game cleanup.
     fn apply_domains(&self, domains: Domains) -> bool {
+        let at = now();
+        if self.updating_domains.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            self.revoke(InputReason::Unavailable);
+            return false;
+        }
+        struct Updating<'a>(&'a AtomicBool);
+        impl Drop for Updating<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let updating = Updating(&self.updating_domains);
         let (old, effects, active) = {
             let Ok(mut p) = self.policy.try_lock() else {
                 self.revoke(InputReason::Unavailable);
                 return false;
             };
-            let context = self.context(&p, true);
+            let context = self.context(&p, true, at);
             let old = p.domains();
             let effects = p.own_domains(domains, context.healthy);
             if let Some(Transition::Release { reason, .. }) = effects.transition
@@ -175,11 +195,20 @@ impl Shared {
             (old, effects, p.active())
         };
         if old == domains && effects.transition.is_none() {
+            drop(updating);
             self.publish_route_permission();
             return domains == Domains::default() || self.capture();
         }
-        self.permit.store(false, Ordering::Release);
-        native::revoke(InputReason::Requested);
+        if active && effects.transition.is_none() {
+            let common = Domains { keyboard: old.keyboard && domains.keyboard, mouse: old.mouse && domains.mouse };
+            if !native::publish_ownership(self.epoch.load(Ordering::Acquire), common, false) {
+                self.revoke(InputReason::Unavailable);
+                return false;
+            }
+        } else {
+            self.permit.store(false, Ordering::Release);
+            native::revoke(InputReason::Requested);
+        }
         if effects.transition.is_some() {
             self.effects(effects);
         } else if active && old != domains {
@@ -211,7 +240,9 @@ impl Shared {
                 Ordering::Release,
             );
         }
+        drop(updating);
         self.publish_route_permission();
+        directinput::synchronize(true);
         domains == Domains::default() || self.capture()
     }
     pub(super) fn service_routing(&self) {
@@ -219,6 +250,7 @@ impl Shared {
             return;
         }
         while let Some(config) = self.configurations.pop() {
+            let at = now();
             let c = config.config();
             let mut result = RoutingResult {
                 epoch: c.epoch,
@@ -227,27 +259,35 @@ impl Shared {
                 code: RoutingCode::Applied,
                 through_seq: 0,
             };
-            let effects = {
+            let (effects, changed_focus) = {
                 let Ok(mut p) = self.policy.try_lock() else {
                     self.revoke(InputReason::Overflow);
                     return;
                 };
-                if !self.context(&p, true).healthy && p.active() {
+                if !self.context(&p, true, at).healthy && p.active() {
                     self.revoke(InputReason::LeaseExpired);
                 }
                 if c.epoch != p.epoch() {
                     result.code = RoutingCode::StaleEpoch;
-                    RouteEffects::default()
+                    (RouteEffects::default(), false)
                 } else {
+                    let focus = p.router.focus();
                     let effects = p.router.configure(&config);
                     result.code = effects.code.unwrap_or(RoutingCode::Invalid);
                     if result.code == RoutingCode::Applied {
                         let physical = p.physical_keys();
                         p.hotkeys.replace(&config, &physical);
                     }
-                    effects
+                    let changed = focus != p.router.focus();
+                    if changed {
+                        p.text.reset();
+                    }
+                    (effects, changed)
                 }
             };
+            if changed_focus {
+                lowlevel::reset_text();
+            }
             if result.code == RoutingCode::Applied && !self.apply_domains(effects.domains) {
                 result.code = RoutingCode::SetupFailed;
             }
@@ -259,14 +299,24 @@ impl Shared {
             let next = self.route_requests.try_lock().ok().and_then(|mut q| q.pop_front());
             let Some(request) = next else { break };
             let cursor = cursor::available();
-            let effects = {
+            let at = now();
+            let (effects, changed_focus) = {
                 let Ok(mut p) = self.policy.try_lock() else {
                     self.revoke(InputReason::Overflow);
                     return;
                 };
-                let context = self.context(&p, cursor);
-                p.router.request(request, context)
+                let context = self.context(&p, cursor, at);
+                let focus = p.router.focus();
+                let effects = p.router.request(request, context);
+                let changed = focus != p.router.focus();
+                if changed {
+                    p.text.reset();
+                }
+                (effects, changed)
             };
+            if changed_focus {
+                lowlevel::reset_text();
+            }
             let mut code = effects.code.unwrap_or(RoutingCode::Invalid);
             let success = self.apply_domains(effects.domains);
             if code == RoutingCode::Applied && !success {
@@ -287,8 +337,16 @@ impl Shared {
         }
     }
     pub(super) fn ingress(&self, record: InputRecord, raw: bool) -> Option<Effects> {
+        self.ingress_source(record, raw, false).map(|(effects, _)| effects)
+    }
+    pub(super) fn ingress_lowlevel(&self, record: InputRecord) -> Option<(Effects, bool)> {
+        self.ingress_source(record, false, true)
+    }
+    fn ingress_source(&self, record: InputRecord, raw: bool, low: bool) -> Option<(Effects, bool)> {
         if !self.routing_mode.load(Ordering::Acquire) {
-            return self.event(if raw { PolicyEvent::Observed(record) } else { PolicyEvent::Input(record) });
+            return self
+                .event(if raw { PolicyEvent::Observed(record) } else { PolicyEvent::Input(record) })
+                .map(|effects| (effects, false));
         }
         if record.validate().is_err() {
             self.revoke(InputReason::Unavailable);
@@ -296,21 +354,23 @@ impl Shared {
         }
         let mouse = record.kind != 1 && record.kind != 2;
         let raw_owner = self.raw_source.load(Ordering::Acquire) & (if mouse { 1 } else { 2 }) != 0;
-        if record.kind != 2 && raw != raw_owner {
-            let pass = if raw {
+        let fallback = lowlevel::active();
+        if record.kind != 2 && (if fallback { !low } else { raw != raw_owner }) {
+            let pass = if raw || fallback {
                 !(self.capture_domain(mouse) || record.kind == 1 && self.blocks_key(record.a))
             } else {
                 false
             };
-            return Some(Effects { pass, ..Effects::default() });
+            return Some((Effects { pass, ..Effects::default() }, false));
         }
         let cursor = cursor::available();
-        let (mut routed, consumed, focus, keyboard) = {
+        let at = now();
+        let (mut routed, consumed, focus, keyboard, changed_focus) = {
             let Ok(mut p) = self.policy.try_lock() else {
                 self.revoke(InputReason::Overflow);
                 return None;
             };
-            let context = self.context(&p, cursor);
+            let context = self.context(&p, cursor, at);
             let focus = p.router.focus();
             let mut physical = p.physical_keys();
             if record.kind == 1 {
@@ -378,19 +438,23 @@ impl Shared {
             if focus != p.router.focus() {
                 p.text.reset();
             }
-            (routed, consumed, p.router.focus(), p.router.domains().keyboard)
+            (routed, consumed, p.router.focus(), p.router.domains().keyboard, focus != p.router.focus())
         };
+        if changed_focus && fallback {
+            lowlevel::reset_text();
+        }
         if !self.apply_domains(routed.domains)
             && let Ok(mut p) = self.policy.try_lock()
         {
             routed = p.router.revoke(InputReason::SetupFailed);
         }
+        let at = now();
         let mut effects = {
             let Ok(mut p) = self.policy.try_lock() else {
                 self.revoke(InputReason::Overflow);
                 return None;
             };
-            let healthy = self.context(&p, cursor).healthy;
+            let healthy = self.context(&p, cursor, at).healthy;
             let mut e =
                 p.event_with_lease(PolicyEvent::RoutedInput { record, pass: routed.pass && !consumed }, healthy);
             e.host = [None; 2];
@@ -408,7 +472,7 @@ impl Shared {
         effects.pass &= routed.pass && !consumed;
         self.queue_routed(&routed, None, false);
         self.report(InputReason::Ready, None);
-        Some(effects)
+        Some((effects, consumed))
     }
     pub(super) fn routed_char(&self, scalar: u32, utf16: bool) -> bool {
         let chars = {

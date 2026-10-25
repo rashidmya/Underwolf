@@ -109,6 +109,16 @@ impl Router {
             self.epoch = epoch;
         }
     }
+    pub fn physical_release(&mut self, record: InputRecord) {
+        if record.validate().is_err() || record.flags & 1 != 0 {
+            return;
+        }
+        match record.kind {
+            1 => self.qkeys[record.a as usize] = false,
+            4 => self.qbuttons[record.a as usize] = false,
+            _ => {}
+        }
+    }
     pub fn focus(&self) -> Option<WidgetRef> {
         self.focus
     }
@@ -117,6 +127,9 @@ impl Router {
     }
     pub fn pointer(&self) -> Option<WidgetRef> {
         self.pointer
+    }
+    pub fn pointer_captured(&self) -> bool {
+        self.capture.is_some()
     }
     pub fn exclusive(&self) -> bool {
         self.exclusive

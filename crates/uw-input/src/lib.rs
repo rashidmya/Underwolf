@@ -3,6 +3,7 @@ pub mod policy;
 pub mod text;
 
 pub mod delivery;
+pub mod directinput;
 pub mod hooks;
 pub mod native;
 pub mod raw;
