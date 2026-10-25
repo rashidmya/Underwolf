@@ -287,6 +287,7 @@ pub fn decode(bytes: &[u8]) -> Result<Message, ProtoError> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OverlayMessage {
     Input(crate::input::InputMessage),
+    Routing(crate::routing::RoutingMessage),
     /// game -> helper, always first: the overlay module's version and the state block layout it
     /// reads.
     Hello {
@@ -308,7 +309,7 @@ pub enum OverlayMessage {
 pub fn encode_overlay(m: &OverlayMessage) -> Vec<u8> {
     let mut p = Vec::new();
     let ty = match m {
-        OverlayMessage::Input(_) => {
+        OverlayMessage::Input(_) | OverlayMessage::Routing(_) => {
             return encode_input(m).expect("use encode_input for untrusted messages");
         }
         OverlayMessage::Hello { module_version, state_layout } => {
@@ -334,6 +335,11 @@ pub fn encode_overlay(m: &OverlayMessage) -> Vec<u8> {
 /// Decode one framed overlay-pipe message. A bootstrap-pipe type is `UnknownType`.
 pub fn encode_input(m: &OverlayMessage) -> Result<Vec<u8>, ProtoError> {
     match m {
+        OverlayMessage::Routing(m) => {
+            let (tag, payload) = m.encode_payload()?;
+            if payload.len() > MAX_PAYLOAD { return Err(ProtoError::PayloadTooLarge); }
+            Ok(frame(tag, &payload))
+        }
         OverlayMessage::Input(m) => {
             let (tag, payload) = m.encode()?;
             Ok(frame(tag, &payload))
@@ -344,6 +350,10 @@ pub fn encode_input(m: &OverlayMessage) -> Result<Vec<u8>, ProtoError> {
 
 pub fn decode_overlay(bytes: &[u8]) -> Result<OverlayMessage, ProtoError> {
     let (ty, payload) = unframe(bytes)?;
+    if (0x120..=0x12b).contains(&ty) {
+        if bytes.len() != HEADER_LEN + payload.len() { return Err(ProtoError::BadInput); }
+        return crate::routing::RoutingMessage::decode(ty, payload).map(OverlayMessage::Routing);
+    }
     if (0x110..=0x119).contains(&ty) {
         if bytes.len() != HEADER_LEN + payload.len() {
             return Err(ProtoError::BadInput);

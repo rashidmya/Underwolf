@@ -7,6 +7,7 @@
 //! serde; `to_line` never contains a newline.
 
 use serde::{Deserialize, Serialize};
+pub use crate::routing::json::{RoutingCommand, RoutingEvent};
 
 use crate::data::SchemaCategory;
 use crate::input::{CaptureCode, InputAck, InputBatch, InputChallenge, InputState};
