@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { ProductionInput, productionOptions, BUTTONS } from './production-input';
+import { ProductionInput, productionOptions, BUTTONS, setCaptureDimming } from './production-input';
 const state = (epoch = 1) => JSON.stringify({ event: 'input_state', state: { epoch, active: true, width: 800, height: 600 } });
 const batch = (records: unknown[], first_seq = 1) => JSON.stringify({ event: 'input_batch', batch: { epoch: 1, first_seq, records } });
 const key = { kind: 1, flags: 1, a: 65, b: 30, c: 0, d: 0, modifiers: 0 };
@@ -70,4 +70,30 @@ test('in-flight paused application is cancelled by a newer epoch', async () => {
   assert.equal(applied.some(e => e.type === 'records'), false);
   assert.equal(applied.at(-1).state.epoch, 2);
   assert.equal(sent.length, 0);
+});
+
+test('dimming follows accepted capture state even while renderer consumption is paused', () => {
+  const dim: boolean[] = [];
+  const r = new ProductionInput(() => new Promise(() => {}), () => {}, reason => assert.fail(reason), () => {}, on => dim.push(on));
+  r.consume(state());
+  assert.deepEqual(dim, [true]);
+  assert.equal(r.capturing, true);
+  r.consume(JSON.stringify({ event: 'input_state', state: { epoch: 2, active: false, width: 800, height: 600 } }));
+  assert.deepEqual(dim, [true, false]);
+  r.consume(state());
+  assert.equal(r.capturing, false);
+  assert.deepEqual(dim, [true, false], 'stale capture must not restore dimming');
+  r.consume(state(3));
+  assert.equal(r.capturing, true);
+  r.consume('{"event":"overlay_disconnected"}');
+  assert.equal(r.capturing, false);
+  assert.deepEqual(dim, [true, false, true, false]);
+});
+
+test('drawing-only dimming parks the decorative cursor before enabling the layer', () => {
+  const messages: unknown[] = [];
+  const bridge = { setCursor: (x: number, y: number) => { messages.push(['cursor', x, y]); return true; },
+    setEditMode: (on: boolean) => { messages.push(['dim', on]); return true; } };
+  setCaptureDimming(bridge, true); setCaptureDimming(bridge, false);
+  assert.deepEqual(messages, [['cursor', -64, -64], ['dim', true], ['dim', false]]);
 });

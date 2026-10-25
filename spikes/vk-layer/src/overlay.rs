@@ -694,6 +694,13 @@ mod tests {
     }
 
     #[test]
+    fn production_native_cursor_position_clips_all_decorative_cursor_quads() {
+        for quad in cursor_quads((-64.0, -64.0)) {
+            assert!(quad.x + quad.w as i32 <= 0 && quad.y + quad.h as i32 <= 0);
+        }
+    }
+
+    #[test]
     fn cursor_is_a_bordered_square_at_the_pointer() {
         let q = cursor_quads((300.4, 200.6));
         assert_eq!(q.len(), 2);

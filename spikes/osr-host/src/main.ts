@@ -27,7 +27,7 @@
 import { app, BrowserWindow, ipcMain, screen } from 'electron';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { ProductionInput, productionOptions, applySurface, invalidateSurface } from './production-input';
+import { ProductionInput, productionOptions, applySurface, invalidateSurface, setCaptureDimming } from './production-input';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -497,6 +497,7 @@ app.whenReady().then(() => {
     widgets.push(w);
     startWidget(w, consumer);
   }
+  let productionReceiver: ProductionInput | undefined;
   if (production) {
     const child = spawn(production.command, [], { stdio: ['pipe', 'pipe', 'inherit'] });
     console.log(`[production-input] launcher pid ${child.pid}; receiver pid ${process.pid}`);
@@ -505,7 +506,7 @@ app.whenReady().then(() => {
     // Test controls deliberately stop consumption, not just logging.
     process.on('SIGUSR1', () => { paused = true; });
     process.on('SIGUSR2', () => { paused = false; resume?.(); resume = undefined; });
-    const receiver = new ProductionInput(async (event, application) => {
+    const receiver = productionReceiver = new ProductionInput(async (event, application) => {
       if (paused) await new Promise<void>(resolve => { resume = resolve; });
       if (!application.current()) return;
       const win = widgets[0].win!;
@@ -515,7 +516,7 @@ app.whenReady().then(() => {
     }, reason => { console.error('[production-input]', reason); child.kill(); }, generation => {
       void widgets[0].win!.webContents.executeJavaScript(invalidateSurface(generation), false)
         .catch(error => { console.error('[production-input]', error); child.kill(); });
-    });
+    }, on => setCaptureDimming(bridge, on));
     const lines = createInterface({ input: child.stdout });
     lines.on('line', line => { console.log('[production-input]', line); receiver.consume(line); });
     child.on('error', error => { console.error('[production-input]', error); app.exit(1); });
@@ -536,6 +537,7 @@ app.whenReady().then(() => {
       generation = g;
       if (editOn) setEdit(false, 'layer reconnected');
       if (captureMode === 'win32' && g !== 0) injectHook();
+      if (captureMode === 'production') setCaptureDimming(bridge, productionReceiver?.capturing ?? false);
       for (const w of widgets) w.win?.webContents.invalidate();
     }
     if (captureMode === 'production') return;

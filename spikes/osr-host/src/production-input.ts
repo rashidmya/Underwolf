@@ -10,6 +10,13 @@ export type Application = { generation: number; current: () => boolean };
 export const invalidateSurface = (generation: number) => `window.underwolfGeneration = ${generation}`;
 export const applySurface = (event: SurfaceEvent, generation: number) =>
   `if (window.underwolfGeneration === ${generation}) window.underwolfConsume(${JSON.stringify(event)})`;
+type DrawingBridge = { setCursor(x: number, y: number): boolean; setEditMode(on: boolean): boolean };
+/** The reused layer is in win32 drawing-only mode. Its 14px decorative cursor
+ * stays outside the viewport because production capture supplies the native cursor. */
+export function setCaptureDimming(bridge: DrawingBridge, on: boolean): void {
+  if (on) bridge.setCursor(-64, -64);
+  bridge.setEditMode(on);
+}
 type Item = { generation: number; event: SurfaceEvent; through?: number };
 const uint = (n: unknown): n is number => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0;
 const positive = (n: unknown): n is number => uint(n) && n > 0;
@@ -41,15 +48,21 @@ export class ProductionInput {
   private running = false;
   private closed = false;
   private requestId = 1;
+  private visualActive = false;
   constructor(private apply: (event: SurfaceEvent, application: Application) => Promise<void>, private send: (command: unknown) => void, private fail: (reason: string) => void,
-    private invalidate: (generation: number) => void = () => {}) {}
+    private invalidate: (generation: number) => void = () => {}, private captureVisual: (on: boolean) => void = () => {}) {}
+  get capturing(): boolean { return this.connected && !this.closed && this.state.active; }
+  private visual(on: boolean): void {
+    if (on === this.visualActive) return;
+    this.visualActive = on; this.captureVisual(on);
+  }
   private advance(): void { this.generation++; this.invalidate(this.generation); }
   consume(line: string): void {
     if (this.closed) return;
     try {
       const e = JSON.parse(line);
       if (['overlay_disconnected', 'game_exited', 'stopped'].includes(e.event)) {
-        this.connected = false;
+        this.connected = false; this.visual(false);
         if (e.event !== 'overlay_disconnected') this.epoch = 0;
         this.advance(); this.queue = []; this.heldKeys.clear(); this.received = this.consumed = 0;
         this.enqueue({ type: 'reset' }); return;
@@ -62,6 +75,7 @@ export class ProductionInput {
           this.advance(); this.queue = []; this.received = this.consumed = 0; this.heldKeys.clear();
         }
         this.connected = true; this.epoch = s.epoch; this.state = s;
+        this.visual(s.active);
         if (!s.active) this.heldKeys.clear();
         this.enqueue({ type: 'state', state: s });
       } else if (e.event === 'input_batch') {
@@ -83,7 +97,7 @@ export class ProductionInput {
   }
   private close(reason: string): void {
     if (this.closed) return;
-    this.closed = true; this.advance(); this.queue = []; this.heldKeys.clear(); this.fail(reason);
+    this.closed = true; this.visual(false); this.advance(); this.queue = []; this.heldKeys.clear(); this.fail(reason);
   }
   private enqueue(event: SurfaceEvent, through?: number): void {
     if (this.queue.length >= 64) { this.close('input queue overflow'); return; }
