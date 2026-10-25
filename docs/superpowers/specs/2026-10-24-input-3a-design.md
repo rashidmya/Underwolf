@@ -1,7 +1,7 @@
 # Input 3a — production keyboard and mouse capture
 
 **Date:** 2026-10-24
-**Status:** Approved by the owner on 2026-10-24. Implementation, automated/live acceptance and final branch review passed on 2026-10-25; integration choice pending.
+**Status:** Approved by the owner on 2026-10-24. Implementation, automated/live acceptance and final branch review passed on 2026-10-25. Integrated into `main` at the owner's explicit request via fast-forward of reviewed commit `6a6bed5`.
 
 ## Intent and decisions
 

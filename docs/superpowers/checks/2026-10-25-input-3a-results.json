@@ -381,5 +381,17 @@
       "recorded_utc": "2026-10-25T13:06:05.867310+00:00"
     }
   },
-  "acceptance_status": "implementation and automated/live acceptance verified; final review clear; integration pending"
+  "acceptance_status": "implementation and automated/live acceptance verified; final review clear; integrated into main",
+  "integration": {
+    "status": "complete",
+    "branch": "main",
+    "method": "fast-forward",
+    "previous_main": "6f2acc471b9fa243057819b0d3409acdd37bfc1b",
+    "reviewed_implementation_commit": "6a6bed5f5582ae85ecd463b777916c7ab9786953",
+    "merged_tracked_tree_matches_reviewed_commit": true,
+    "authorization": "explicit owner request: merge to main",
+    "recorded_utc": "2026-10-25T13:16:23.142013+00:00",
+    "runtime_activity": "none; builds and runtime tests not repeated while owner played a standard game",
+    "managed_worktree_and_raw_evidence": "preserved"
+  }
 }
