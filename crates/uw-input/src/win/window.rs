@@ -93,8 +93,8 @@ pub(super) fn rediscover(s: &Shared) {
     }
     if s.restore_epoch.load(Ordering::Acquire) != 0 {
         let handle = OWNER_THREAD_HANDLE.load(Ordering::Acquire);
-        // SAFETY: retained synchronization handle; zero timeout never blocks the watchdog.
         if handle == 0
+            // SAFETY: retained synchronization handle; zero timeout never blocks the watchdog.
             || unsafe { windows_sys::Win32::System::Threading::WaitForSingleObject(handle as *mut _, 0) } != 0
         {
             return;
@@ -135,6 +135,7 @@ pub(super) fn rediscover(s: &Shared) {
     }
 }
 fn initialize(s: &Shared) {
+    registration::observe_existing(s);
     let ready = *ADAPTERS.get_or_init(|| {
         let mut targets = keyboard::targets();
         targets.extend(raw::targets());
@@ -210,7 +211,7 @@ unsafe extern "system" fn owner_hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT
         if msg.hwnd as usize == s.hwnd()
             && msg.wParam == VK_PACKET as usize
             && matches!(msg.message, WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP)
-            && s.capture()
+            && s.capture_domain(false)
         {
             // SAFETY: WH_GETMESSAGE supplied a valid mutable MSG for PM_REMOVE.
             bypass(|| unsafe {
@@ -292,6 +293,7 @@ fn service(s: &Shared) {
     {
         s.effects(e);
     }
+    s.service_routing();
 }
 fn original(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     // SAFETY: opaque per-window procedure pointer is never dereferenced as data.
@@ -351,7 +353,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 )
             }
         }
-        if matches!(msg, WM_CHAR | WM_SYSCHAR)
+        if s.routing_mode.load(Ordering::Acquire) && matches!(msg, WM_CHAR | WM_SYSCHAR | WM_UNICHAR) {
+            if msg == WM_UNICHAR && w == 0xffff {
+                return Some(1);
+            }
+            if !s.routed_char(w as u32, msg != WM_UNICHAR) {
+                return Some(0);
+            }
+        } else if matches!(msg, WM_CHAR | WM_SYSCHAR)
             && let Some(e) = s.event(PolicyEvent::Char(w as u16))
         {
             let pass = e.pass;
@@ -360,30 +369,32 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 return Some(0);
             }
         }
-        if s.capture()
-            && matches!(
-                msg,
-                WM_KEYDOWN
-                    | WM_KEYUP
-                    | WM_SYSKEYDOWN
-                    | WM_SYSKEYUP
-                    | WM_MOUSEMOVE
-                    | WM_LBUTTONDOWN
-                    | WM_LBUTTONDBLCLK
-                    | WM_LBUTTONUP
-                    | WM_RBUTTONDOWN
-                    | WM_RBUTTONDBLCLK
-                    | WM_RBUTTONUP
-                    | WM_MBUTTONDOWN
-                    | WM_MBUTTONDBLCLK
-                    | WM_MBUTTONUP
-                    | WM_XBUTTONDOWN
-                    | WM_XBUTTONDBLCLK
-                    | WM_XBUTTONUP
-                    | WM_MOUSEWHEEL
-                    | WM_MOUSEHWHEEL
-            )
-        {
+        if (if s.routing_mode.load(Ordering::Acquire) {
+            s.capture_domain(!matches!(msg, WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP))
+        } else {
+            s.capture()
+        }) && matches!(
+            msg,
+            WM_KEYDOWN
+                | WM_KEYUP
+                | WM_SYSKEYDOWN
+                | WM_SYSKEYUP
+                | WM_MOUSEMOVE
+                | WM_LBUTTONDOWN
+                | WM_LBUTTONDBLCLK
+                | WM_LBUTTONUP
+                | WM_RBUTTONDOWN
+                | WM_RBUTTONDBLCLK
+                | WM_RBUTTONUP
+                | WM_MBUTTONDOWN
+                | WM_MBUTTONDBLCLK
+                | WM_MBUTTONUP
+                | WM_XBUTTONDOWN
+                | WM_XBUTTONDBLCLK
+                | WM_XBUTTONUP
+                | WM_MOUSEWHEEL
+                | WM_MOUSEHWHEEL
+        ) {
             return Some(0);
         }
         None
@@ -453,7 +464,7 @@ unsafe extern "system" fn key_hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
             v => v,
         };
         let modifiers = s.policy.try_lock().map(|p| p.modifiers()).unwrap_or(0);
-        let Some(e) = s.event(PolicyEvent::Input(InputRecord::key(vk, scan, down, extended, repeat, modifiers))) else {
+        let Some(e) = s.ingress(InputRecord::key(vk, scan, down, extended, repeat, modifiers), false) else {
             return false;
         };
         let pass = e.pass;
@@ -536,7 +547,7 @@ unsafe extern "system" fn mouse_hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT
             WM_MOUSEHWHEEL => InputRecord::wheel((m.mouseData >> 16) as i16 as i32, 0, point.x, point.y, modifiers),
             _ => return false,
         };
-        let Some(e) = s.event(PolicyEvent::Input(r)) else { return false };
+        let Some(e) = s.ingress(r, false) else { return false };
         let pass = e.pass;
         s.effects(e);
         !pass
@@ -642,7 +653,7 @@ pub(super) fn release_held(s: &Shared, releases: &[Option<InputRecord>; 261]) ->
 pub(super) fn observe(s: &Shared, record: InputRecord) -> bool {
     // SAFETY: current thread query has no arguments.
     if unsafe { GetCurrentThreadId() } == s.thread() {
-        if let Some(effects) = s.event(PolicyEvent::Observed(record)) {
+        if let Some(effects) = s.ingress(record, true) {
             let blocked = !effects.pass;
             s.effects(effects);
             return blocked;
@@ -650,5 +661,5 @@ pub(super) fn observe(s: &Shared, record: InputRecord) -> bool {
     } else {
         s.submit(PolicyEvent::Observed(record));
     }
-    s.capture() || (record.kind == 1 && s.blocks_key(record.a))
+    s.capture_domain(record.kind != 1) || (record.kind == 1 && s.blocks_key(record.a))
 }

@@ -5,6 +5,7 @@ use windows_sys::Win32::{
     UI::Input::*,
 };
 static REGISTER: AtomicUsize = AtomicUsize::new(0);
+static DOMAINS: AtomicUsize = AtomicUsize::new(3);
 static RETIRED_TARGET: AtomicUsize = AtomicUsize::new(0);
 pub(super) fn retire_window(hwnd: usize) {
     RETIRED_TARGET.store(hwnd, Ordering::Release);
@@ -41,7 +42,38 @@ unsafe fn call(p: *const RAWINPUTDEVICE, n: u32, size: u32) -> i32 {
         }
     }
 }
+#[cfg(test)]
 pub(super) fn prepare() -> Option<u64> {
+    prepare_for(uw_pipe_proto::routing::Domains { keyboard: true, mouse: true })
+}
+fn scoped(entry: Registration, domains: uw_pipe_proto::routing::Domains) -> Registration {
+    if if entry.usage == 6 { domains.keyboard } else { domains.mouse } { entry.captured() } else { entry }
+}
+pub(super) fn observe_existing(s: &Shared) {
+    let mut devices = [RAWINPUTDEVICE::default(); 256];
+    let mut count = devices.len() as u32;
+    // SAFETY: fixed initialized descriptor array and writable count with native descriptor size.
+    let read = unsafe {
+        GetRegisteredRawInputDevices(devices.as_mut_ptr(), &mut count, std::mem::size_of::<RAWINPUTDEVICE>() as u32)
+    };
+    if read != u32::MAX && read as usize <= devices.len() {
+        for entry in &devices[..read as usize] {
+            source_intent(s, convert(entry));
+        }
+    }
+}
+fn source_intent(s: &Shared, entry: Registration) {
+    if !entry.affected() {
+        return;
+    }
+    let bit = if entry.usage == 6 { 2 } else { 1 };
+    if entry.flags & RIDEV_NOLEGACY == RIDEV_NOLEGACY && entry.flags & RIDEV_REMOVE == 0 {
+        s.raw_source.fetch_or(bit, Ordering::AcqRel);
+    } else {
+        s.raw_source.fetch_and(!bit, Ordering::AcqRel);
+    }
+}
+pub(super) fn prepare_for(domains: uw_pipe_proto::routing::Domains) -> Option<u64> {
     let mut slot = LEDGER.try_lock().ok()?;
     let token = JOURNAL.begin_owner()?;
     RETIRED_TARGET.store(0, Ordering::Release);
@@ -75,8 +107,16 @@ pub(super) fn prepare() -> Option<u64> {
             }
             devices.truncate(n as usize);
         }
-        let ledger = RegistrationLedger::new(&devices.iter().map(convert).collect::<Vec<_>>());
-        let changes: Vec<_> = ledger.capture_descriptors().into_iter().map(native).collect();
+        let mut ledger = if let Some(previous) = slot.take() {
+            let mut ledger = previous.ledger;
+            JOURNAL.merge_since(&mut ledger, previous.baseline);
+            ledger
+        } else {
+            RegistrationLedger::new(&devices.iter().map(convert).collect::<Vec<_>>())
+        };
+        ledger.retire_target(RETIRED_TARGET.load(Ordering::Acquire));
+        let changes: Vec<_> =
+            ledger.restore_descriptors().into_iter().map(|entry| native(scoped(entry, domains))).collect();
         // Retain restoration intent even if an overlapping call invalidates this transaction.
         *slot = Some(CaptureRegistrations { ledger, baseline });
         changes.is_empty()
@@ -84,6 +124,7 @@ pub(super) fn prepare() -> Option<u64> {
             || unsafe { call(changes.as_ptr(), changes.len() as u32, std::mem::size_of::<RAWINPUTDEVICE>() as u32) } != 0
     })();
     if success {
+        DOMAINS.store(domains.bits() as usize, Ordering::Release);
         Some(token)
     } else {
         JOURNAL.cancel_owner();
@@ -109,8 +150,8 @@ pub(super) fn restore() -> bool {
     ledger.ledger.retire_target(RETIRED_TARGET.load(Ordering::Acquire));
     JOURNAL.merge_since(&mut ledger.ledger, ledger.baseline);
     for entry in ledger.ledger.restore_descriptors() {
-        // SAFETY: discard targets destroyed since their latest successful registration.
         if entry.target != 0
+            // SAFETY: query the saved opaque window handle before restoring registration intent.
             && unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(entry.target as HWND) } == 0
         {
             ledger.ledger.retire_target(entry.target);
@@ -154,8 +195,10 @@ unsafe extern "system" fn register(ptr: *const RAWINPUTDEVICE, count: u32, size:
         let input = unsafe { std::slice::from_raw_parts(ptr, count as usize) };
         let mut transformed = [RAWINPUTDEVICE::default(); 256];
         if transform {
+            let bits = DOMAINS.load(Ordering::Acquire);
+            let domains = uw_pipe_proto::routing::Domains { keyboard: bits & 1 != 0, mouse: bits & 2 != 0 };
             for (i, r) in input.iter().enumerate() {
-                transformed[i] = native(convert(r).captured());
+                transformed[i] = native(scoped(convert(r), domains));
             }
         }
         // SAFETY: either initialized transformed prefix or unchanged readable caller descriptors.
@@ -165,6 +208,9 @@ unsafe extern "system" fn register(ptr: *const RAWINPUTDEVICE, count: u32, size:
         if result != 0 {
             for r in input {
                 transaction.success(convert(r));
+                if let Some(s) = SHARED.get() {
+                    source_intent(s, convert(r));
+                }
             }
         }
         drop(transaction);

@@ -94,7 +94,7 @@ fn full_input_queue_retains_independent_control_capacity() {
     while let Some(out) = q.take(1) {
         match out {
             RoutedOutput::Events(b) => events += b.events.len(),
-            RoutedOutput::Configured(_) => barriers += 1,
+            RoutedOutput::Configured(_) | RoutedOutput::Result(_) => barriers += 1,
         }
     }
     assert_eq!((events, barriers), (1056, 32));
@@ -158,6 +158,14 @@ fn invalid_group_does_not_deliver_valid_prefix() {
     assert_eq!(q.try_group(1, &[key(), RoutedEvent { revision: 0, ..cancel(1) }], None), PushResult::Revoke);
     assert!(q.revoked());
     assert!(q.take(1).is_none());
+}
+
+#[test]
+fn host_request_result_waits_for_its_cancellation_sequence() {
+    let q = ready();
+    assert_eq!(q.try_request_group(1, &[cancel(1)], barrier(2)), PushResult::Queued);
+    assert_eq!(batch(&q).events, vec![cancel(1)]);
+    assert_eq!(q.take(1), Some(RoutedOutput::Result(RoutingResult { through_seq: 1, ..barrier(2) })));
 }
 
 #[test]

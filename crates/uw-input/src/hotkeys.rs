@@ -20,6 +20,13 @@ impl Default for HotkeyMatcher {
     }
 }
 impl HotkeyMatcher {
+    pub fn reseed(&mut self, physical: &[bool; 256]) {
+        self.pressed = *physical;
+        for (consumed, held) in self.consumed.iter_mut().zip(physical) {
+            *consumed &= *held;
+        }
+        self.last_consumed = false;
+    }
     /// Seed trigger latches from current physical state; a replacement never invents a new edge.
     pub fn replace(&mut self, table: &PreparedConfig, physical: &[bool; 256]) {
         self.bindings = [None; MAX_HOTKEYS];

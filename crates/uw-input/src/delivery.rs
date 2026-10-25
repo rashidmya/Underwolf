@@ -101,11 +101,12 @@ impl Outbox {
 pub enum RoutedOutput {
     Events(RoutedBatch),
     Configured(RoutingResult),
+    Result(RoutingResult),
 }
 #[derive(Clone, Copy)]
 enum RoutedEntry {
     Event(RoutedEvent),
-    Barrier(RoutingResult),
+    Barrier(RoutingResult, bool),
 }
 struct RoutedQueue {
     epoch: u64,
@@ -145,6 +146,18 @@ impl RoutedOutbox {
     }
     /// A router effect and its application barrier are accepted atomically. No allocation or wait.
     pub fn try_group(&self, epoch: u64, events: &[RoutedEvent], barrier: Option<RoutingResult>) -> PushResult {
+        self.try_group_kind(epoch, events, barrier, false)
+    }
+    pub fn try_request_group(&self, epoch: u64, events: &[RoutedEvent], result: RoutingResult) -> PushResult {
+        self.try_group_kind(epoch, events, Some(result), true)
+    }
+    fn try_group_kind(
+        &self,
+        epoch: u64,
+        events: &[RoutedEvent],
+        barrier: Option<RoutingResult>,
+        request: bool,
+    ) -> PushResult {
         if events.len() > 35
             || events.iter().any(|e| e.validate().is_err())
             || barrier.is_some_and(|b| RoutingMessage::Configured(b).validate().is_err())
@@ -185,7 +198,7 @@ impl RoutedOutbox {
             }
         }
         if let Some(result) = barrier {
-            q.entries.push_back(RoutedEntry::Barrier(result));
+            q.entries.push_back(RoutedEntry::Barrier(result, request));
         }
         q.inputs += inputs;
         q.controls += controls;
@@ -209,11 +222,11 @@ impl RoutedOutbox {
             return None;
         }
         match q.entries.front()? {
-            RoutedEntry::Barrier(_) => {
-                let RoutedEntry::Barrier(mut result) = q.entries.pop_front()? else { unreachable!() };
+            RoutedEntry::Barrier(..) => {
+                let RoutedEntry::Barrier(mut result, request) = q.entries.pop_front()? else { unreachable!() };
                 q.controls -= 1;
                 result.through_seq = q.next - 1;
-                Some(RoutedOutput::Configured(result))
+                Some(if request { RoutedOutput::Result(result) } else { RoutedOutput::Configured(result) })
             }
             RoutedEntry::Event(_) => {
                 let count = q.entries.iter().take(64).take_while(|e| matches!(e, RoutedEntry::Event(_))).count();

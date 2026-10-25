@@ -6,6 +6,151 @@ use windows_sys::{
     Win32::{Foundation::GetLastError, System::LibraryLoader::*},
     core::{GUID, w},
 };
+static OWNERSHIP: OwnershipGate = OwnershipGate::new();
+use std::sync::{
+    Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+static PENDING: AtomicBool = AtomicBool::new(true);
+static READY: AtomicBool = AtomicBool::new(false);
+static COVERAGE_PENDING: AtomicBool = AtomicBool::new(true);
+static DISCOVERY: Mutex<Option<DiscoveryReport>> = Mutex::new(None);
+#[repr(C)]
+struct UnicodeName {
+    length: u16,
+    maximum_length: u16,
+    buffer: *const u16,
+}
+#[repr(C)]
+struct Notification {
+    flags: u32,
+    full_name: *const UnicodeName,
+    base_name: *const UnicodeName,
+    base: *mut core::ffi::c_void,
+    size: u32,
+}
+unsafe extern "system" fn loaded(reason: u32, data: *const Notification, context: *mut core::ffi::c_void) {
+    if !matches!(reason, 1 | 2) || data.is_null() || context.is_null() {
+        return;
+    }
+    // SAFETY: the loader supplies its notification and name for this callback's duration.
+    let name = unsafe { (*data).base_name };
+    if name.is_null() {
+        return;
+    }
+    // SAFETY: nonnull loader-owned UNICODE_STRING, with a byte length and UTF-16 buffer.
+    let name = unsafe { &*name };
+    if name.buffer.is_null() || name.length % 2 != 0 || name.length > name.maximum_length {
+        return;
+    }
+    // SAFETY: the loader guarantees Length readable bytes in Buffer during notification.
+    let units = unsafe { std::slice::from_raw_parts(name.buffer, name.length as usize / 2) };
+    let matches =
+        |ascii: &[u8]| units.len() == ascii.len() && units.iter().zip(ascii).all(|(u, a)| (*u | 32) == *a as u16);
+    if !matches(b"dinput8.dll") && !matches(b"gameinput.dll") {
+        return;
+    }
+    READY.store(false, Ordering::Release);
+    PENDING.store(true, Ordering::Release);
+    // SAFETY: context is Arc::as_ptr of the process-resident Shared stored in SHARED.
+    let shared = unsafe { &*(context as *const super::Shared) };
+    shared.permit.store(false, Ordering::Release);
+    shared.release.store(uw_pipe_proto::input::InputReason::Unavailable as usize + 1, Ordering::Release);
+    revoke(uw_pipe_proto::input::InputReason::Unavailable);
+}
+pub(super) fn observe_modules(shared: &super::Shared) -> Result<(), super::InstallError> {
+    type Register = unsafe extern "system" fn(
+        u32,
+        Option<unsafe extern "system" fn(u32, *const Notification, *mut core::ffi::c_void)>,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> i32;
+    // SAFETY: ntdll is process-resident; the terminated export and signature follow Microsoft's devnote.
+    let function =
+        unsafe { GetProcAddress(GetModuleHandleW(w!("ntdll.dll")), c"LdrRegisterDllNotification".as_ptr().cast()) }
+            .ok_or_else(|| super::InstallError("DLL input-runtime observation unavailable".into()))?;
+    // SAFETY: exact dynamically resolved registration ABI.
+    let register: Register = unsafe { std::mem::transmute(function) };
+    let mut cookie = std::ptr::null_mut();
+    // SAFETY: callback and Shared outlive the process; cookie is writable, flags must be zero.
+    let status = unsafe { register(0, Some(loaded), (shared as *const super::Shared).cast_mut().cast(), &mut cookie) };
+    if status < 0 {
+        return Err(super::InstallError(format!("DLL input-runtime observation failed: {status:#x}")));
+    }
+    Ok(())
+}
+pub(super) fn ready() -> bool {
+    READY.load(Ordering::Acquire) && !PENDING.load(Ordering::Acquire)
+}
+pub(super) fn request_coverage() {
+    COVERAGE_PENDING.store(true, Ordering::Release);
+}
+/// Watchdog only. No discovery, allocation, locks or OS calls occur in the notification callback.
+pub(super) fn poll(shared: &super::Shared) {
+    if PENDING.swap(false, Ordering::AcqRel) {
+        super::window::wake(shared);
+        let report = discover();
+        let ready = report.directinput.status != DiscoveryStatus::Discovered
+            && report.gameinput.status != DiscoveryStatus::Discovered;
+        if let Ok(mut current) = DISCOVERY.lock() {
+            *current = Some(report);
+        }
+        READY.store(ready, Ordering::Release);
+        COVERAGE_PENDING.store(true, Ordering::Release);
+    }
+    if !COVERAGE_PENDING.load(Ordering::Acquire) || !shared.routing_mode.load(Ordering::Acquire) {
+        return;
+    }
+    let metadata = shared.policy.try_lock().ok().map(|p| (p.epoch(), p.router.revision()));
+    let Some((epoch, revision)) = metadata else {
+        return;
+    };
+    if revision == 0 {
+        return;
+    }
+    let coverage = DISCOVERY.lock().ok().and_then(|r| {
+        r.as_ref().map(|r| uw_pipe_proto::routing::NativeCoverage {
+            epoch,
+            revision,
+            directinput: api_coverage(r.directinput),
+            gameinput: api_coverage(r.gameinput),
+        })
+    });
+    if let Some(coverage) = coverage {
+        COVERAGE_PENDING.store(false, Ordering::Release);
+        shared.emit(super::RuntimeEvent::NativeCoverage(coverage));
+    }
+}
+fn api_coverage(coverage: AdapterCoverage) -> uw_pipe_proto::routing::ApiCoverage {
+    use uw_pipe_proto::routing::{ApiCoverage, Domains, NativeStatus};
+    let status = match coverage.status {
+        DiscoveryStatus::Absent => NativeStatus::Absent,
+        DiscoveryStatus::Discovered => NativeStatus::Installing,
+        DiscoveryStatus::Unsupported => NativeStatus::Unsupported,
+        DiscoveryStatus::Failed => NativeStatus::Failed,
+    };
+    ApiCoverage { status, domains: Domains::default(), abi_mask: coverage.abi_mask, detail: coverage.detail as u32 }
+}
+pub fn publish_ownership(epoch: u64, domains: uw_pipe_proto::routing::Domains, exclusive: bool) -> bool {
+    let ticket = OWNERSHIP.ticket();
+    let Some(shared) = super::SHARED.get() else {
+        return false;
+    };
+    if shared.release.load(Ordering::Acquire) != 0
+        || !shared.permit.load(Ordering::Acquire)
+        || shared.epoch.load(Ordering::Acquire) != epoch
+    {
+        return false;
+    }
+    OWNERSHIP.publish(ticket, epoch, domains, exclusive)
+}
+/// Loader callbacks may call this: atomics only, no wake, allocation, lock or system call.
+pub fn revoke(_reason: uw_pipe_proto::input::InputReason) {
+    OWNERSHIP.revoke();
+}
+pub fn ownership() -> (u64, uw_pipe_proto::routing::Domains, bool) {
+    OWNERSHIP.snapshot()
+}
 
 /// Resolve a loaded system DLL and retain it for the process lifetime before publishing addresses.
 pub fn resolve_system_export(module: &CStr, export: &CStr) -> Result<usize, i32> {

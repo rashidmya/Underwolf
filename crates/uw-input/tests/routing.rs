@@ -65,6 +65,19 @@ fn request(action: RoutingAction, target: Option<WidgetRef>) -> RoutingRequest {
 fn input_count(effects: &RouteEffects) -> usize {
     effects.events.iter().flatten().filter(|e| e.kind == EventKind::Input).count()
 }
+
+#[test]
+fn synchronized_safety_epoch_keeps_table_but_requires_a_fresh_click() {
+    let mut r = Router::new();
+    r.configure(&table(InputMode::Block));
+    r.input(InputRecord::button(0, true, 20, 20, 0), context());
+    r.revoke(InputReason::FocusLost);
+    r.advance_epoch(2);
+    let ctx = RouteContext { epoch: 2, ..context() };
+    assert_eq!(r.input(InputRecord::motion(20, 20, 0), ctx).domains, Domains::default());
+    r.input(InputRecord::button(0, false, 20, 20, 0), ctx);
+    assert!(r.input(InputRecord::button(0, true, 20, 20, 0), ctx).domains.mouse);
+}
 fn body(router: &mut Router, button: usize, down: bool, x: i32, y: i32) -> RouteEffects {
     let mut c = context();
     c.physical_buttons[button] = down;

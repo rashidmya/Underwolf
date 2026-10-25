@@ -3,7 +3,14 @@ fn main() {
     eprintln!("input_probe requires Windows/Wine");
 }
 #[cfg(windows)]
+#[path = "input_probe/routing.rs"]
+mod routing_probe;
+#[cfg(windows)]
 fn main() {
+    if std::env::args().any(|a| a == "--routing") {
+        routing_probe::run();
+        return;
+    }
     win::run();
 }
 #[cfg(windows)]

@@ -103,6 +103,12 @@ impl Router {
     pub fn revision(&self) -> u64 {
         self.revision
     }
+    /// Owner calls after safety revocation, before accepting fresh input in the new epoch.
+    pub fn advance_epoch(&mut self, epoch: u64) {
+        if epoch > self.epoch {
+            self.epoch = epoch;
+        }
+    }
     pub fn focus(&self) -> Option<WidgetRef> {
         self.focus
     }

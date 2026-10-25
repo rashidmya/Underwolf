@@ -1,4 +1,44 @@
 //! Native target discovery runs off the hook path; aliases must agree before installation.
+use portable_atomic::AtomicU128;
+use std::sync::atomic::Ordering;
+use uw_pipe_proto::routing::Domains;
+/// Coherent permission with a revocation generation, including revocation while already inactive.
+pub struct OwnershipGate(AtomicU128);
+impl Default for OwnershipGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl OwnershipGate {
+    pub const fn new() -> Self {
+        Self(AtomicU128::new(0))
+    }
+    pub fn ticket(&self) -> u128 {
+        self.0.load(Ordering::Acquire)
+    }
+    pub fn publish(&self, ticket: u128, epoch: u64, domains: Domains, exclusive: bool) -> bool {
+        let generation = ticket as u64 & !7;
+        if epoch == 0
+            || epoch < (ticket >> 64) as u64
+            || generation == !7u64
+            || (exclusive && !(domains.keyboard && domains.mouse))
+        {
+            return false;
+        }
+        let value = ((epoch as u128) << 64) | generation as u128 | domains.bits() as u128 | ((exclusive as u128) << 2);
+        self.0.compare_exchange(ticket, value, Ordering::AcqRel, Ordering::Acquire).is_ok()
+    }
+    pub fn revoke(&self) {
+        let _ = self.0.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+            let generation = (value as u64 & !7).saturating_add(8) & !7;
+            Some((value & !(u64::MAX as u128)) | generation as u128)
+        });
+    }
+    pub fn snapshot(&self) -> (u64, Domains, bool) {
+        let value = self.ticket();
+        ((value >> 64) as u64, Domains { keyboard: value & 1 != 0, mouse: value & 2 != 0 }, value & 4 != 0)
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SignatureId(pub u16);
 

@@ -40,8 +40,8 @@ fn main() {
         assert_ne!(queried, 0, "cannot identify window owner image");
         let image = String::from_utf16_lossy(&image[..length as usize]).replace('\\', "/");
         assert!(image.rsplit('/').next().is_some_and(|name| name.eq_ignore_ascii_case("deadlock.exe")));
-        // SAFETY: search remaining top-level windows after the first exact title match.
         assert!(
+            // SAFETY: search remaining top-level windows after the first exact title match.
             unsafe { FindWindowExW(std::ptr::null_mut(), hwnd, std::ptr::null(), w!("Deadlock")) }.is_null(),
             "ambiguous Deadlock windows"
         );

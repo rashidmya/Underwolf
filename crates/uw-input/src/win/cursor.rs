@@ -17,6 +17,10 @@ static JOURNAL: CursorJournal = CursorJournal::new();
 static BASELINE: Mutex<[u64; 3]> = Mutex::new([0; 3]);
 static RESTORE: Mutex<Option<RestorePlan>> = Mutex::new(None);
 static CURSOR: Mutex<Option<CursorLedger>> = Mutex::new(None);
+static FOLLOW_PHYSICAL: AtomicBool = AtomicBool::new(false);
+pub(super) fn exclusive() {
+    FOLLOW_PHYSICAL.store(false, Ordering::Release);
+}
 macro_rules! original {
     ($slot:ident,$ty:ty) => {{
         // SAFETY: each slot is initialized with the matching API trampoline before enabling.
@@ -57,7 +61,7 @@ pub(super) fn targets() -> Vec<hooks::Target> {
 fn captured() -> bool {
     !bypassed()
         && SHARED.get().is_some_and(|s| {
-            s.capture()
+            s.capture_domain(true)
                 || (s.setting_up.load(Ordering::Acquire) && s.release.load(Ordering::Acquire) == 0
                 // SAFETY: setup virtualization still requires the owner foreground window.
                 && unsafe { GetForegroundWindow() as usize == s.hwnd() })
@@ -86,7 +90,23 @@ pub(super) fn real_position() -> Option<POINT> {
     // SAFETY: valid writable point and published trampoline.
     (unsafe { f(&mut p) } != 0).then_some(p)
 }
+pub(super) fn available() -> bool {
+    let mut info = CURSORINFO { cbSize: std::mem::size_of::<CURSORINFO>() as u32, ..Default::default() };
+    let mut clip = RECT::default();
+    // SAFETY: initialized output structures; bypass reads real rather than virtualized cursor state.
+    bypass(|| unsafe {
+        GetCursorInfo(&mut info) != 0
+            && info.flags & CURSOR_SHOWING != 0
+            && GetClipCursor(&mut clip) != 0
+            && clip.right - clip.left >= GetSystemMetrics(SM_CXVIRTUALSCREEN)
+            && clip.bottom - clip.top >= GetSystemMetrics(SM_CYVIRTUALSCREEN)
+    })
+}
 pub(super) fn prepare() -> Option<u64> {
+    let standard = SHARED.get().is_some_and(|s| {
+        s.routing_mode.load(Ordering::Acquire) && s.policy.try_lock().is_ok_and(|p| !p.router.exclusive())
+    });
+    FOLLOW_PHYSICAL.store(standard, Ordering::Release);
     let token = JOURNAL.begin_restore()?;
     let Ok(mut baseline) = BASELINE.try_lock() else {
         JOURNAL.cancel_restore();
@@ -197,6 +217,14 @@ pub(super) fn restore(foreground: bool, alive: bool) -> bool {
     if pending.is_none() {
         let Ok(mut slot) = CURSOR.try_lock() else { return false };
         let Some(mut ledger) = slot.take() else { return true };
+        // Standard interaction starts with a free pointer. Preserve actual user motion unless
+        // the game published a newer warp intent; exclusive mode retains the 3a restoration rule.
+        if FOLLOW_PHYSICAL.load(Ordering::Acquire)
+            && JOURNAL.checkpoint()[0] == baseline[0]
+            && let Some(position) = real_position()
+        {
+            ledger.position(Point { x: position.x, y: position.y });
+        }
         *pending = Some(RestorePlan::new(ledger.release(foreground, alive)));
     }
     let plan = pending.as_mut().unwrap();

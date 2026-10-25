@@ -130,6 +130,11 @@ fn run() {
                         }
                         continue;
                     }
+                    RuntimeEvent::RoutingState(_)
+                    | RuntimeEvent::Configured(_)
+                    | RuntimeEvent::RoutedBatch(_)
+                    | RuntimeEvent::RoutingResult(_)
+                    | RuntimeEvent::NativeCoverage(_) => continue,
                 };
                 if endpoint.try_send(OverlayMessage::Input(message)).is_err() {
                     handle.revoke(InputReason::Overflow);

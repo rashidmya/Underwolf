@@ -1,11 +1,12 @@
 //! Windows ownership shell. Capture remains unavailable until all required adapters install.
-mod cursor;
 pub mod abi;
-pub mod native;
+mod cursor;
 pub mod hooks;
 mod keyboard;
+pub mod native;
 mod raw;
 mod registration;
+mod routing;
 mod window;
 use crate::delivery::{Lease, SentProgress};
 use crate::{
@@ -59,6 +60,11 @@ pub enum RuntimeEvent {
     Result(CaptureResult),
     Applied(u64),
     Batch(InputBatch),
+    RoutingState(uw_pipe_proto::routing::RoutingState),
+    Configured(uw_pipe_proto::routing::RoutingResult),
+    RoutedBatch(uw_pipe_proto::routing::RoutedBatch),
+    RoutingResult(uw_pipe_proto::routing::RoutingResult),
+    NativeCoverage(uw_pipe_proto::routing::NativeCoverage),
 }
 pub struct InputRuntime {
     shared: Arc<Shared>,
@@ -71,7 +77,13 @@ pub(super) struct Shared {
     hwnd: AtomicUsize,
     thread: AtomicU32,
     message: u32,
-    policy: Mutex<Policy>,
+    policy: Mutex<routing::Owner>,
+    routing_mode: AtomicBool,
+    configurations: crate::requests::ConfigurationQueue,
+    route_requests: Mutex<VecDeque<uw_pipe_proto::routing::RoutingRequest>>,
+    routed_outbox: crate::delivery::RoutedOutbox,
+    routing_state: Mutex<Option<uw_pipe_proto::routing::RoutingState>>,
+    raw_source: AtomicUsize,
     requests: RequestQueue,
     events: Mutex<VecDeque<RuntimeEvent>>,
     state: Mutex<Option<InputState>>,
@@ -112,7 +124,13 @@ impl InputRuntime {
             hwnd: AtomicUsize::new(hwnd as usize),
             thread: AtomicU32::new(thread),
             message,
-            policy: Mutex::new(Policy::new()),
+            policy: Mutex::new(routing::Owner::new()),
+            routing_mode: AtomicBool::new(false),
+            configurations: crate::requests::ConfigurationQueue::new(),
+            route_requests: Mutex::new(VecDeque::with_capacity(32)),
+            routed_outbox: crate::delivery::RoutedOutbox::new(),
+            routing_state: Mutex::new(None),
+            raw_source: AtomicUsize::new(0),
             requests: RequestQueue::new(),
             events: Mutex::new(VecDeque::with_capacity(32)),
             state: Mutex::new(None),
@@ -131,6 +149,7 @@ impl InputRuntime {
             owner_events: Mutex::new(VecDeque::with_capacity(32)),
         });
         SHARED.set(shared.clone()).map_err(|_| InstallError("input runtime already installed".into()))?;
+        native::observe_modules(&shared)?;
         window::install(&shared)?;
         let watchdog = shared.clone();
         std::thread::Builder::new()
@@ -138,6 +157,10 @@ impl InputRuntime {
             .spawn(move || {
                 loop {
                     std::thread::sleep(std::time::Duration::from_millis(10));
+                    native::poll(&watchdog);
+                    if watchdog.release.load(Ordering::Acquire) != 0 {
+                        window::wake(&watchdog);
+                    }
                     window::rediscover(&watchdog);
                     if watchdog.restore_epoch.load(Ordering::Acquire) != 0 {
                         window::wake(&watchdog);
@@ -147,7 +170,7 @@ impl InputRuntime {
                         if !healthy {
                             watchdog.revoke(InputReason::LeaseExpired);
                         }
-                        if watchdog.outbox.revoked() {
+                        if watchdog.outbox.revoked() || watchdog.routed_outbox.revoked() {
                             watchdog.revoke(InputReason::Overflow);
                         }
                         watchdog.capture();
@@ -228,16 +251,40 @@ impl InputHandle {
         {
             events.push(RuntimeEvent::State(state));
         }
+        if let Ok(mut state) = self.shared.routing_state.lock()
+            && let Some(state) = state.take()
+        {
+            events.push(RuntimeEvent::RoutingState(state));
+        }
         for event in &events {
-            if let RuntimeEvent::State(state) = event {
-                if let Ok(mut progress) = self.shared.progress.lock() {
-                    progress.announce(state.epoch);
-                }
-                self.shared.announced_epoch.store(state.epoch, Ordering::Release);
+            let epoch = match event {
+                RuntimeEvent::State(s) => s.epoch,
+                RuntimeEvent::RoutingState(s) => s.epoch,
+                _ => continue,
+            };
+            if let Ok(mut progress) = self.shared.progress.lock() {
+                progress.announce(epoch);
             }
+            self.shared.announced_epoch.store(epoch, Ordering::Release);
         }
         let epoch = self.shared.epoch.load(Ordering::Acquire);
         if self.shared.announced_epoch.load(Ordering::Acquire) != epoch {
+            return events;
+        }
+        if self.shared.routing_mode.load(Ordering::Acquire) {
+            self.shared.routed_outbox.reset(epoch);
+            if let Some(output) = self.shared.routed_outbox.take(epoch) {
+                match output {
+                    crate::delivery::RoutedOutput::Events(b) => {
+                        if let Ok(mut progress) = self.shared.progress.lock() {
+                            progress.sent(b.epoch, b.first_seq + b.events.len() as u64 - 1);
+                        }
+                        events.push(RuntimeEvent::RoutedBatch(b));
+                    }
+                    crate::delivery::RoutedOutput::Configured(r) => events.push(RuntimeEvent::Configured(r)),
+                    crate::delivery::RoutedOutput::Result(r) => events.push(RuntimeEvent::RoutingResult(r)),
+                }
+            }
             return events;
         }
         self.shared.outbox.reset(epoch);
@@ -267,7 +314,7 @@ impl Shared {
         }
         self.permit.store(false, Ordering::Release);
         self.release.store(reason as usize + 1, Ordering::Release);
-        window::wake(self)
+        native::revoke(reason);
     }
     fn capture(&self) -> bool {
         if !self.permit.load(Ordering::Acquire) || self.release.load(Ordering::Acquire) != 0 {
@@ -281,7 +328,8 @@ impl Shared {
         true
     }
     fn blocks_key(&self, vk: i32) -> bool {
-        if self.capture() {
+        let mouse = matches!(vk, 1 | 2 | 4 | 5 | 6);
+        if self.capture_domain(mouse) {
             return true;
         }
         if !(0..256).contains(&vk) {
@@ -320,15 +368,37 @@ impl Shared {
             self.revoke(InputReason::Overflow);
             return None;
         };
+        if self.routing_mode.load(Ordering::Acquire) {
+            p.use_configured_hotkeys();
+        }
         let healthy = self.lease.try_lock().is_ok_and(|lease| lease.healthy_in(p.epoch(), now()));
         let effects = p.event_with_lease(event, healthy);
         let epoch = p.epoch();
+        if self.routing_mode.load(Ordering::Acquire) {
+            let reason = match event {
+                PolicyEvent::Disconnected => Some(InputReason::Disconnected),
+                PolicyEvent::Destroyed => Some(InputReason::WindowDestroyed),
+                PolicyEvent::Foreground(false) => Some(InputReason::FocusLost),
+                PolicyEvent::Visible(false) | PolicyEvent::VisibleState { on: false, .. } => Some(InputReason::Hidden),
+                PolicyEvent::Failure(r) => Some(r),
+                PolicyEvent::Healthy(false) => Some(InputReason::LeaseExpired),
+                _ => None,
+            };
+            if let Some(reason) = reason {
+                p.router.revoke(reason);
+                p.text.reset();
+                let physical = p.core.physical_keys();
+                p.hotkeys.reseed(&physical);
+            }
+            p.router.advance_epoch(epoch);
+        }
         self.epoch.store(epoch, Ordering::Release);
         self.permit.store(
             p.active() && self.release.load(Ordering::Acquire) == 0 && !self.session_failed.load(Ordering::Acquire),
             Ordering::Release,
         );
         drop(p);
+        self.publish_route_permission();
         Some(effects)
     }
     fn report(&self, reason: InputReason, state_seq: Option<u64>) {
@@ -345,6 +415,10 @@ impl Shared {
             width: (rect.right - rect.left).max(0) as u32,
             height: (rect.bottom - rect.top).max(0) as u32,
         };
+        if self.routing_mode.load(Ordering::Acquire) {
+            self.report_routing(state);
+            return;
+        }
         if let Ok(mut latest) = self.state.try_lock() {
             *latest = Some(state);
         } else {
@@ -353,7 +427,7 @@ impl Shared {
     }
     fn effects(&self, e: Effects) {
         let epoch = self.epoch.load(Ordering::Acquire);
-        for r in e.host.into_iter().flatten() {
+        for r in e.host.into_iter().flatten().filter(|_| !self.routing_mode.load(Ordering::Acquire)) {
             if matches!(
                 self.outbox.try_push(epoch, r),
                 crate::delivery::PushResult::Revoke | crate::delivery::PushResult::Stale
@@ -373,15 +447,17 @@ impl Shared {
             }
         }
         if let Some(Transition::Enter { epoch, reason }) = e.transition {
-            let token = registration::prepare();
-            let cursor_token = token.and_then(|_| cursor::prepare());
-            self.setting_up.store(cursor_token.is_some(), Ordering::Release);
+            let domains = self.desired_domains();
+            let token = registration::prepare_for(domains);
+            let cursor_token = token.and_then(|_| if domains.mouse { cursor::prepare() } else { Some(0) });
+            self.setting_up.store(domains.mouse && cursor_token.is_some(), Ordering::Release);
             // Both transactions span arbitrary game WndProc cleanup callbacks.
             let setup = cursor_token.is_some()
                 && window::release_held(self, &e.releases)
                 && self.release.load(Ordering::Acquire) == 0
                 && !self.session_failed.load(Ordering::Acquire);
-            let cursor_ready = cursor_token.is_some_and(|token| cursor::activate(token, setup));
+            let cursor_ready =
+                cursor_token.is_some_and(|token| if domains.mouse { cursor::activate(token, setup) } else { setup });
             let success = token.is_some_and(|token| registration::activate(token, cursor_ready));
             let done = self.event(PolicyEvent::SetupFinished { epoch, success });
             self.setting_up.store(false, Ordering::Release);

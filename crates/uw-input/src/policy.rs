@@ -114,6 +114,35 @@ impl Policy {
     pub fn use_configured_hotkeys(&mut self) {
         self.legacy_hotkey = false;
     }
+    pub fn route_context(&self, healthy: bool, cursor_available: bool) -> crate::routing::RouteContext {
+        crate::routing::RouteContext {
+            epoch: self.epoch,
+            foreground: self.foreground,
+            visible: self.visible,
+            healthy: healthy
+                && self.connected
+                && self.installed
+                && !matches!(self.mode, Mode::Unavailable | Mode::Releasing),
+            cursor_available,
+            physical_keys: self.keys,
+            physical_buttons: self.buttons,
+        }
+    }
+    /// Apply desired routing domains; native setup still has to confirm entry.
+    pub fn own_domains(&mut self, domains: Domains, healthy: bool) -> Effects {
+        self.healthy = healthy;
+        if !healthy && matches!(self.mode, Mode::Entering | Mode::Capturing) {
+            let mut effects = Effects::default();
+            self.release(InputReason::LeaseExpired, &mut effects);
+            self.domains = domains;
+            return effects;
+        }
+        let mut effects = self.set_domains(domains);
+        if self.mode == Mode::Inactive && self.eligible() {
+            self.enter(InputReason::Requested, &mut effects);
+        }
+        effects
+    }
     pub fn reset_text(&mut self) {
         self.text.reset();
     }
@@ -194,7 +223,9 @@ impl Policy {
         self.text.reset();
         if matches!(self.mode, Mode::Entering | Mode::Capturing) {
             self.mode = Mode::Releasing;
-            self.bump();
+            if self.legacy_hotkey || reason != InputReason::Requested {
+                self.bump();
+            }
             if self.domains.keyboard {
                 self.suppressed_keys = self.keys;
             }

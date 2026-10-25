@@ -45,8 +45,8 @@ impl Devices {
             GUID::from_u128(0xbf798031_483a_4da2_aa99_5d64ed369700),
         ] {
             let mut factory = std::ptr::null_mut();
-            // SAFETY: current process instance, SDK IID and own writable output local.
             assert_eq!(
+                // SAFETY: current process instance, SDK IID and own writable output local.
                 unsafe { create(GetModuleHandleW(std::ptr::null()), 0x800, &iid, &mut factory, std::ptr::null_mut(),) },
                 0
             );

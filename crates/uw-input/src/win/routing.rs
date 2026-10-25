@@ -1,0 +1,429 @@
+//! The UI owner serializes routing and physical/game-held accounting under one guard.
+use super::*;
+use crate::{
+    configuration::PreparedConfig,
+    hotkeys::HotkeyMatcher,
+    routing::{RouteContext, RouteEffects, Router},
+    text::Utf16Text,
+};
+use uw_pipe_proto::routing::*;
+pub(super) struct Owner {
+    pub core: Policy,
+    pub router: Router,
+    pub hotkeys: HotkeyMatcher,
+    pub text: Utf16Text,
+}
+impl Owner {
+    pub fn new() -> Self {
+        Self {
+            core: Policy::new(),
+            router: Router::new(),
+            hotkeys: HotkeyMatcher::default(),
+            text: Utf16Text::default(),
+        }
+    }
+}
+impl std::ops::Deref for Owner {
+    type Target = Policy;
+    fn deref(&self) -> &Policy {
+        &self.core
+    }
+}
+impl std::ops::DerefMut for Owner {
+    fn deref_mut(&mut self) -> &mut Policy {
+        &mut self.core
+    }
+}
+impl InputHandle {
+    /// Select v2 before any lease can enable the legacy fixed chord.
+    pub fn connect_routing(&self) {
+        self.shared.routing_mode.store(true, Ordering::Release);
+        self.shared.submit(PolicyEvent::Connected);
+    }
+    pub fn configure(&self, config: PreparedConfig) -> Result<(), Full> {
+        let result = self.shared.configurations.try_push(config);
+        if result.is_err() {
+            self.shared.revoke(InputReason::Overflow);
+        }
+        window::wake(&self.shared);
+        result
+    }
+    pub fn route_request(&self, request: RoutingRequest) -> Result<(), Full> {
+        let result = if let Ok(mut queue) = self.shared.route_requests.try_lock()
+            && queue.len() < 32
+        {
+            queue.push_back(request);
+            Ok(())
+        } else {
+            self.shared.revoke(InputReason::Overflow);
+            Err(Full)
+        };
+        window::wake(&self.shared);
+        result
+    }
+}
+impl Shared {
+    pub(super) fn desired_domains(&self) -> Domains {
+        self.policy.try_lock().map(|p| p.domains()).unwrap_or_default()
+    }
+    pub(super) fn capture_domain(&self, mouse: bool) -> bool {
+        if !self.capture() {
+            return false;
+        }
+        if !self.routing_mode.load(Ordering::Acquire) {
+            return true;
+        }
+        let (_, domains, _) = native::ownership();
+        if mouse { domains.mouse } else { domains.keyboard }
+    }
+    pub(super) fn publish_route_permission(&self) {
+        if !self.routing_mode.load(Ordering::Acquire) {
+            return;
+        }
+        if let Ok(p) = self.policy.try_lock() {
+            if p.active() && self.permit.load(Ordering::Acquire) && self.release.load(Ordering::Acquire) == 0 {
+                if p.router.exclusive() {
+                    cursor::exclusive();
+                }
+                if !native::publish_ownership(p.epoch(), p.domains(), p.router.exclusive()) {
+                    self.revoke(InputReason::Unavailable);
+                }
+            } else {
+                native::revoke(InputReason::Unavailable);
+            }
+        } else {
+            native::revoke(InputReason::Unavailable);
+        }
+    }
+    fn context(&self, p: &Owner, cursor: bool) -> RouteContext {
+        let healthy = self.lease.try_lock().is_ok_and(|lease| lease.healthy_in(p.epoch(), now()));
+        p.route_context(healthy && native::ready(), cursor)
+    }
+    pub(super) fn report_routing(&self, state: InputState) {
+        if let Ok(p) = self.policy.try_lock() {
+            let domains = if state.active { p.domains() } else { Domains::default() };
+            let report = RoutingState {
+                epoch: state.epoch,
+                revision: p.router.revision(),
+                state_seq: state.state_seq,
+                width: state.width,
+                height: state.height,
+                pointer: p.router.pointer(),
+                focus: p.router.focus(),
+                takeover: p.router.takeover(),
+                exclusive: state.active && p.router.exclusive(),
+                domains,
+                reason: state.reason,
+            };
+            if let Ok(mut latest) = self.routing_state.try_lock() {
+                *latest = Some(report);
+                return;
+            }
+        }
+        self.revoke(InputReason::Overflow);
+    }
+    fn queue_routed(&self, effects: &RouteEffects, barrier: Option<RoutingResult>, request: bool) {
+        let mut records =
+            [RoutedEvent { revision: 1, target: None, kind: EventKind::Hotkey, argument: 1, input: None }; 35];
+        let mut count = 0;
+        for event in effects.events.iter().flatten() {
+            records[count] = *event;
+            count += 1;
+        }
+        if count == 0 && barrier.is_none() {
+            return;
+        }
+        let epoch = self.epoch.load(Ordering::Acquire);
+        if epoch != self.announced_epoch.load(Ordering::Acquire) {
+            // A safety failure invalidated the old delivery stream. Report failure through
+            // independent control space; the new epoch clears receiver-held state.
+            if let Some(mut result) = barrier {
+                if result.code == RoutingCode::Applied {
+                    result.code = RoutingCode::Superseded;
+                }
+                result.through_seq = 0;
+                self.emit(if request { RuntimeEvent::RoutingResult(result) } else { RuntimeEvent::Configured(result) });
+            }
+            return;
+        }
+        let result = if request && let Some(result) = barrier {
+            self.routed_outbox.try_request_group(epoch, &records[..count], result)
+        } else {
+            self.routed_outbox.try_group(epoch, &records[..count], barrier)
+        };
+        if matches!(result, crate::delivery::PushResult::Revoke | crate::delivery::PushResult::Stale) {
+            self.revoke(InputReason::Overflow);
+        }
+    }
+    /// Native effects run after the policy guard has been released, including reentrant game cleanup.
+    fn apply_domains(&self, domains: Domains) -> bool {
+        let (old, effects, active) = {
+            let Ok(mut p) = self.policy.try_lock() else {
+                self.revoke(InputReason::Unavailable);
+                return false;
+            };
+            let context = self.context(&p, true);
+            let old = p.domains();
+            let effects = p.own_domains(domains, context.healthy);
+            if let Some(Transition::Release { reason, .. }) = effects.transition
+                && reason != InputReason::Requested
+            {
+                p.router.revoke(reason);
+                p.text.reset();
+            }
+            self.epoch.store(p.epoch(), Ordering::Release);
+            (old, effects, p.active())
+        };
+        if old == domains && effects.transition.is_none() {
+            self.publish_route_permission();
+            return domains == Domains::default() || self.capture();
+        }
+        self.permit.store(false, Ordering::Release);
+        native::revoke(InputReason::Requested);
+        if effects.transition.is_some() {
+            self.effects(effects);
+        } else if active && old != domains {
+            let registration = registration::prepare_for(domains);
+            self.setting_up.store(domains.mouse, Ordering::Release);
+            let cursor = if !old.mouse && domains.mouse { cursor::prepare() } else { Some(0) };
+            let success = registration.is_some()
+                && cursor.is_some()
+                && window::release_held(self, &effects.releases)
+                && self.release.load(Ordering::Acquire) == 0
+                && !self.session_failed.load(Ordering::Acquire);
+            let cursor_ready = if !old.mouse && domains.mouse {
+                cursor.is_some_and(|token| cursor::activate(token, success))
+            } else if old.mouse && !domains.mouse {
+                bypass(|| cursor::restore(true, true)) && success
+            } else {
+                success
+            };
+            let success = registration.is_some_and(|token| registration::activate(token, cursor_ready));
+            self.setting_up.store(false, Ordering::Release);
+            if !success {
+                self.revoke(InputReason::SetupFailed);
+                return false;
+            }
+        }
+        if let Ok(p) = self.policy.try_lock() {
+            self.permit.store(
+                p.active() && self.release.load(Ordering::Acquire) == 0 && !self.session_failed.load(Ordering::Acquire),
+                Ordering::Release,
+            );
+        }
+        self.publish_route_permission();
+        domains == Domains::default() || self.capture()
+    }
+    pub(super) fn service_routing(&self) {
+        if !self.routing_mode.load(Ordering::Acquire) {
+            return;
+        }
+        while let Some(config) = self.configurations.pop() {
+            let c = config.config();
+            let mut result = RoutingResult {
+                epoch: c.epoch,
+                revision: c.revision,
+                request_id: c.request_id,
+                code: RoutingCode::Applied,
+                through_seq: 0,
+            };
+            let effects = {
+                let Ok(mut p) = self.policy.try_lock() else {
+                    self.revoke(InputReason::Overflow);
+                    return;
+                };
+                if !self.context(&p, true).healthy && p.active() {
+                    self.revoke(InputReason::LeaseExpired);
+                }
+                if c.epoch != p.epoch() {
+                    result.code = RoutingCode::StaleEpoch;
+                    RouteEffects::default()
+                } else {
+                    let effects = p.router.configure(&config);
+                    result.code = effects.code.unwrap_or(RoutingCode::Invalid);
+                    if result.code == RoutingCode::Applied {
+                        let physical = p.physical_keys();
+                        p.hotkeys.replace(&config, &physical);
+                    }
+                    effects
+                }
+            };
+            if result.code == RoutingCode::Applied && !self.apply_domains(effects.domains) {
+                result.code = RoutingCode::SetupFailed;
+            }
+            self.queue_routed(&effects, Some(result), false);
+            self.report(InputReason::Requested, None);
+            native::request_coverage();
+        }
+        loop {
+            let next = self.route_requests.try_lock().ok().and_then(|mut q| q.pop_front());
+            let Some(request) = next else { break };
+            let cursor = cursor::available();
+            let effects = {
+                let Ok(mut p) = self.policy.try_lock() else {
+                    self.revoke(InputReason::Overflow);
+                    return;
+                };
+                let context = self.context(&p, cursor);
+                p.router.request(request, context)
+            };
+            let mut code = effects.code.unwrap_or(RoutingCode::Invalid);
+            let success = self.apply_domains(effects.domains);
+            if code == RoutingCode::Applied && !success {
+                code = RoutingCode::SetupFailed;
+            }
+            self.queue_routed(
+                &effects,
+                Some(RoutingResult {
+                    epoch: request.epoch,
+                    revision: request.revision,
+                    request_id: request.request_id,
+                    code,
+                    through_seq: 0,
+                }),
+                true,
+            );
+            self.report(InputReason::Requested, request.state_seq);
+        }
+    }
+    pub(super) fn ingress(&self, record: InputRecord, raw: bool) -> Option<Effects> {
+        if !self.routing_mode.load(Ordering::Acquire) {
+            return self.event(if raw { PolicyEvent::Observed(record) } else { PolicyEvent::Input(record) });
+        }
+        if record.validate().is_err() {
+            self.revoke(InputReason::Unavailable);
+            return None;
+        }
+        let mouse = record.kind != 1 && record.kind != 2;
+        let raw_owner = self.raw_source.load(Ordering::Acquire) & (if mouse { 1 } else { 2 }) != 0;
+        if record.kind != 2 && raw != raw_owner {
+            let pass = if raw {
+                !(self.capture_domain(mouse) || record.kind == 1 && self.blocks_key(record.a))
+            } else {
+                false
+            };
+            return Some(Effects { pass, ..Effects::default() });
+        }
+        let cursor = cursor::available();
+        let (mut routed, consumed, focus, keyboard) = {
+            let Ok(mut p) = self.policy.try_lock() else {
+                self.revoke(InputReason::Overflow);
+                return None;
+            };
+            let context = self.context(&p, cursor);
+            let focus = p.router.focus();
+            let mut physical = p.physical_keys();
+            if record.kind == 1 {
+                physical[record.a as usize] = record.flags & 1 != 0;
+            }
+            let hit = if context.healthy && context.foreground && context.visible {
+                p.hotkeys.observe(record, &physical)
+            } else {
+                p.hotkeys.reseed(&physical);
+                None
+            };
+            let consumed = p.hotkeys.consumes_last();
+            let mut routed = if let Some(hit) = hit {
+                let action = match hit.action {
+                    HotkeyAction::ToggleEdit => {
+                        Some(if p.router.exclusive() { RoutingAction::LeaveEdit } else { RoutingAction::EnterEdit })
+                    }
+                    HotkeyAction::Takeover => Some(RoutingAction::Takeover),
+                    HotkeyAction::ReleaseTakeover => Some(RoutingAction::ReleaseTakeover),
+                    HotkeyAction::Notify => None,
+                };
+                let mut effects = if let Some(action) = action {
+                    let request = RoutingRequest {
+                        epoch: context.epoch,
+                        revision: p.router.revision(),
+                        request_id: hit.binding_id,
+                        target: hit.target,
+                        action,
+                        state_seq: None,
+                    };
+                    p.router.request(request, context)
+                } else if consumed {
+                    let mut effects = RouteEffects::default();
+                    effects.domains = p.router.domains();
+                    effects.exclusive = p.router.exclusive();
+                    effects
+                } else {
+                    p.router.input(record, context)
+                };
+                if let Some(slot) = effects.events.iter_mut().find(|e| e.is_none()) {
+                    *slot = Some(RoutedEvent {
+                        revision: p.router.revision(),
+                        target: None,
+                        kind: EventKind::Hotkey,
+                        argument: hit.binding_id,
+                        input: None,
+                    });
+                } else {
+                    self.revoke(InputReason::Overflow);
+                }
+                effects
+            } else if consumed {
+                {
+                    let mut e = RouteEffects::default();
+                    e.domains = p.router.domains();
+                    e.exclusive = p.router.exclusive();
+                    e
+                }
+            } else {
+                p.router.input(record, context)
+            };
+            if consumed {
+                routed.pass = false;
+            }
+            if focus != p.router.focus() {
+                p.text.reset();
+            }
+            (routed, consumed, p.router.focus(), p.router.domains().keyboard)
+        };
+        if !self.apply_domains(routed.domains)
+            && let Ok(mut p) = self.policy.try_lock()
+        {
+            routed = p.router.revoke(InputReason::SetupFailed);
+        }
+        let mut effects = {
+            let Ok(mut p) = self.policy.try_lock() else {
+                self.revoke(InputReason::Overflow);
+                return None;
+            };
+            let healthy = self.context(&p, cursor).healthy;
+            let mut e =
+                p.event_with_lease(PolicyEvent::RoutedInput { record, pass: routed.pass && !consumed }, healthy);
+            e.host = [None; 2];
+            // Signal TranslateMessage only for an actual routed, owned key-down.
+            if record.kind == 1
+                && record.flags & 1 != 0
+                && keyboard
+                && focus.is_some()
+                && routed.events.iter().flatten().any(|e| e.kind == EventKind::Input && e.input == Some(record))
+            {
+                e.host[0] = Some(record);
+            }
+            e
+        };
+        effects.pass &= routed.pass && !consumed;
+        self.queue_routed(&routed, None, false);
+        self.report(InputReason::Ready, None);
+        Some(effects)
+    }
+    pub(super) fn routed_char(&self, scalar: u32, utf16: bool) -> bool {
+        let chars = {
+            let Ok(mut p) = self.policy.try_lock() else {
+                self.revoke(InputReason::Overflow);
+                return true;
+            };
+            if utf16 { p.text.push(scalar as u16) } else { [char::from_u32(scalar), None] }
+        };
+        let mut pass = true;
+        for ch in chars.into_iter().flatten() {
+            if let Some(e) = self.ingress(InputRecord::text(ch, 0), false) {
+                pass &= e.pass;
+            }
+        }
+        pass
+    }
+}

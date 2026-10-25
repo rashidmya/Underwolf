@@ -23,6 +23,37 @@ fn enter(p: &mut Policy) {
 }
 
 #[test]
+fn configured_local_ownership_changes_keep_the_delivery_session_healthy() {
+    let mut p = ready();
+    p.use_configured_hotkeys();
+    let epoch = p.epoch();
+    let effects = p.own_domains(Domains { keyboard: false, mouse: true }, true);
+    assert!(matches!(effects.transition, Some(Transition::Enter { .. })));
+    p.event(PolicyEvent::SetupFinished { epoch, success: true });
+    assert!(p.active());
+    let released = p.own_domains(Domains::default(), true);
+    assert_eq!(p.epoch(), epoch);
+    assert!(matches!(released.transition, Some(Transition::Release { .. })));
+    p.event(PolicyEvent::Restored { epoch });
+    assert!(matches!(
+        p.own_domains(Domains { keyboard: true, mouse: false }, true).transition,
+        Some(Transition::Enter { .. })
+    ));
+}
+
+#[test]
+fn domain_application_rechecks_the_current_lease_before_retaining_ownership() {
+    let mut p = ready();
+    p.use_configured_hotkeys();
+    p.own_domains(Domains { keyboard: true, mouse: false }, true);
+    p.event(PolicyEvent::SetupFinished { epoch: p.epoch(), success: true });
+    assert!(p.active());
+    let effects = p.own_domains(Domains { keyboard: true, mouse: false }, false);
+    assert!(!p.active());
+    assert!(matches!(effects.transition, Some(Transition::Release { reason: InputReason::LeaseExpired, .. })));
+}
+
+#[test]
 fn mouse_ownership_does_not_release_or_filter_game_keyboard() {
     let mut p = ready();
     p.event(PolicyEvent::Input(key(87, true)));

@@ -24,7 +24,7 @@ pub(super) fn targets() -> Vec<hooks::Target> {
 }
 fn observe(record: &[u8]) -> bool {
     let Some(s) = SHARED.get() else { return false };
-    if s.capture() {
+    if s.capture() && !s.routing_mode.load(Ordering::Acquire) {
         return true;
     }
     let kind = u32::from_le_bytes(record[..4].try_into().unwrap());
@@ -69,13 +69,31 @@ fn observe(record: &[u8]) -> bool {
             return false;
         }
         let flags = u16::from_le_bytes(record[28..30].try_into().unwrap());
-        let mut blocked = false;
+        let mut point = windows_sys::Win32::Foundation::POINT::default();
+        // SAFETY: real cursor position is converted using a process-owned window and writable point.
+        bypass(|| unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut point);
+            windows_sys::Win32::Graphics::Gdi::ScreenToClient(s.hwnd() as HWND, &mut point);
+        });
+        let mut blocked = s.capture_domain(true);
+        if s.routing_mode.load(Ordering::Acquire) {
+            blocked |= window::observe(s, InputRecord::motion(point.x, point.y, 0));
+        }
         for (button, down) in [1u16, 0x10, 4, 0x40, 0x100].into_iter().enumerate() {
             if flags & down != 0 {
-                blocked |= window::observe(s, InputRecord::button(button as i32, true, 0, 0, 0));
+                blocked |= window::observe(s, InputRecord::button(button as i32, true, point.x, point.y, 0));
             }
             if flags & (down << 1) != 0 {
-                blocked |= window::observe(s, InputRecord::button(button as i32, false, 0, 0, 0));
+                blocked |= window::observe(s, InputRecord::button(button as i32, false, point.x, point.y, 0));
+            }
+        }
+        if s.routing_mode.load(Ordering::Acquire) {
+            let delta = i16::from_le_bytes(record[30..32].try_into().unwrap()) as i32;
+            if flags & 0x400 != 0 {
+                blocked |= window::observe(s, InputRecord::wheel(0, delta, point.x, point.y, 0));
+            }
+            if flags & 0x800 != 0 {
+                blocked |= window::observe(s, InputRecord::wheel(delta, 0, point.x, point.y, 0));
             }
         }
         return blocked;
