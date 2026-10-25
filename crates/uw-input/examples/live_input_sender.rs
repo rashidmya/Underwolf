@@ -18,6 +18,53 @@ fn main() {
         // SAFETY: scalar queries on the opaque target handle.
         unsafe { IsWindow(hwnd) != 0 && GetForegroundWindow() == hwnd }
     };
+    if std::env::args().any(|arg| arg == "--watch-foreground") {
+        use std::io::Read;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        use windows_sys::Win32::{Foundation::CloseHandle, System::Threading::*};
+        let mut owner = 0;
+        // SAFETY: valid opaque window and writable process-id output.
+        assert_ne!(unsafe { GetWindowThreadProcessId(hwnd, &mut owner) }, 0);
+        // SAFETY: no pointer arguments; query-only access to the window owner.
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, owner) };
+        assert!(!process.is_null(), "cannot query window owner");
+        let mut image = vec![0u16; 32768];
+        let mut length = image.len() as u32;
+        // SAFETY: live process handle and writable UTF-16 buffer with capacity in length.
+        let queried = unsafe { QueryFullProcessImageNameW(process, 0, image.as_mut_ptr(), &mut length) };
+        // SAFETY: query handle is owned by this fixture and no longer needed.
+        unsafe { CloseHandle(process) };
+        assert_ne!(queried, 0, "cannot identify window owner image");
+        let image = String::from_utf16_lossy(&image[..length as usize]).replace('\\', "/");
+        assert!(image.rsplit('/').next().is_some_and(|name| name.eq_ignore_ascii_case("deadlock.exe")));
+        // SAFETY: search remaining top-level windows after the first exact title match.
+        assert!(
+            unsafe { FindWindowExW(std::ptr::null_mut(), hwnd, std::ptr::null(), w!("Deadlock")) }.is_null(),
+            "ambiguous Deadlock windows"
+        );
+        println!("WINDOW_OWNER {owner} {}", hwnd as usize);
+        let running = Arc::new(AtomicBool::new(true));
+        let reader = running.clone();
+        std::thread::spawn(move || {
+            let _ = std::io::stdin().read(&mut [0]);
+            reader.store(false, Ordering::Release);
+        });
+        let mut last = None;
+        // This separate process only queries window state; it installs no game hooks.
+        // SAFETY: the opaque window handle is queried, never dereferenced.
+        while running.load(Ordering::Acquire) && unsafe { IsWindow(hwnd) } != 0 {
+            let current = foreground();
+            if last != Some(current) {
+                println!("FOREGROUND {}", u8::from(current));
+                last = Some(current);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        return;
+    }
     assert!(foreground(), "Deadlock must already be foreground");
     let send = |events: &[INPUT]| {
         assert!(foreground(), "foreground changed; cancelling remaining fixture input");
