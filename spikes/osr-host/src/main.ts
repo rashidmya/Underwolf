@@ -28,6 +28,7 @@ import { app, BrowserWindow, ipcMain, screen } from 'electron';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { ProductionInput, productionOptions, applySurface, invalidateSurface, setCaptureDimming } from './production-input';
+import { ProductionRouting, routingOptions, applyRoutingSurface, invalidateRoutingSurface } from './production-routing';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -75,6 +76,7 @@ const TITLE_BAR = 24;
 
 const SIZES: Record<string, { width: number; height: number }> = {
   'production-input': { width: 640, height: 400 },
+  'production-routing': { width: 850, height: 560 },
   solid: { width: 400, height: 300 },
   animated: { width: 400, height: 300 },
   static: { width: 300, height: 200 },
@@ -92,7 +94,7 @@ interface Widget {
   win?: BrowserWindow;
 }
 
-type Capture = 'wine' | 'surface' | 'win32' | 'production';
+type Capture = 'wine' | 'surface' | 'win32' | 'production' | 'routing';
 
 function parseArgs(argv: string[]): { consumer: boolean; capture: Capture; widgets: string[]; gep?: string } {
   const widgets: string[] = [];
@@ -106,7 +108,7 @@ function parseArgs(argv: string[]): { consumer: boolean; capture: Capture; widge
     else if (argv[i] === '--widget' && argv[i + 1]) widgets.push(argv[++i]);
     else if (argv[i] === '--capture' && argv[i + 1]) {
       const c = argv[++i];
-      capture = c === 'production' ? 'production' : c === 'surface' ? 'surface' : c === 'win32' ? 'win32' : 'wine';
+      capture = c === 'routing' ? 'routing' : c === 'production' ? 'production' : c === 'surface' ? 'surface' : c === 'win32' ? 'win32' : 'wine';
     }
   }
   return { consumer, capture, widgets: widgets.length ? widgets : ['animated'], gep };
@@ -147,7 +149,7 @@ function layout(names: string[]): Widget[] {
   return names.map((name, id) => {
     const size = SIZES[name];
     if (!size) throw new Error(`unknown widget '${name}' (known: ${Object.keys(SIZES).join(', ')})`);
-    const w: Widget = { id, name, x: 100, y, ...size };
+    const w: Widget = { id, name, x: name === 'production-routing' ? 0 : 100, y: name === 'production-routing' ? 0 : y, ...size };
     y += size.height + 50;
     return w;
   });
@@ -473,9 +475,11 @@ function onWin32Inputs() {
 app.whenReady().then(() => {
   const argv = process.argv.slice(2);
   const production = productionOptions(argv);
+  const routing = routingOptions(argv);
+  const nativeSession = routing ?? production;
   const { consumer, capture, widgets: selected, gep } = parseArgs(argv);
-  const names = production ? ['production-input'] : selected;
-  if (production && process.env.UW_SPIKE_CAPTURE !== 'win32') {
+  const names = routing ? ['production-routing'] : production ? ['production-input'] : selected;
+  if (nativeSession && process.env.UW_SPIKE_CAPTURE !== 'win32') {
     throw Error('production mode requires UW_SPIKE_CAPTURE=win32 on host and game; use the layer for drawing only');
   }
   captureMode = capture;
@@ -497,26 +501,56 @@ app.whenReady().then(() => {
     widgets.push(w);
     startWidget(w, consumer);
   }
-  let productionReceiver: ProductionInput | undefined;
-  if (production) {
-    const child = spawn(production.command, [], { stdio: ['pipe', 'pipe', 'inherit'] });
+  let productionReceiver: ProductionInput | ProductionRouting | undefined;
+  if (nativeSession) {
+    const child = spawn(nativeSession.command, [], { stdio: ['pipe', 'pipe', 'inherit'] });
     console.log(`[production-input] launcher pid ${child.pid}; receiver pid ${process.pid}`);
     let paused = false;
     let resume: (() => void) | undefined;
     // Test controls deliberately stop consumption, not just logging.
     process.on('SIGUSR1', () => { paused = true; });
     process.on('SIGUSR2', () => { paused = false; resume?.(); resume = undefined; });
-    const receiver = productionReceiver = new ProductionInput(async (event, application) => {
+    const send = (command: unknown) => {
+      if (!child.stdin.write(JSON.stringify(command) + '\n')) child.kill();
+    };
+    const fail = (reason: string) => { console.error('[production-input]', reason); child.kill(); };
+    const invalidate = (generation: number) => {
+      void widgets[0].win!.webContents.executeJavaScript(routing ? invalidateRoutingSurface(generation) : invalidateSurface(generation), false)
+        .catch(error => { console.error('[production-input]', error); child.kill(); });
+    };
+    const visual = (on: boolean) => setCaptureDimming(bridge, on);
+    const receiver = productionReceiver = routing ? new ProductionRouting(async (event, application) => {
       if (paused) await new Promise<void>(resolve => { resume = resolve; });
       if (!application.current()) return;
-      const win = widgets[0].win!;
-      await win.webContents.executeJavaScript(applySurface(event, application.generation), false);
-    }, command => {
-      if (!child.stdin.write(JSON.stringify(command) + '\n')) child.kill();
-    }, reason => { console.error('[production-input]', reason); child.kill(); }, generation => {
-      void widgets[0].win!.webContents.executeJavaScript(invalidateSurface(generation), false)
-        .catch(error => { console.error('[production-input]', error); child.kill(); });
-    }, on => setCaptureDimming(bridge, on));
+      await widgets[0].win!.webContents.executeJavaScript(applyRoutingSurface(event, application.generation), false);
+      if (event.type === 'record' && event.record.kind === 'hotkey' && event.record.argument === 2 && application.current()) {
+        const table = (receiver as ProductionRouting).widgets;
+        const second = table.find(widget => widget.instance.id === 2);
+        if (second) { second.mode = second.mode === 'block' ? 'pass' : second.mode === 'pass' ? 'notify' : 'block'; (receiver as ProductionRouting).configure(table); }
+      }
+    }, send, fail, invalidate, visual) : new ProductionInput(async (event, application) => {
+      if (paused) await new Promise<void>(resolve => { resume = resolve; });
+      if (!application.current()) return;
+      await widgets[0].win!.webContents.executeJavaScript(applySurface(event, application.generation), false);
+    }, send, fail, invalidate, visual);
+    if (receiver instanceof ProductionRouting) {
+      // Test-only JSON controls on the host's stdin; no second input hook/gate.
+      createInterface({ input: process.stdin }).on('line', line => {
+        try {
+          const control = JSON.parse(line), table = receiver.widgets;
+          const widget = table.find(value => value.instance.id === control.widget);
+          if (control.control === 'mode' && widget && ['block', 'pass', 'notify'].includes(control.mode)) widget.mode = control.mode;
+          else if (control.control === 'move' && widget) { widget.x = control.x; widget.y = control.y; }
+          else if (control.control === 'reuse' && widget && widget.instance.generation < 0xffffffff) widget.instance.generation++;
+          else if (control.control === 'remove' && widget) table.splice(table.indexOf(widget), 1);
+          else if (control.control === 'rebind') { receiver.configure(table, { vk: control.vk, modifiers: control.modifiers }); return; }
+          else if (control.control === 'request') { receiver.request(control.action, widget?.instance ?? null); return; }
+          else if (control.control === 'visible' && typeof control.on === 'boolean') { send({ cmd: 'set_state', visible: control.on }); return; }
+          else throw Error('unknown routing control');
+          receiver.configure(table);
+        } catch (error) { console.error('[production-routing] control:', error); }
+      });
+    }
     const lines = createInterface({ input: child.stdout });
     lines.on('line', line => { console.log('[production-input]', line); receiver.consume(line); });
     child.on('error', error => { console.error('[production-input]', error); app.exit(1); });
@@ -537,10 +571,10 @@ app.whenReady().then(() => {
       generation = g;
       if (editOn) setEdit(false, 'layer reconnected');
       if (captureMode === 'win32' && g !== 0) injectHook();
-      if (captureMode === 'production') setCaptureDimming(bridge, productionReceiver?.capturing ?? false);
+      if (captureMode === 'production' || captureMode === 'routing') setCaptureDimming(bridge, productionReceiver?.capturing ?? false);
       for (const w of widgets) w.win?.webContents.invalidate();
     }
-    if (captureMode === 'production') return;
+    if (captureMode === 'production' || captureMode === 'routing') return;
     for (const on of bridge.takeEditRequests()) setEdit(on, `hotkey (${captureMode})`);
     if (captureMode === 'win32') onWin32Inputs();
     else onLayerInputs();

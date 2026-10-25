@@ -9,6 +9,8 @@
     "build": "npm run build:native && tsc",
     "start": "npm run build --silent && electron --ozone-platform=x11 .",
     "test:production-input": "tsc && node --test dist/production-input.test.js",
+    "test:production-routing": "tsc && node --test dist/production-routing.test.js",
+    "test:production-routing-smoke": "tsc && electron --ozone-platform=x11 dist/production-routing-smoke.js",
     "test:production-smoke": "tsc && electron --ozone-platform=x11 dist/production-smoke.js"
   },
   "devDependencies": {

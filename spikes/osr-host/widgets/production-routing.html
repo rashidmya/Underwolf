@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Targeted input fixture</title>
+<style>
+body{margin:0;background:transparent;color:#e7edf6;font:15px system-ui}header{position:absolute;left:12px;top:10px;background:#132232ed;padding:12px;border-radius:8px}article{position:absolute;box-sizing:border-box;padding:16px;background:#132232f5;border:2px solid #527b98;border-radius:10px;overflow:hidden}article[data-focus=true]{border-color:#7ce0bb}h2{font-size:18px;margin:0 0 8px}p{margin:5px 0}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#24374a;padding:10px;margin:8px 0}
+</style>
+<header><b>Targeted input fixture</b> · <span id="mode">Waiting</span><br>Ctrl+Tab: exclusive · Ctrl+F10: cycle second widget policy</header><main id="cards"></main>
+<script>
+const models=new Map(), labels=['left','middle','right','back','forward'];
+const identity=instance=>`${instance.id}:${instance.generation}`;
+window.underwolfGeneration=0;window.underwolfPauseTarget=null;const waiting=new Set();
+window.underwolfPending=()=>waiting.size;window.underwolfMutations=[];
+window.underwolfResume=()=>{window.underwolfPauseTarget=null;for(const resolve of waiting)resolve();waiting.clear();};
+function draw(model){
+ const node=model.node;node.dataset.focus=String(model.focus);
+ node.querySelector('.keys').textContent='Keys: '+([...model.keys].join(', ')||'—');
+ node.querySelector('.buttons').textContent='Buttons: '+([...model.buttons].map(button=>labels[button]).join(', ')||'—');
+ node.querySelector('.text').textContent='Text: '+model.text;
+ node.querySelector('.wheel').textContent=`Wheel: ${model.wheel[0]}, ${model.wheel[1]}`;
+ node.querySelector('.pointer').textContent=`Local pointer: ${model.pointer.join(', ')}`;
+}
+window.underwolfConsume=async(event,generation)=>{
+ if(generation!==window.underwolfGeneration)return;
+ if(event.type==='reset'){for(const model of models.values())model.node.remove();models.clear();document.getElementById('mode').textContent='Disconnected';return;}
+ if(event.type==='state'){document.getElementById('mode').textContent=`${event.state.exclusive?'Exclusive':'Standard'} · epoch ${event.state.epoch}`;return;}
+ if(event.type==='table'){
+  const live=new Set(event.config.widgets.map(widget=>identity(widget.instance)));
+  for(const [id,model] of models)if(!live.has(id)){model.node.remove();models.delete(id);}
+  for(const widget of event.config.widgets){
+   const id=identity(widget.instance);let model=models.get(id);
+   if(!model){
+    const node=document.createElement('article');node.dataset.target=id;
+    node.innerHTML='<h2></h2><p class="keys"></p><p class="buttons"></p><p class="wheel"></p><p class="pointer"></p><pre class="text"></pre>';
+    document.getElementById('cards').append(node);
+    model={node,keys:new Set(),buttons:new Set(),text:'',wheel:[0,0],pointer:[0,0],focus:false};models.set(id,model);
+   }
+   Object.assign(model.node.style,{left:widget.x+'px',top:widget.y+'px',width:widget.width+'px',height:widget.height+'px',zIndex:widget.z,display:widget.visible?'block':'none'});
+   model.node.querySelector('h2').textContent=`Widget ${id} · ${widget.mode}`;draw(model);
+  }
+  return;
+ }
+ if(event.type!=='record'||!event.record.target)return;
+ const record=event.record,id=identity(record.target);
+ if(window.underwolfPauseTarget===record.target.id)await new Promise(resolve=>waiting.add(resolve));
+ // This check runs in the same JS world after any asynchronous fixture pause.
+ if(generation!==window.underwolfGeneration)return;
+ const model=models.get(id);if(!model)return;
+ if(record.kind==='cancel'){model.keys.clear();model.buttons.clear();model.focus=false;}
+ if(record.kind==='focus')model.focus=record.argument===1;
+ if(record.kind==='input'){
+  const input=record.input;
+  if(input.kind===1){if(input.flags&1)model.keys.add(input.a);else model.keys.delete(input.a);}
+  if(input.kind===2)model.text=(model.text+String.fromCodePoint(input.a)).slice(-200);
+  window.underwolfMutations.push({target:id,kind:input.kind,value:input.a});
+  if(input.kind===4){if(input.flags&1)model.buttons.add(input.a);else model.buttons.delete(input.a);}
+  if(input.kind===5){model.wheel[0]+=input.a;model.wheel[1]+=input.b;}
+  const widget=event.widget;
+  if(input.kind===3)model.pointer=[input.a-widget.x,input.b-widget.y];
+ }
+ draw(model);
+};
+</script></html>
