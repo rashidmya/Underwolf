@@ -2,7 +2,10 @@
 
 **Date:** 2026-10-25
 **Status:** Approved by the owner on 2026-10-25 after the builder review. The
-behavior and limits below originated as the author's proposals.
+behavior and limits below originated as the author's proposals. Implementation
+and automated gates for Tasks 1–7 and 9–11 are recorded in the
+[3b check](../checks/2026-10-25-input-3b.md). GameInput implementation/native
+acceptance and owner/performance gates remain open; this phase is incomplete.
 **Starting point:** `main` at `28996ad`, following the integration of input 3a.
 
 ## Intent
