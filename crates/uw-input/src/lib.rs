@@ -4,6 +4,7 @@ pub mod text;
 
 pub mod delivery;
 pub mod hooks;
+pub mod native;
 pub mod raw;
 pub mod registration;
 pub mod requests;

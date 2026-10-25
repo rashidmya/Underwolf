@@ -1,5 +1,7 @@
 //! Windows ownership shell. Capture remains unavailable until all required adapters install.
 mod cursor;
+pub mod abi;
+pub mod native;
 pub mod hooks;
 mod keyboard;
 mod raw;
