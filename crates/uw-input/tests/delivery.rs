@@ -100,3 +100,22 @@ fn late_old_batch_cannot_publish_progress_into_a_new_epoch() {
     progress.announce(1);
     assert_eq!(progress.through(2), 3);
 }
+
+#[test]
+fn continuing_pipe_writes_do_not_renew_unconsumed_progress() {
+    let mut lease = Lease::new(1);
+    let initial = lease.challenge(0, 0).unwrap();
+    assert!(lease.ack(ack(initial), 0));
+    let mut progress = SentProgress::default();
+    progress.announce(1);
+    for now in (100..=500).step_by(100) {
+        assert!(progress.sent(1, now));
+        let challenge = lease.challenge(now, progress.through(1)).unwrap();
+        // The receiver has not consumed the newer events; a fabricated partial ACK is invalid.
+        assert!(!lease.ack(InputAck { through_seq: 0, ..ack(challenge) }, now));
+        assert_eq!(lease.healthy(now), now < 500);
+    }
+    lease.reset(2);
+    assert!(!lease.ack(ack(initial), 501));
+    assert!(!lease.healthy(501));
+}
