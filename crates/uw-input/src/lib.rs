@@ -11,4 +11,6 @@ pub mod requests;
 #[cfg(windows)]
 pub mod win;
 
+pub mod configuration;
 pub mod cursor;
+pub mod hotkeys;
