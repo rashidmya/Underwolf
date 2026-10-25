@@ -19,25 +19,35 @@ fn main() {
         unsafe { IsWindow(hwnd) != 0 && GetForegroundWindow() == hwnd }
     };
     assert!(foreground(), "Deadlock must already be foreground");
-    let mut rect = RECT::default();
-    // SAFETY: writable rectangle for the known target window.
-    assert_ne!(unsafe { GetClientRect(hwnd, &mut rect) }, 0);
-    let mut point = POINT { x: ((rect.right - rect.left) / 2).min(300), y: ((rect.bottom - rect.top) / 2).min(300) };
-    assert!(foreground(), "foreground changed; cancelling pointer placement");
-    // SAFETY: writable point; keep the pointer well inside the game client area.
-    unsafe {
-        assert_ne!(ClientToScreen(hwnd, &mut point), 0);
-        assert_ne!(SetCursorPos(point.x, point.y), 0);
-    }
-    let send = |events: &[INPUT], paired: bool| {
+    let send = |events: &[INPUT]| {
         assert!(foreground(), "foreground changed; cancelling remaining fixture input");
         // SAFETY: initialized INPUT array and native element size.
         let inserted = unsafe { SendInput(events.len() as u32, events.as_ptr(), std::mem::size_of::<INPUT>() as i32) };
         if inserted != events.len() as u32 {
             // Serialized input is not transactional. Attempt every matching up even if
             // focus changed; never send another down after a partial insertion.
-            if paired {
-                let releases: Vec<INPUT> = events.iter().skip(1).step_by(2).copied().collect();
+            let releases: Vec<INPUT> = events
+                .iter()
+                .filter(|event| {
+                    // SAFETY: each initialized union member is selected by its INPUT type.
+                    unsafe {
+                        match event.r#type {
+                            INPUT_KEYBOARD => event.Anonymous.ki.dwFlags & KEYEVENTF_KEYUP != 0,
+                            INPUT_MOUSE => {
+                                event.Anonymous.mi.dwFlags
+                                    & (MOUSEEVENTF_LEFTUP
+                                        | MOUSEEVENTF_MIDDLEUP
+                                        | MOUSEEVENTF_RIGHTUP
+                                        | MOUSEEVENTF_XUP)
+                                    != 0
+                            }
+                            _ => false,
+                        }
+                    }
+                })
+                .copied()
+                .collect();
+            if !releases.is_empty() {
                 let mut released = 0;
                 for _ in 0..3 {
                     // SAFETY: initialized release-only suffix and native element size.
@@ -61,6 +71,27 @@ fn main() {
             std::process::exit(2);
         }
     };
+    if std::env::args().any(|arg| arg == "--hotkey-only") {
+        let events = [(VK_LCONTROL, 0), (VK_TAB, 0), (VK_TAB, KEYEVENTF_KEYUP), (VK_LCONTROL, KEYEVENTF_KEYUP)].map(
+            |(key, flags)| INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: key, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
+            },
+        );
+        send(&events);
+        println!("SENT: one Ctrl+Tab chord; verify actual capture state separately.");
+        return;
+    }
+    let mut rect = RECT::default();
+    // SAFETY: writable rectangle for the known target window.
+    assert_ne!(unsafe { GetClientRect(hwnd, &mut rect) }, 0);
+    let mut point = POINT { x: ((rect.right - rect.left) / 2).min(300), y: ((rect.bottom - rect.top) / 2).min(300) };
+    assert!(foreground(), "foreground changed; cancelling pointer placement");
+    // SAFETY: writable point; keep the pointer well inside the game client area.
+    unsafe {
+        assert_ne!(ClientToScreen(hwnd, &mut point), 0);
+        assert_ne!(SetCursorPos(point.x, point.y), 0);
+    }
     let mouse = |flags, data| INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
@@ -76,7 +107,7 @@ fn main() {
             });
         }
     }
-    send(&text, true);
+    send(&text);
     for (down, up, data) in [
         (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 0),
         (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, 0),
@@ -84,10 +115,10 @@ fn main() {
         (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, 1),
         (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, 2),
     ] {
-        send(&[mouse(down, data), mouse(up, data)], true);
+        send(&[mouse(down, data), mouse(up, data)]);
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    send(&[mouse(MOUSEEVENTF_WHEEL, 120), mouse(MOUSEEVENTF_HWHEEL, 120)], false);
+    send(&[mouse(MOUSEEVENTF_WHEEL, 120), mouse(MOUSEEVENTF_HWHEEL, 120)]);
     println!(
         "SENT: Unicode 3a😀, five button pairs, vertical and horizontal wheel. Verify receiver records and owner observations separately."
     );
