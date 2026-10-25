@@ -1,7 +1,7 @@
 # Input 3a — production keyboard and mouse capture
 
 **Date:** 2026-10-24
-**Status:** Approved by the owner on 2026-10-24; implementation plan next.
+**Status:** Approved by the owner on 2026-10-24. Implementation, automated/live acceptance and final branch review passed on 2026-10-25; integration choice pending.
 
 ## Intent and decisions
 
@@ -229,3 +229,23 @@ pass is not a substitute for evidence about Proton input, cursor behavior or per
 2026-10-24: a separate read-only reviewer checked whether consequential unanswered questions
 prevented an implementation plan. Result: "nothing important left". The owner subsequently
 approved the proposed behavior.
+
+## Owner-check evidence — 2026-10-25
+
+The owner confirmed capture isolation, dimming/native pointer behavior, held-key recovery,
+focus loss, delivery of text/five buttons/both wheels, renderer stall, helper restart,
+hide/show controls, and desktop input after normal game exit from active capture. No visible
+hitches were reported in the final check. This was Deadlock 6819 on Proton 11.0-2e, KDE Wayland,
+RTX 4090 / driver 615.78.08, at 2560 × 1440; GNOME remains untested.
+
+Hide-triggered permission release and UI restoration have separate external upper bounds of
+16.8 ms and 27.3 ms, including IPC/scheduling. Three controlled input-idle comparisons gave
+mean per-run FPS 425.838 → 427.419 and mean per-run p99 3.534501 → 3.558652 ms (+0.683%).
+A fourth pair interrupted for roughly 55 minutes remains separately reported; including it
+gives +4.383% p99 and fails the input-only threshold. These observations do not establish a
+causal FPS improvement or the complete rendered-overlay budget reserved for plan 4.
+
+The original 400 FPS cap is restored and all owned test processes were stopped before the
+owner resumed a standard game. Detailed results, failed/incomplete attempts, evidence paths,
+and limits are in [the check record](../checks/2026-10-24-input-3a.md) and
+[the machine-readable results](../checks/2026-10-25-input-3a-results.json).

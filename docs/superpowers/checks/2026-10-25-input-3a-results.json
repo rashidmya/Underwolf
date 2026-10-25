@@ -1,0 +1,385 @@
+{
+  "schema_version": 1,
+  "phase": "input 3a",
+  "recorded_utc": "2026-10-25T12:59:15.313165+00:00",
+  "verification_head_before_evidence_commit": "98a43d0a46a776df476a5e385bba00be8c402f33",
+  "environment": {
+    "session_type": "wayland",
+    "desktop": "KDE",
+    "game_client_version": 6819,
+    "proton_version": "proton-11.0-2e-x86_64",
+    "gpu": "NVIDIA GeForce RTX 4090",
+    "driver": "615.78.08"
+  },
+  "resolution": [
+    2560,
+    1440
+  ],
+  "production_input_revision": "86cb291",
+  "capture_visual_revision": "08cbbd2",
+  "production_dll_sha256": "5c36962762efbbc4e81eb92da2f36408067181cc965300bef3dcea1b8f421ca0",
+  "owner_observations": {
+    "dimming_and_pointer": {
+      "reported_utc": "2026-10-25T09:41:06.785351+00:00",
+      "owner_reply": "OK",
+      "prompt": "Hold left Ctrl+Tab one second, release; right Ctrl+Tab exits; dimming and pointer correct",
+      "accepted": true
+    },
+    "held_w_across_entry_exit": {
+      "reported_utc": "2026-10-25T09:53:42.849450+00:00",
+      "owner_reply": "OK",
+      "prompt": "Hold W, enter capture, exit while still held; movement resumes only after release and fresh press",
+      "accepted": true
+    },
+    "renderer_stall": {
+      "reported_utc": "2026-10-25T10:14:52.187938+00:00",
+      "owner_reply": "yes",
+      "accepted": true,
+      "prompt": "Dimming cleared and normal controls returned after actual renderer stall; capture stayed off"
+    },
+    "text_buttons_wheels": {
+      "owner_reply": "ok",
+      "accepted": true,
+      "reported_utc": "2026-10-25T10:19:31.108762+00:00",
+      "prompt": "Text appears once; hero stays still without shooting during text/five-button/two-wheel fixture"
+    },
+    "helper_restart_and_controls": {
+      "owner_reply": "all ok",
+      "accepted": true,
+      "reported_utc": "2026-10-25T10:31:19.003465+00:00",
+      "prompt": "Owner-triggered capture; after restart try WASD/mouse-look during dim-clear gap; scripted fresh hotkey restores capture"
+    },
+    "focus_loss_and_fresh_recapture": {
+      "owner_reply": "ok",
+      "accepted": true,
+      "reported_utc": "2026-10-25T10:41:03.965014+00:00",
+      "prompt": "Enter capture, AltTab out/back; normal controls return and only fresh CtrlTab recaptures",
+      "native_sequence": "epoch48 active Hotkey -> epoch49 inactive FocusLost -> inactive Ready -> active Hotkey at10:36UTC"
+    },
+    "hide_controls": {
+      "owner_reply": "its wokrs",
+      "accepted": true,
+      "reported_utc": "2026-10-25T10:57:55.963960+00:00",
+      "prompt": "WASD and mouse-look work while overlay hidden"
+    },
+    "final_exit_and_hitches": {
+      "owner_reply": "everything is normal",
+      "accepted": true,
+      "reported_utc": "2026-10-25T12:52:24.518380+00:00",
+      "prompt": "Final desktop mouse/keyboard normal after active-capture exit; no visible hitches/stutter across tests"
+    }
+  },
+  "latency": {
+    "trigger": "visibility-only command written directly to verified owned helper stdin pipe",
+    "permission_release_upper_bound_ms": 16.75272,
+    "ui_restoration_upper_bound_ms": 27.270998,
+    "sample_count": 1,
+    "includes_ipc_and_scheduling": true,
+    "exact_internal_timestamps": false,
+    "original_actor_status": "incomplete after later focus loss",
+    "completed_prefix_audit": "target/input-3a-live-20261025-092855/hide-timing-prefix-audit.json"
+  },
+  "performance": {
+    "scope": "input-idle stack; drawing passthrough, not complete overlay budget",
+    "method": "ordered within-process A then B, fresh game for each A; not randomized",
+    "sampling": "15s settle; first65s rounded up to a frame; discardfirst5s; foreground sampled at100ms",
+    "primary_pairs": [
+      {
+        "pair": 1,
+        "manifest": "target/input-3a-performance/pair-1-3399930/pair.json",
+        "game_pid": 3399930,
+        "window_owner": "WINDOW_OWNER 300 65710",
+        "video_sha256": "349bebac1466aee7bff6ca2eebfbc3fd0a7c033f05034f327dcb57b7dc3c2118",
+        "dll_sha256": "5c36962762efbbc4e81eb92da2f36408067181cc965300bef3dcea1b8f421ca0",
+        "source_revision": "2d006c342b960e424d91f46701ea56d97c54254a",
+        "receiver_strategy": "separate Electron processes, idle cat baseline then normal launcher",
+        "runs": [
+          {
+            "label": "A1",
+            "csv": "target/input-3a-performance/pair-1-3399930/A1.csv",
+            "duration_seconds": 65.002335029,
+            "retained_seconds": 60.004015476,
+            "frames": 26376,
+            "avg_fps": 439.5705819146336,
+            "p99_ms": 3.604315,
+            "acked_during_sample": 0,
+            "foreground_changes": [],
+            "module_present": false,
+            "csv_sha256": "72d44c78d5f44fc5ae8e78fd4bdde40ae6f92fe26d5d60ee8b35fa908baff667",
+            "raw_csv": "target/input-3a-performance/pair-1-3399930/A1-raw.csv",
+            "raw_csv_sha256": "c260f87f4f3fdc4e2f1f4738ed6182a522686c4fb9862e99ae883688fdb59c39",
+            "source_csv_name": "frames-3399930-passthrough-2.csv"
+          },
+          {
+            "label": "B1",
+            "csv": "target/input-3a-performance/pair-1-3399930/B1.csv",
+            "duration_seconds": 65.000906795,
+            "retained_seconds": 60.003311848,
+            "frames": 26733,
+            "avg_fps": 445.5254081261358,
+            "p99_ms": 3.570618,
+            "acked_during_sample": 676,
+            "foreground_changes": [],
+            "module_present": true,
+            "csv_sha256": "af9d3515aa4e6e9978a5535f1d430c9909dc656de780fd1010f6bc5b495585af",
+            "raw_csv": "target/input-3a-performance/pair-1-3399930/B1-raw.csv",
+            "raw_csv_sha256": "8b914c85d0e3deac2fc0008e3ef90b068f7b06222fc87a6328b3542a424a3948",
+            "source_csv_name": "frames-3399930-passthrough-4.csv"
+          }
+        ],
+        "fps_loss_pct": -1.354691705155709,
+        "p99_increase_pct": -0.9349071876348234
+      },
+      {
+        "pair": 3,
+        "manifest": "target/input-3a-performance/pair-3-3404609/retry-uninjected-20261025-123653/pair.json",
+        "game_pid": 3404609,
+        "window_owner": "WINDOW_OWNER 300 65710",
+        "video_sha256": "349bebac1466aee7bff6ca2eebfbc3fd0a7c033f05034f327dcb57b7dc3c2118",
+        "dll_sha256": "5c36962762efbbc4e81eb92da2f36408067181cc965300bef3dcea1b8f421ca0",
+        "source_revision": "c88896ded158fd23feac03e01427e9554d58c676",
+        "receiver_strategy": "same Electron PID, idle FIFO child execs normal launcher after A",
+        "runs": [
+          {
+            "label": "A3",
+            "csv": "target/input-3a-performance/pair-3-3404609/retry-uninjected-20261025-123653/A3.csv",
+            "duration_seconds": 65.001064406,
+            "retained_seconds": 60.001918656,
+            "frames": 24375,
+            "avg_fps": 406.2370095154045,
+            "p99_ms": 3.508841,
+            "acked_during_sample": 0,
+            "foreground_changes": [],
+            "module_present": false,
+            "receiver_pid": 3406416,
+            "csv_sha256": "345822864da08455d92dc958e7ad698db085b5d9900cd6a44b1d9ab9908ca799",
+            "raw_csv": "target/input-3a-performance/pair-3-3404609/retry-uninjected-20261025-123653/A3-raw.csv",
+            "raw_csv_sha256": "b680acc6abab0f9d470a32c752ae17094e5db58868c6c1f890709407350813a1",
+            "source_csv_name": "frames-3404609-passthrough-5.csv"
+          },
+          {
+            "label": "B3",
+            "csv": "target/input-3a-performance/pair-3-3404609/retry-uninjected-20261025-123653/B3.csv",
+            "duration_seconds": 65.002151451,
+            "retained_seconds": 60.004500963,
+            "frames": 24560,
+            "avg_fps": 409.3026290668461,
+            "p99_ms": 3.516721,
+            "acked_during_sample": 677,
+            "foreground_changes": [],
+            "module_present": true,
+            "receiver_pid": 3406416,
+            "csv_sha256": "25f568a438cfe74b858b2fe6fd167bc4e5578b9839fa59ce81e3893d91ec8527",
+            "raw_csv": "target/input-3a-performance/pair-3-3404609/retry-uninjected-20261025-123653/B3-raw.csv",
+            "raw_csv_sha256": "023405c93643fbfe3845208bd39507e5a142130aa1441af1151774485fb93a43",
+            "source_csv_name": "frames-3404609-passthrough-7.csv"
+          }
+        ],
+        "fps_loss_pct": -0.7546381741778172,
+        "p99_increase_pct": 0.22457557922972599
+      },
+      {
+        "pair": 4,
+        "manifest": "target/input-3a-performance/pair-4-3407100/pair.json",
+        "game_pid": 3407100,
+        "window_owner": "WINDOW_OWNER 300 65710",
+        "video_sha256": "349bebac1466aee7bff6ca2eebfbc3fd0a7c033f05034f327dcb57b7dc3c2118",
+        "dll_sha256": "5c36962762efbbc4e81eb92da2f36408067181cc965300bef3dcea1b8f421ca0",
+        "source_revision": "98a43d0a46a776df476a5e385bba00be8c402f33",
+        "receiver_strategy": "same Electron PID, idle FIFO child execs normal launcher after A",
+        "runs": [
+          {
+            "label": "A4",
+            "csv": "target/input-3a-performance/pair-4-3407100/A4.csv",
+            "duration_seconds": 65.001219873,
+            "retained_seconds": 60.003617804,
+            "frames": 25904,
+            "avg_fps": 431.70730279321873,
+            "p99_ms": 3.490346,
+            "acked_during_sample": 0,
+            "foreground_changes": [],
+            "module_present": false,
+            "receiver_pid": 3407816,
+            "csv_sha256": "1cf80f2d8847c59dcd618b5780edba4bd6d195377162a0511d333348de0a7efe",
+            "raw_csv": "target/input-3a-performance/pair-4-3407100/A4-raw.csv",
+            "raw_csv_sha256": "009dbc1330b9d21271f44aa3c93d921637bf150ed9124b723ab51c78d531ebf2",
+            "source_csv_name": "frames-3407100-passthrough-2.csv"
+          },
+          {
+            "label": "B4",
+            "csv": "target/input-3a-performance/pair-4-3407100/B4.csv",
+            "duration_seconds": 65.001712342,
+            "retained_seconds": 60.003138997,
+            "frames": 25647,
+            "avg_fps": 427.4276384320874,
+            "p99_ms": 3.588616,
+            "acked_during_sample": 677,
+            "foreground_changes": [],
+            "module_present": true,
+            "receiver_pid": 3407816,
+            "csv_sha256": "a45e7f02f95f14482570f3851dc98c6d9806278e4a390e21c7001a9037655509",
+            "raw_csv": "target/input-3a-performance/pair-4-3407100/B4-raw.csv",
+            "raw_csv_sha256": "9a6ffd2cc3eada5f04cdbf4fb438d47ec1955afe74b3720a72246b8d394b4c93",
+            "source_csv_name": "frames-3407100-passthrough-4.csv"
+          }
+        ],
+        "fps_loss_pct": 0.991334715313171,
+        "p99_increase_pct": 2.815480184486004
+      }
+    ],
+    "primary_summary": {
+      "pairs": [
+        1,
+        3,
+        4
+      ],
+      "mean_average_fps": {
+        "baseline": 425.83829807441896,
+        "input_idle": 427.4185585416898
+      },
+      "mean_per_run_p99_ms": {
+        "baseline": 3.5345006666666667,
+        "input_idle": 3.5586516666666665
+      },
+      "fps_loss_pct": -0.37109402193662117,
+      "p99_increase_pct": 0.6832931233473567,
+      "retained_frames": {
+        "baseline": 76655,
+        "input_idle": 76940
+      },
+      "retained_seconds": {
+        "baseline": 180.009551936,
+        "input_idle": 180.01095180800002
+      },
+      "threshold_pct": 3,
+      "meets_input_only_threshold": true
+    },
+    "qualified_pair": {
+      "pair": 2,
+      "manifest": "target/input-3a-performance/pair-2-3401308/resume-input-20261025-121734/pair.json",
+      "game_pid": 3401308,
+      "window_owner": "WINDOW_OWNER 300 65710",
+      "video_sha256": "349bebac1466aee7bff6ca2eebfbc3fd0a7c033f05034f327dcb57b7dc3c2118",
+      "dll_sha256": "5c36962762efbbc4e81eb92da2f36408067181cc965300bef3dcea1b8f421ca0",
+      "source_revision": "fa112534aab0ed4304d610ca2adf204ac1536d40",
+      "receiver_strategy": "separate Electron processes, idle cat baseline then normal launcher",
+      "runs": [
+        {
+          "label": "A2",
+          "csv": "target/input-3a-performance/pair-2-3401308/A2.csv",
+          "duration_seconds": 65.001486946,
+          "retained_seconds": 60.003249363,
+          "frames": 24509,
+          "avg_fps": 408.46121268747595,
+          "p99_ms": 4.439459,
+          "acked_during_sample": 0,
+          "foreground_changes": [],
+          "module_present": false,
+          "csv_sha256": "b5a42737db8044f73e6901e334ae094aadb7b64eee0c8ecd0b6f5682671e90e1",
+          "raw_csv": "target/input-3a-performance/pair-2-3401308/A2-raw.csv",
+          "raw_csv_sha256": "9332cc3412fb738dade65ce24f18e61bf5409d25c9a00c8c51a74822a69aebd8",
+          "source_csv_name": "frames-3401308-passthrough-2.csv"
+        },
+        {
+          "label": "B2",
+          "csv": "target/input-3a-performance/pair-2-3401308/resume-input-20261025-121734/B2.csv",
+          "duration_seconds": 65.002461035,
+          "retained_seconds": 60.004730347,
+          "frames": 22285,
+          "avg_fps": 371.3873868131492,
+          "p99_ms": 5.026351,
+          "acked_during_sample": 677,
+          "foreground_changes": [],
+          "module_present": true,
+          "csv_sha256": "9cd8a5905a104977979c7e2345701bcba541ee68d2f6a74c4bad7b0eacbafb24",
+          "raw_csv": "target/input-3a-performance/pair-2-3401308/resume-input-20261025-121734/B2-raw.csv",
+          "raw_csv_sha256": "9868d8d6cee16b24fba9b4e05a6f0a7aae29bc1796e0270f843d9a73f0722dc2",
+          "source_csv_name": "frames-3401308-passthrough-8.csv"
+        }
+      ],
+      "fps_loss_pct": 9.076461784559427,
+      "p99_increase_pct": 13.219899091308191,
+      "qualification": "Approximately55-minute interruption between A2 and B2; separate valid samples do not establish comparable thermal/clock/background load; excluded from primary aggregate."
+    },
+    "sensitivity_including_qualified_pair": {
+      "pairs": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "mean_average_fps": {
+        "baseline": 421.4940267276832,
+        "input_idle": 413.41076560955463
+      },
+      "mean_per_run_p99_ms": {
+        "baseline": 3.76074025,
+        "input_idle": 3.9255765
+      },
+      "fps_loss_pct": 1.9177640976039194,
+      "p99_increase_pct": 4.383079900293566,
+      "retained_frames": {
+        "baseline": 101164,
+        "input_idle": 99225
+      },
+      "retained_seconds": {
+        "baseline": 240.012801299,
+        "input_idle": 240.015682155
+      },
+      "threshold_pct": 3,
+      "meets_input_only_threshold": false
+    },
+    "limitations": [
+      "No confidence interval or causal FPS improvement claimed",
+      "Pair1 used separate identical Electron hosts; pairs3/4 kept the same host and activated its real launcher through an idle FIFO gate",
+      "GNOME and other hardware/Proton/game versions untested"
+    ]
+  },
+  "cleanup": {
+    "test_game_closed_normally_from_active_capture": true,
+    "host_game_exited": true,
+    "owner_desktop_input_normal": true,
+    "owner_visible_hitches": "none reported",
+    "fps_limit_original": 400,
+    "fps_limit_restored": 400,
+    "drawing_mode": "passthrough",
+    "no_test_receiver_or_injector_left_running": true
+  },
+  "verification": {
+    "fresh_portable": {
+      "passed": 221,
+      "failed": 0,
+      "ignored_opt_in": 59,
+      "log": ".superpowers/sdd/2026-10-24-input-3a/final-portable.log",
+      "sha256": "97b2b6db72ae3a84f6164b1ab01a50a99473d5b9cc5443e88136344e5f4bc20d"
+    },
+    "unchanged_native_evidence": {
+      "native_probes": 23,
+      "native_unit_api_tests": 8,
+      "production_integration_tests": 5,
+      "logs": [
+        ".superpowers/sdd/2026-10-24-input-3a/export-full-native.log",
+        ".superpowers/sdd/2026-10-24-input-3a/export-unit-green.log",
+        ".superpowers/sdd/2026-10-24-input-3a/export-production.log"
+      ]
+    },
+    "fixture_windows_clippy_and_build": {
+      "logs": [
+        ".superpowers/sdd/2026-10-24-input-3a/live-close-clippy.log",
+        ".superpowers/sdd/2026-10-24-input-3a/live-close-build.log"
+      ]
+    },
+    "source_review": {
+      "status": "clear",
+      "reviewer": "same approved whole-branch reviewer",
+      "base": "6f2acc471b9fa243057819b0d3409acdd37bfc1b",
+      "critical_findings": 0,
+      "important_findings": 0,
+      "minor_findings": 0,
+      "scope": "branch and final working evidence",
+      "mode": "read-only; no runtime activity while owner played a standard game",
+      "recorded_utc": "2026-10-25T13:06:05.867310+00:00"
+    }
+  },
+  "acceptance_status": "implementation and automated/live acceptance verified; final review clear; integration pending"
+}
