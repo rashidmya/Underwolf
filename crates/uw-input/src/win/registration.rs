@@ -69,6 +69,23 @@ fn source_intent(s: &Shared, entry: Registration) {
     let bit = if entry.usage == 6 { 2 } else { 1 };
     if entry.flags & RIDEV_NOLEGACY == RIDEV_NOLEGACY && entry.flags & RIDEV_REMOVE == 0 {
         s.raw_source.fetch_or(bit, Ordering::AcqRel);
+        if entry.usage == 6 {
+            // The real NOLEGACY notify probe receives Unicode packets only through
+            // the low-level stream; neither raw nor legacy messages contain them.
+            super::lowlevel::request();
+        }
+        if entry.target != 0 {
+            // SAFETY: querying an HWND does not dereference it; an invalid/stale handle returns zero.
+            let thread = unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(
+                    entry.target as HWND,
+                    std::ptr::null_mut(),
+                )
+            };
+            if thread != 0 && thread != s.thread() {
+                super::lowlevel::request();
+            }
+        }
     } else {
         s.raw_source.fetch_and(!bit, Ordering::AcqRel);
     }

@@ -28,6 +28,22 @@ static MOUSE_LEAK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 static RAW_KEYS: AtomicUsize = AtomicUsize::new(0);
 static RAW_MOUSE: AtomicUsize = AtomicUsize::new(0);
 static ROLLBACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PACKET_COUNT: AtomicUsize = AtomicUsize::new(0);
+static PACKET_EDGES: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+unsafe extern "system" fn packet_observer(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
+    if code == HC_ACTION as i32 {
+        // SAFETY: native low-level observation retains this structure until callback return.
+        let key = unsafe { &*(l as *const KBDLLHOOKSTRUCT) };
+        if key.vkCode == VK_PACKET as u32 {
+            let index = PACKET_COUNT.fetch_add(1, Ordering::AcqRel);
+            if let Some(edge) = PACKET_EDGES.get(index) {
+                edge.store((u64::from(key.flags) << 32) | w as u64, Ordering::Release);
+            }
+        }
+    }
+    // SAFETY: this independent observer never consumes or changes an input event.
+    unsafe { CallNextHookEx(std::ptr::null_mut(), code, w, l) }
+}
 unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     if msg == WM_LBUTTONDOWN {
         CLICK_TARGET.store(h as usize, Ordering::Release);
@@ -121,10 +137,18 @@ fn key(down: bool) {
     key_vk(65, down);
 }
 fn key_vk(vk: u16, down: bool) {
+    // SAFETY: fixture-owned UI thread's active layout; preserve actual scan/extended metadata.
+    let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC_EX) };
     let i = INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
-            ki: KEYBDINPUT { wVk: vk, dwFlags: if down { 0 } else { KEYEVENTF_KEYUP }, ..Default::default() },
+            ki: KEYBDINPUT {
+                wVk: vk,
+                wScan: (scan & 255) as u16,
+                dwFlags: (if down { 0 } else { KEYEVENTF_KEYUP })
+                    | (if scan & 0xff00 == 0xe000 { KEYEVENTF_EXTENDEDKEY } else { 0 }),
+                ..Default::default()
+            },
         },
     };
     // SAFETY: one initialized native keyboard input.
@@ -156,6 +180,67 @@ fn drive(h: &InputHandle, duration: u64) -> Vec<RuntimeEvent> {
     }
     events
 }
+struct RawWorker {
+    hwnd: usize,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl RawWorker {
+    fn start() -> Self {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopping = stop.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            // SAFETY: this scratch worker owns its message-only window and its input queue.
+            unsafe {
+                let module = GetModuleHandleW(std::ptr::null());
+                let class = WNDCLASSW {
+                    lpfnWndProc: Some(wndproc),
+                    hInstance: module,
+                    lpszClassName: w!("UnderwolfRawWorker"),
+                    ..Default::default()
+                };
+                assert_ne!(RegisterClassW(&class), 0);
+                let hwnd = CreateWindowExW(
+                    0,
+                    class.lpszClassName,
+                    w!("Raw worker"),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    HWND_MESSAGE,
+                    std::ptr::null_mut(),
+                    module,
+                    std::ptr::null(),
+                );
+                assert!(!hwnd.is_null());
+                let devices = [
+                    RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: RIDEV_NOLEGACY, hwndTarget: hwnd },
+                    RAWINPUTDEVICE { usUsagePage: 1, usUsage: 6, dwFlags: RIDEV_NOLEGACY, hwndTarget: hwnd },
+                ];
+                assert_ne!(
+                    RegisterRawInputDevices(devices.as_ptr(), 2, std::mem::size_of::<RAWINPUTDEVICE>() as u32),
+                    0
+                );
+                tx.send(hwnd as usize).unwrap();
+                while !stopping.load(Ordering::Acquire) {
+                    pump();
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                DestroyWindow(hwnd);
+            }
+        });
+        Self { hwnd: rx.recv_timeout(Duration::from_secs(3)).unwrap(), stop, thread: Some(thread) }
+    }
+}
+impl Drop for RawWorker {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        self.thread.take().unwrap().join().unwrap();
+    }
+}
 pub fn run() {
     let case = std::env::args().skip_while(|a| a != "--routing").nth(1).expect("routing case");
     let raw_mode = case.starts_with("raw-");
@@ -165,6 +250,7 @@ pub fn run() {
         let c = WNDCLASSW {
             lpfnWndProc: Some(wndproc),
             hInstance: module,
+            hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW),
             lpszClassName: w!("UnderwolfRoutingProbe"),
             ..Default::default()
         };
@@ -189,7 +275,14 @@ pub fn run() {
         ShowCursor(1);
         hwnd
     };
-    if raw_mode {
+    let raw_worker = case.starts_with("raw-thread").then(RawWorker::start);
+    if let Some(worker) = &raw_worker {
+        // SAFETY: this fixture owns the live worker window and only queries its thread identity.
+        assert_ne!(unsafe { GetWindowThreadProcessId(worker.hwnd as HWND, std::ptr::null_mut()) }, unsafe {
+            windows_sys::Win32::System::Threading::GetCurrentThreadId()
+        });
+    }
+    if raw_mode && raw_worker.is_none() {
         let devices = [
             RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: RIDEV_NOLEGACY, hwndTarget: hwnd },
             RAWINPUTDEVICE { usUsagePage: 1, usUsage: 6, dwFlags: RIDEV_NOLEGACY, hwndTarget: hwnd },
@@ -249,9 +342,9 @@ pub fn run() {
             keyboard: !case.ends_with("mouse-only") && case != "partial",
         }]
         .into_iter()
-        .chain(matches!(case.as_str(), "partial" | "focus-text").then_some(WidgetSpec {
+        .chain(matches!(case.as_str(), "partial" | "focus-text" | "resize").then_some(WidgetSpec {
             instance: WidgetRef { id: 2, generation: 1 },
-            x: 200,
+            x: if case == "resize" { 500 } else { 200 },
             y: 0,
             width: 100,
             height: 100,
@@ -275,6 +368,45 @@ pub fn run() {
             .iter()
             .any(|e| matches!(e, RuntimeEvent::Configured(r) if r.code == RoutingCode::Applied && r.request_id == 1))
     );
+    if case == "resize" {
+        let request = |id| RoutingRequest {
+            epoch,
+            revision: 1,
+            request_id: id,
+            target: Some(WidgetRef { id: 2, generation: 1 }),
+            action: RoutingAction::Takeover,
+            state_seq: None,
+        };
+        h.route_request(request(2)).unwrap();
+        let entered = drive(&h, 70);
+        assert!(entered.iter().any(|event| matches!(event, RuntimeEvent::RoutingResult(result) if result.request_id == 2 && result.code == RoutingCode::Applied)));
+        key(true);
+        drive(&h, 30);
+        // SAFETY: shrink only this scratch window on its UI owner thread.
+        assert_ne!(unsafe { SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, 350, 350, SWP_NOMOVE | SWP_NOZORDER) }, 0);
+        let resized = drive(&h, 100);
+        assert!(!h.capture_permitted(), "native resize retained capture for an invisible widget: {resized:?}");
+        assert!(resized.iter().any(|event| matches!(event, RuntimeEvent::RoutingState(state) if state.focus.is_none() && state.domains == Domains::default())));
+        h.route_request(request(3)).unwrap();
+        let refused = drive(&h, 70);
+        assert!(refused.iter().any(|event| matches!(event, RuntimeEvent::RoutingResult(result) if result.request_id == 3 && result.code != RoutingCode::Applied)), "out-of-client takeover was accepted: {refused:?}");
+        key(false);
+        drive(&h, 30);
+        // SAFETY: restore only the fixture's own window size.
+        assert_ne!(unsafe { SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, 640, 480, SWP_NOMOVE | SWP_NOZORDER) }, 0);
+        drive(&h, 150);
+        assert!(!h.capture_permitted(), "geometry recovery automatically recaptured");
+        h.route_request(request(4)).unwrap();
+        assert!(drive(&h, 70).iter().any(|event| matches!(event, RuntimeEvent::RoutingResult(result) if result.request_id == 4 && result.code == RoutingCode::Applied)));
+        h.disconnect();
+        drive(&h, 30);
+        // SAFETY: destroy only the fixture's window.
+        unsafe {
+            DestroyWindow(hwnd);
+        }
+        println!("PASS routing probe resize");
+        return;
+    }
     if let Some(fixture) = directinput {
         fixture.exercise(&h, epoch, configured);
         h.disconnect();
@@ -418,7 +550,10 @@ pub fn run() {
     click(true);
     drive(&h, 40);
     click(false);
-    drive(&h, 40);
+    let focused = drive(&h, 40);
+    if case == "raw-thread-notify" {
+        assert!(focused.iter().any(|event| matches!(event, RuntimeEvent::RoutingState(state) if state.focus == Some(WidgetRef { id: 1, generation: 1 }))), "notification fixture never focused its visible widget: {focused:?}");
+    }
     if case == "focus-text" {
         // SAFETY: post UTF-16 units only to this fixture's live window.
         unsafe {
@@ -589,7 +724,7 @@ pub fn run() {
     RAW_KEYS.store(0, Ordering::Release);
     RAW_MOUSE.store(0, Ordering::Release);
     key(true);
-    let events = drive(&h, 60);
+    let mut events = drive(&h, 60);
     // Resolve polling through the real system export independently of production's import stub.
     type Async = unsafe extern "system" fn(i32) -> i16;
     // SAFETY: exact export and ABI for user32 GetAsyncKeyState.
@@ -618,8 +753,56 @@ pub fn run() {
         assert!(events.iter().any(|e| matches!(e, RuntimeEvent::RoutedBatch(b) if b.events.iter().any(|e| e.input.is_some_and(|r| r.kind == 1 && r.a == 65)))));
     }
     key(false);
-    drive(&h, 30);
-    if case == "raw-block" {
+    events.extend(drive(&h, 80));
+    if matches!(case.as_str(), "raw-block" | "raw-thread" | "raw-thread-notify" | "raw-notify") {
+        let chars = |events: &[RuntimeEvent]| -> Vec<i32> {
+            events
+                .iter()
+                .filter_map(
+                    |event| if let RuntimeEvent::RoutedBatch(batch) = event { Some(batch.events.iter()) } else { None },
+                )
+                .flatten()
+                .filter_map(|event| event.input.filter(|input| input.kind == 2).map(|input| input.a))
+                .collect()
+        };
+        assert_eq!(chars(&events), vec![97], "canonical raw A cycle produced missing or duplicate text: {events:?}");
+        key_vk(160, true);
+        drive(&h, 25);
+        key(true);
+        let mut shifted = drive(&h, 30);
+        key(false);
+        shifted.extend(drive(&h, 60));
+        key_vk(160, false);
+        shifted.extend(drive(&h, 30));
+        assert_eq!(chars(&shifted), vec![65], "canonical raw Shift+A text was missing or duplicated: {shifted:?}");
+        // SAFETY: the layout belongs only to this private probe's UI thread.
+        let original_layout = unsafe { GetKeyboardLayout(0) };
+        // SAFETY: static French KLID, activated only inside this scratch process.
+        let layout = unsafe { LoadKeyboardLayoutW(w!("0000040c"), KLF_ACTIVATE) };
+        assert!(!layout.is_null(), "native layout fixture unavailable");
+        drive(&h, 80);
+        let mut expected = [0u16; 8];
+        let state = [0u8; 256];
+        // SAFETY: independent native translation establishes the selected layout's actual scalar.
+        let count = unsafe { ToUnicodeEx(0x32, 0, state.as_ptr(), expected.as_mut_ptr(), 8, 0, layout) };
+        assert!(count > 0);
+        key_vk(0x32, true);
+        let mut localized = drive(&h, 30);
+        key_vk(0x32, false);
+        localized.extend(drive(&h, 60));
+        assert_eq!(
+            chars(&localized),
+            expected[..count as usize].iter().map(|unit| *unit as i32).collect::<Vec<_>>(),
+            "raw text ignored the owner keyboard layout: {localized:?}"
+        );
+        // SAFETY: restore this fixture's previous layout before the remaining Unicode packet checks.
+        unsafe {
+            ActivateKeyboardLayout(original_layout, 0);
+        }
+        // SAFETY: scratch owner-thread observer sees the original edges before production's hook.
+        let observer =
+            unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(packet_observer), GetModuleHandleW(std::ptr::null()), 0) };
+        assert!(!observer.is_null());
         for up in [false, true] {
             let i = INPUT {
                 r#type: INPUT_KEYBOARD,
@@ -635,7 +818,20 @@ pub fn run() {
             assert_eq!(unsafe { SendInput(1, &i, std::mem::size_of::<INPUT>() as i32) }, 1);
         }
         let events = drive(&h, 60);
-        assert!(events.iter().any(|e| matches!(e, RuntimeEvent::RoutedBatch(b) if b.events.iter().any(|e| e.target == Some(WidgetRef { id: 1, generation: 1 }) && e.input.is_some_and(|r| r.kind == 2 && r.a == 0xe9)))), "native Unicode packet lost the focused widget target");
+        // SAFETY: release only this private fixture's observer.
+        unsafe {
+            UnhookWindowsHookEx(observer);
+        }
+        let observed: Vec<_> = PACKET_EDGES
+            .iter()
+            .take(PACKET_COUNT.load(Ordering::Acquire).min(4))
+            .map(|edge| edge.load(Ordering::Acquire))
+            .collect();
+        assert_eq!(
+            chars(&events),
+            vec![0xe9],
+            "native Unicode packet lost or duplicated text; original LL edges {observed:x?}: {events:?}"
+        );
     }
     if matches!(case.as_str(), "optional-load" | "optional-order") {
         assert!(h.capture_permitted());

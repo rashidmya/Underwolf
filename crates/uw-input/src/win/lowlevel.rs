@@ -1,4 +1,4 @@
-//! Owner-thread fallback required by the saved exclusive-DirectInput probe.
+//! Owner-thread text and fallback for native paths proven to hide thread/raw input.
 use super::*;
 use windows_sys::Win32::{
     Foundation::{LPARAM, LRESULT, POINT, WPARAM},
@@ -24,8 +24,11 @@ fn callback<T>(operation: impl FnOnce() -> T) -> T {
     operation()
 }
 pub(super) fn request() {
-    WANTED.store(true, Ordering::Release);
+    let new = !WANTED.swap(true, Ordering::AcqRel);
     if let Some(s) = SHARED.get() {
+        if new && s.routing_mode.load(Ordering::Acquire) {
+            s.revoke(InputReason::Unavailable);
+        }
         window::wake(s);
     }
 }
@@ -175,6 +178,16 @@ fn key_state(vk: usize, down: bool) {
         keys.set(state);
     });
 }
+/// Canonical raw keys also need owner-thread character translation when no legacy message exists.
+pub(super) fn raw_key(s: &Shared, record: InputRecord, translate: bool) {
+    if record.kind != 1 || !(1..=255).contains(&record.a) {
+        return;
+    }
+    key_state(record.a as usize, record.flags & 1 != 0);
+    if translate && record.a != VK_PACKET as i32 {
+        text(s, record);
+    }
+}
 pub(super) fn reset_text() {
     // Drain pending native dead-key state on the owner thread without delivering it to another widget.
     let mut output = [0u16; 8];
@@ -216,7 +229,9 @@ unsafe extern "system" fn keyboard(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
             if key.dwExtraInfo as u32 == crate::raw::RELEASE_TAG {
                 return false;
             }
-            let down = key.flags & LLKHF_UP == 0;
+            // Wine's Unicode packet callbacks can omit LLKHF_UP; wParam retains
+            // the exact WM_KEYDOWN/UP message, as the independent probe verifies.
+            let down = matches!(w as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
             let vk = match key.vkCode {
                 16 => {
                     if key.scanCode == 0x36 {
@@ -256,13 +271,10 @@ unsafe extern "system" fn keyboard(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
             };
             window::service(s);
             if key.vkCode == VK_PACKET as u32 {
-                if !s.capture_domain(false) {
-                    return false;
-                }
                 if down {
-                    s.routed_char(key.scanCode & 0xffff, true);
+                    return !s.routed_char(key.scanCode & 0xffff, true);
                 }
-                return true;
+                return s.capture_domain(false);
             }
             if vk == 0 || vk >= 256 {
                 return false;

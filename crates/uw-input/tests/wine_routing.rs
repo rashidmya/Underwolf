@@ -80,3 +80,18 @@ fn legacy_state_cannot_announce_a_routing_delivery_epoch() {
 fn native_coverage_follows_its_routing_epoch_state() {
     probe("optional-order");
 }
+#[test]
+#[ignore = "Windows input_probe under xvfb-run"]
+fn raw_target_on_another_thread_keeps_hotkeys_and_widget_capture() {
+    probe("raw-thread");
+}
+#[test]
+#[ignore = "Windows input_probe under xvfb-run"]
+fn native_client_resize_cancels_and_rejects_an_invisible_takeover() {
+    probe("resize");
+}
+#[test]
+#[ignore = "Windows input_probe under xvfb-run"]
+fn raw_worker_notification_preserves_game_input_and_delivers_text_once() {
+    probe("raw-thread-notify");
+}

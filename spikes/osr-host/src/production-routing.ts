@@ -10,6 +10,15 @@ export type RoutingConfig = { epoch: string; revision: string; request_id: numbe
 export type RoutingSurfaceEvent = { type: 'state'; state: State } | { type: 'table'; config: RoutingConfig }
   | { type: 'record'; record: RoutedRecord; widget: WidgetSpec | null } | { type: 'reset' };
 export type RoutingApplication = { generation: number; current: () => boolean };
+export const ROUTING_SURFACE = { width: 850, height: 560 } as const;
+export function validateFixtureBounds(widgets: WidgetSpec[]): void {
+  for (const widget of widgets) {
+    if (widget.visible && widget.width > 0 && widget.height > 0
+      && (widget.x < 0 || widget.y < 0 || widget.x + widget.width > ROUTING_SURFACE.width || widget.y + widget.height > ROUTING_SURFACE.height)) {
+      throw Error('widget exceeds fixture bitmap bounds');
+    }
+  }
+}
 type Held = { keys: Set<number>; buttons: Set<number>; focused: boolean };
 type Item = { generation: number; event?: RoutingSurfaceEvent; through?: bigint; challenge?: any };
 const U64_MAX = (1n << 64n) - 1n;
@@ -107,6 +116,7 @@ export class ProductionRouting {
     if (!this.connected || this.closed || !this.state) return;
     try {
       validWidgets(widgets);
+      validateFixtureBounds(widgets);
       if (this.pending.size >= 32) throw Error('configuration queue full');
       if (this.revision === U64_MAX) throw Error('revision exhausted');
       const request_id = this.id();
@@ -147,7 +157,10 @@ export class ProductionRouting {
         if (!u32(state.width) || !u32(state.height) || state.width > 0x7fffffff || state.height > 0x7fffffff
           || typeof state.exclusive !== 'boolean' || typeof state.domains?.keyboard !== 'boolean' || typeof state.domains?.mouse !== 'boolean') throw Error('invalid routing state');
         if (epoch < this.epoch || !this.connected && epoch === this.epoch) return;
-        if (epoch > this.epoch) this.reset();
+        if (epoch > this.epoch) {
+          this.reset();
+          this.enqueue({ event: { type: 'reset' } });
+        }
         this.connected = true; this.epoch = epoch; this.revision = this.revision > revision ? this.revision : revision;
         this.state = state; this.visual(state.exclusive); this.enqueue({ event: { type: 'state', state } });
         if (!this.desired && state.width && state.height) this.configure(fixtureWidgets());

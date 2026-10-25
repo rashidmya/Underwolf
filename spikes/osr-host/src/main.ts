@@ -28,7 +28,7 @@ import { app, BrowserWindow, ipcMain, screen } from 'electron';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { ProductionInput, productionOptions, applySurface, invalidateSurface, setCaptureDimming } from './production-input';
-import { ProductionRouting, routingOptions, applyRoutingSurface, invalidateRoutingSurface } from './production-routing';
+import { ProductionRouting, routingOptions, applyRoutingSurface, invalidateRoutingSurface, ROUTING_SURFACE, validateFixtureBounds } from './production-routing';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -76,7 +76,7 @@ const TITLE_BAR = 24;
 
 const SIZES: Record<string, { width: number; height: number }> = {
   'production-input': { width: 640, height: 400 },
-  'production-routing': { width: 850, height: 560 },
+  'production-routing': ROUTING_SURFACE,
   solid: { width: 400, height: 300 },
   animated: { width: 400, height: 300 },
   static: { width: 300, height: 200 },
@@ -547,6 +547,7 @@ app.whenReady().then(() => {
           else if (control.control === 'request') { receiver.request(control.action, widget?.instance ?? null); return; }
           else if (control.control === 'visible' && typeof control.on === 'boolean') { send({ cmd: 'set_state', visible: control.on }); return; }
           else throw Error('unknown routing control');
+          validateFixtureBounds(table);
           receiver.configure(table);
         } catch (error) { console.error('[production-routing] control:', error); }
       });

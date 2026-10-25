@@ -65,6 +65,42 @@ fn request(action: RoutingAction, target: Option<WidgetRef>) -> RoutingRequest {
 fn input_count(effects: &RouteEffects) -> usize {
     effects.events.iter().flatten().filter(|e| e.kind == EventKind::Input).count()
 }
+#[test]
+fn actual_client_bounds_cancel_held_ownership_and_reject_an_invisible_target() {
+    let mut router = Router::new();
+    router.set_client_bounds(800, 600);
+    router.configure(&table(InputMode::Block));
+    router.input(InputRecord::motion(60, 20, 0), context());
+    assert_eq!(
+        router.request(request(RoutingAction::Takeover, Some(instance(2))), context()).code,
+        Some(RoutingCode::Applied)
+    );
+    router.input(InputRecord::key(65, 30, true, false, false, 0), context());
+    let effects = router.set_client_bounds(40, 600).expect("actual client geometry changed");
+    assert_eq!(effects.domains, Domains::default());
+    assert!(
+        effects
+            .events
+            .iter()
+            .flatten()
+            .any(|event| event.kind == EventKind::Cancel && event.target == Some(instance(2)))
+    );
+    assert!(router.focus().is_none());
+    assert_eq!(
+        router.request(request(RoutingAction::Takeover, Some(instance(2))), context()).code,
+        Some(RoutingCode::Unavailable)
+    );
+    router.set_client_bounds(800, 600);
+    assert_eq!(
+        router.input(InputRecord::motion(60, 20, 0), context()).domains,
+        Domains::default(),
+        "stationary hover rearmed after geometry recovery"
+    );
+    assert_eq!(
+        router.request(request(RoutingAction::Takeover, Some(instance(2))), context()).code,
+        Some(RoutingCode::Applied)
+    );
+}
 
 #[test]
 fn synchronized_safety_epoch_keeps_table_but_requires_a_fresh_click() {

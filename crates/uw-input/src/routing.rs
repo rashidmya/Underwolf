@@ -54,6 +54,7 @@ pub struct Router {
     widgets: [Option<WidgetSpec>; MAX_WIDGETS],
     width: u32,
     height: u32,
+    client_bounds: Option<(u32, u32)>,
     epoch: u64,
     revision: u64,
     configured: bool,
@@ -82,6 +83,7 @@ impl Router {
             widgets: [None; MAX_WIDGETS],
             width: 0,
             height: 0,
+            client_bounds: None,
             epoch: 0,
             revision: 0,
             configured: false,
@@ -160,15 +162,30 @@ impl Router {
             && i64::from(w.x) + i64::from(w.width) > 0
             && i64::from(w.y) + i64::from(w.height) > 0
     }
+    fn bounds(&self) -> (u32, u32) {
+        self.client_bounds.unwrap_or((self.width, self.height))
+    }
+    /// Native client pixels constrain eligibility independently of a host's layout snapshot.
+    pub fn set_client_bounds(&mut self, width: u32, height: u32) -> Option<RouteEffects> {
+        let previous = self.client_bounds.replace((width, height));
+        if previous.is_none() || previous == Some((width, height)) {
+            return None;
+        }
+        let old = self.domains();
+        let mut effects = RouteEffects::default();
+        self.clear(InputReason::Requested, &mut effects);
+        Some(self.finish(old, self.epoch, InputReason::Requested, effects))
+    }
     fn hit(&self, x: i32, y: i32) -> Option<WidgetRef> {
-        if x < 0 || y < 0 || x as u32 >= self.width || y as u32 >= self.height {
+        let (width, height) = self.bounds();
+        if x < 0 || y < 0 || x as u32 >= width || y as u32 >= height {
             return None;
         }
         self.widgets
             .iter()
             .flatten()
             .filter(|w| {
-                Self::eligible(**w, self.width, self.height)
+                Self::eligible(**w, width, height)
                     && (self.exclusive || w.mode != InputMode::Pass)
                     && x >= w.x
                     && y >= w.y
@@ -253,6 +270,7 @@ impl Router {
             return self.finish(old, self.epoch, InputReason::Requested, e);
         }
         let changed_geometry = self.configured && (c.width != self.width || c.height != self.height);
+        let (width, height) = self.client_bounds.unwrap_or((c.width, c.height));
         if changed_geometry || (self.epoch != 0 && c.epoch != self.epoch) {
             self.clear(InputReason::Requested, &mut e);
         }
@@ -260,7 +278,7 @@ impl Router {
         for old_widget in self.widgets.into_iter().flatten() {
             let next = c.widgets.iter().find(|next| next.instance == old_widget.instance);
             let changed = next.is_none_or(|next| {
-                !Self::eligible(*next, c.width, c.height)
+                !Self::eligible(*next, width, height)
                     || next.mode != old_widget.mode
                     || next.keyboard != old_widget.keyboard
             });
@@ -363,10 +381,10 @@ impl Router {
                     return self.finish(old, context.epoch, InputReason::Requested, e);
                 }
                 if request.action == RoutingAction::Takeover {
-                    let Some(w) = self
-                        .widget(request.target)
-                        .filter(|w| w.keyboard && Self::eligible(*w, self.width, self.height))
-                    else {
+                    let Some(w) = self.widget(request.target).filter(|w| {
+                        let (width, height) = self.bounds();
+                        w.keyboard && Self::eligible(*w, width, height)
+                    }) else {
                         e.code = Some(RoutingCode::Unavailable);
                         return self.finish(old, context.epoch, InputReason::Requested, e);
                     };

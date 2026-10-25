@@ -51,6 +51,9 @@ old input is cancelled before the replacement is committed. `SIGUSR1` pauses
 actual fixture consumption; `SIGUSR2` resumes it. A stalled receiver must lose
 ownership through the game-local lease and must not recapture on resume.
 
+The test bitmap is 850×560 client pixels. Move controls outside that drawing
+surface are rejected before publication, preserving the previous table.
+
 Automated checks, without starting a game:
 
 ```bash

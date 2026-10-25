@@ -188,6 +188,9 @@ fn initialize(s: &Shared) {
             s.effects(e);
         }
     }
+    if s.routing_mode.load(Ordering::Acquire) {
+        lowlevel::seed(s);
+    }
     s.report(if ready { InputReason::Ready } else { InputReason::SetupFailed }, None);
 }
 unsafe extern "system" fn owner_hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
@@ -335,8 +338,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             service(s);
             return Some(0);
         }
+        if matches!(msg, WM_SIZE | WM_DPICHANGED) {
+            s.observe_client_geometry();
+        }
         if msg == WM_SETFOCUS || msg == WM_KILLFOCUS || msg == WM_DESTROY {
-            if msg == WM_SETFOCUS && lowlevel::active() {
+            if msg == WM_SETFOCUS && (lowlevel::active() || s.routing_mode.load(Ordering::Acquire)) {
                 lowlevel::seed(s);
             }
             if msg == WM_DESTROY {
@@ -360,6 +366,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             }
         }
         if s.routing_mode.load(Ordering::Acquire) && matches!(msg, WM_CHAR | WM_SYSCHAR | WM_UNICHAR) {
+            if lowlevel::active() && matches!(msg, WM_CHAR | WM_SYSCHAR) {
+                // The canonical low-level stream already translated physical keys/Unicode packets.
+                // Notification still forwards the game's original character message.
+                return if s.capture_domain(false) { Some(0) } else { None };
+            }
             if msg == WM_UNICHAR && w == 0xffff {
                 return Some(1);
             }
@@ -664,10 +675,24 @@ pub(super) fn observe(s: &Shared, record: InputRecord) -> bool {
     if unsafe { GetCurrentThreadId() } == s.thread() {
         if let Some(effects) = s.ingress(record, true) {
             let blocked = !effects.pass;
+            let translate = effects.host[0].is_some();
             s.effects(effects);
+            if s.routing_mode.load(Ordering::Acquire) {
+                lowlevel::raw_key(s, record, translate);
+            }
             return blocked;
         }
     } else {
+        if s.routing_mode.load(Ordering::Acquire) {
+            let blocked = s.capture_domain(record.kind != 1) || (record.kind == 1 && s.blocks_key(record.a));
+            let source = if record.kind == 1 { 2 } else { 1 };
+            if s.raw_source.load(Ordering::Acquire) & source != 0 {
+                // A newly observed worker reader is an uncovered source until the owner
+                // installs the proven canonical fallback. Preserve current suppression.
+                lowlevel::request();
+            }
+            return blocked;
+        }
         s.submit(PolicyEvent::Observed(record));
     }
     s.capture_domain(record.kind != 1) || (record.kind == 1 && s.blocks_key(record.a))

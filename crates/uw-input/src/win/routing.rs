@@ -79,6 +79,39 @@ impl InputHandle {
     }
 }
 impl Shared {
+    pub(super) fn observe_client_geometry(&self) {
+        if !self.routing_mode.load(Ordering::Acquire) || self.hwnd() == 0 {
+            return;
+        }
+        let mut rect = windows_sys::Win32::Foundation::RECT::default();
+        // SAFETY: owner-thread query of the current target, before taking the policy guard.
+        if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(self.hwnd() as HWND, &mut rect) } == 0 {
+            self.revoke(InputReason::Unavailable);
+            return;
+        }
+        let effects = if let Ok(mut policy) = self.policy.try_lock() {
+            let effects = policy
+                .router
+                .set_client_bounds((rect.right - rect.left).max(0) as u32, (rect.bottom - rect.top).max(0) as u32);
+            if effects.is_some() {
+                policy.text.reset();
+            }
+            effects
+        } else {
+            self.revoke(InputReason::Unavailable);
+            return;
+        };
+        if let Some(effects) = effects {
+            self.permit.store(false, Ordering::Release);
+            native::revoke(InputReason::Requested);
+            self.queue_routed(&effects, None, false);
+            lowlevel::reset_text();
+            if !self.apply_domains(effects.domains) {
+                self.revoke(InputReason::Unavailable);
+            }
+            self.report(InputReason::Requested, None);
+        }
+    }
     pub(super) fn desired_domains(&self) -> Domains {
         self.policy.try_lock().map(|p| p.domains()).unwrap_or_default()
     }
@@ -285,6 +318,7 @@ impl Shared {
         if !self.routing_mode.load(Ordering::Acquire) {
             return;
         }
+        self.observe_client_geometry();
         while let Some(config) = self.configurations.pop() {
             let at = now();
             let c = config.config();
@@ -511,7 +545,7 @@ impl Shared {
             }
             (routed, consumed, p.router.focus(), p.router.domains().keyboard, focus != p.router.focus())
         };
-        if changed_focus && fallback {
+        if changed_focus {
             lowlevel::reset_text();
         }
         if !self.apply_domains(routed.domains)
@@ -532,7 +566,7 @@ impl Shared {
             // Signal TranslateMessage only for an actual routed, owned key-down.
             if record.kind == 1
                 && record.flags & 1 != 0
-                && keyboard
+                && (keyboard || raw || low)
                 && focus.is_some()
                 && routed.events.iter().flatten().any(|e| e.kind == EventKind::Input && e.input == Some(record))
             {

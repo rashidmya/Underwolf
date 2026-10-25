@@ -139,3 +139,12 @@ test('routing launch excludes other capture/plugin modes and requires an explici
   assert.throws(() => routingOptions(['--capture', 'routing', '--gep', '', '--input-command', '/tmp/launch']));
   assert.throws(() => routingOptions(['--capture', 'routing']));
 });
+test('a valid game-client move outside the fixture bitmap cannot publish an invisible target', async () => {
+  const initial = state(); initial.state.width = 1280; initial.state.height = 720;
+  const f = fixture(undefined, initial); await tick();
+  const before = f.sent.length, widgets = f.receiver.widgets;
+  widgets[0].x = 900;
+  assert.equal(f.receiver.configure(widgets), undefined);
+  assert.equal(f.sent.length, before, 'invisible fixture target reached native configuration');
+  assert.match(f.failures[0], /bitmap|surface|bounds/);
+});
