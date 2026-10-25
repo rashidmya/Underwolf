@@ -26,37 +26,29 @@ macro_rules! original {
 pub(super) fn targets() -> Vec<hooks::Target> {
     vec![
         hooks::Target {
-            address: GetCursorPos as *const () as usize,
+            address: hooks::resolve(c"GetCursorPos"),
             detour: get_pos as *const () as usize,
             original: &GET_POS,
         },
         hooks::Target {
-            address: SetCursorPos as *const () as usize,
+            address: hooks::resolve(c"SetCursorPos"),
             detour: set_pos as *const () as usize,
             original: &SET_POS,
         },
+        hooks::Target { address: hooks::resolve(c"ClipCursor"), detour: clip as *const () as usize, original: &CLIP },
         hooks::Target {
-            address: ClipCursor as *const () as usize,
-            detour: clip as *const () as usize,
-            original: &CLIP,
-        },
-        hooks::Target {
-            address: GetClipCursor as *const () as usize,
+            address: hooks::resolve(c"GetClipCursor"),
             detour: get_clip as *const () as usize,
             original: &GET_CLIP,
         },
+        hooks::Target { address: hooks::resolve(c"ShowCursor"), detour: show as *const () as usize, original: &SHOW },
         hooks::Target {
-            address: ShowCursor as *const () as usize,
-            detour: show as *const () as usize,
-            original: &SHOW,
-        },
-        hooks::Target {
-            address: SetCursor as *const () as usize,
+            address: hooks::resolve(c"SetCursor"),
             detour: set_shape as *const () as usize,
             original: &SET_SHAPE,
         },
         hooks::Target {
-            address: GetCursor as *const () as usize,
+            address: hooks::resolve(c"GetCursor"),
             detour: get_shape as *const () as usize,
             original: &GET_SHAPE,
         },

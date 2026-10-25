@@ -11,12 +11,12 @@ static BUFFER: AtomicUsize = AtomicUsize::new(0);
 pub(super) fn targets() -> Vec<hooks::Target> {
     vec![
         hooks::Target {
-            address: GetRawInputData as *const () as usize,
+            address: hooks::resolve(c"GetRawInputData"),
             detour: data as *const () as usize,
             original: &DATA,
         },
         hooks::Target {
-            address: GetRawInputBuffer as *const () as usize,
+            address: hooks::resolve(c"GetRawInputBuffer"),
             detour: buffer as *const () as usize,
             original: &BUFFER,
         },

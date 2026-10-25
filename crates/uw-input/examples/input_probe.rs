@@ -20,6 +20,82 @@ mod win {
         UI::{Input::KeyboardAndMouse::*, Input::*, WindowsAndMessaging::*},
     };
     use windows_sys::core::w;
+    static API_EXPORTS: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::args().any(|a| a == "--api-exports"));
+    macro_rules! system_api {
+        ($name:ident($($arg:ident: $ty:ty),*) -> $ret:ty, $native:path) => {
+            #[allow(non_snake_case)]
+            unsafe extern "system" fn $name($($arg: $ty),*) -> $ret {
+                static CALL: std::sync::LazyLock<unsafe extern "system" fn($($ty),*) -> $ret> = std::sync::LazyLock::new(|| {
+                    if *API_EXPORTS {
+                        use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+                        let name = concat!(stringify!($name), "\0");
+                        // SAFETY: native export name and exact signature, resolved independently of uw-input.
+                        unsafe {
+                            let module = GetModuleHandleW(w!("user32.dll"));
+                            let export = GetProcAddress(module, name.as_ptr()).expect("required probe export");
+                            std::mem::transmute::<unsafe extern "system" fn() -> isize, unsafe extern "system" fn($($ty),*) -> $ret>(export)
+                        }
+                    } else { $native }
+                });
+                // SAFETY: the probe caller supplies the corresponding Win32 API's arguments.
+                unsafe { CALL($($arg),*) }
+            }
+        };
+    }
+    system_api!(GetKeyState(vk: i32) -> i16, windows_sys::Win32::UI::Input::KeyboardAndMouse::GetKeyState);
+    system_api!(GetAsyncKeyState(vk: i32) -> i16, windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState);
+    system_api!(GetKeyboardState(out: *mut u8) -> i32, windows_sys::Win32::UI::Input::KeyboardAndMouse::GetKeyboardState);
+    system_api!(GetCursorPos(out: *mut windows_sys::Win32::Foundation::POINT) -> i32, windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos);
+    system_api!(SetCursorPos(x: i32, y: i32) -> i32, windows_sys::Win32::UI::WindowsAndMessaging::SetCursorPos);
+    system_api!(ClipCursor(rect: *const windows_sys::Win32::Foundation::RECT) -> i32, windows_sys::Win32::UI::WindowsAndMessaging::ClipCursor);
+    system_api!(GetClipCursor(rect: *mut windows_sys::Win32::Foundation::RECT) -> i32, windows_sys::Win32::UI::WindowsAndMessaging::GetClipCursor);
+    system_api!(ShowCursor(on: i32) -> i32, windows_sys::Win32::UI::WindowsAndMessaging::ShowCursor);
+    system_api!(SetCursor(shape: HCURSOR) -> HCURSOR, windows_sys::Win32::UI::WindowsAndMessaging::SetCursor);
+    system_api!(GetCursor() -> HCURSOR, windows_sys::Win32::UI::WindowsAndMessaging::GetCursor);
+    system_api!(RegisterRawInputDevices(devices: *const RAWINPUTDEVICE, count: u32, size: u32) -> i32, windows_sys::Win32::UI::Input::RegisterRawInputDevices);
+    type DataFn = unsafe extern "system" fn(HRAWINPUT, u32, *mut core::ffi::c_void, *mut u32, u32) -> u32;
+    type BufferFn = unsafe extern "system" fn(*mut RAWINPUT, *mut u32, u32) -> u32;
+    fn raw_exports() -> &'static (DataFn, BufferFn) {
+        static EXPORTS: std::sync::OnceLock<(DataFn, BufferFn)> = std::sync::OnceLock::new();
+        EXPORTS.get_or_init(|| {
+            use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+            // SAFETY: user32 is already loaded; both static names are ABI-matching native exports.
+            unsafe {
+                let module = GetModuleHandleW(w!("user32.dll"));
+                let data = GetProcAddress(module, c"GetRawInputData".as_ptr().cast()).unwrap();
+                let buffer = GetProcAddress(module, c"GetRawInputBuffer".as_ptr().cast()).unwrap();
+                (
+                    std::mem::transmute::<unsafe extern "system" fn() -> isize, DataFn>(data),
+                    std::mem::transmute::<unsafe extern "system" fn() -> isize, BufferFn>(buffer),
+                )
+            }
+        })
+    }
+    unsafe fn read_raw_data(
+        input: HRAWINPUT,
+        command: u32,
+        out: *mut core::ffi::c_void,
+        size: *mut u32,
+        header: u32,
+    ) -> u32 {
+        let call = if *API_EXPORTS || std::env::args().any(|a| a == "--raw-exports") {
+            raw_exports().0
+        } else {
+            GetRawInputData
+        };
+        // SAFETY: forwards the native caller's unchanged buffers and scalar API arguments.
+        unsafe { call(input, command, out, size, header) }
+    }
+    unsafe fn read_raw_buffer(out: *mut RAWINPUT, size: *mut u32, header: u32) -> u32 {
+        let call = if *API_EXPORTS || std::env::args().any(|a| a == "--raw-exports") {
+            raw_exports().1
+        } else {
+            GetRawInputBuffer
+        };
+        // SAFETY: forwards the native caller's unchanged output array and size/header arguments.
+        unsafe { call(out, size, header) }
+    }
     static BUFFER_KEYS: AtomicUsize = AtomicUsize::new(0);
     static RAW_W_DOWN: AtomicUsize = AtomicUsize::new(0);
     static RAW_W_UP: AtomicUsize = AtomicUsize::new(0);
@@ -68,7 +144,7 @@ mod win {
             let mut size = 0u32;
             // SAFETY: message provides an HRAWINPUT; null buffer is the documented size query.
             let query = unsafe {
-                GetRawInputData(
+                read_raw_data(
                     l as HRAWINPUT,
                     RID_INPUT,
                     std::ptr::null_mut(),
@@ -80,7 +156,7 @@ mod win {
                 let mut bytes = [0u64; 32];
                 // SAFETY: aligned local buffer is large enough for reported record.
                 let n = unsafe {
-                    GetRawInputData(
+                    read_raw_data(
                         l as HRAWINPUT,
                         RID_INPUT,
                         bytes.as_mut_ptr().cast(),
@@ -142,7 +218,7 @@ mod win {
         let mut size = std::mem::size_of_val(&bytes) as u32;
         // SAFETY: aligned initialized buffer with byte capacity and native header size.
         let count = unsafe {
-            GetRawInputBuffer(bytes.as_mut_ptr().cast(), &mut size, std::mem::size_of::<RAWINPUTHEADER>() as u32)
+            read_raw_buffer(bytes.as_mut_ptr().cast(), &mut size, std::mem::size_of::<RAWINPUTHEADER>() as u32)
         };
         assert_ne!(count, u32::MAX, "buffered raw read failed");
         // SAFETY: the whole storage is initialized, including any unused tail.
@@ -512,6 +588,10 @@ mod win {
                         let mut clip = windows_sys::Win32::Foundation::RECT::default();
                         assert_ne!(GetClipCursor(&mut clip), 0);
                         assert_eq!((clip.left, clip.top, clip.right, clip.bottom), (60, 60, 400, 400));
+                        let shape = LoadCursorW(std::ptr::null_mut(), IDC_CROSS);
+                        assert!(!shape.is_null());
+                        SetCursor(shape);
+                        assert_eq!(GetCursor(), shape, "game cursor shape query must expose intended shape");
                         assert_eq!(ShowCursor(0), baseline_count - 1);
                         devices[1].dwFlags |= RIDEV_INPUTSINK;
                         assert_ne!(
@@ -832,6 +912,8 @@ mod win {
             // SAFETY: writable test outputs; restore count/clip after checking latest intent.
             unsafe {
                 let mut point = windows_sys::Win32::Foundation::POINT::default();
+                let shape = LoadCursorW(std::ptr::null_mut(), IDC_CROSS);
+                assert_eq!(GetCursor(), shape, "latest game cursor shape was not restored");
                 assert_ne!(GetCursorPos(&mut point), 0);
                 assert_eq!((point.x, point.y), (150, 150));
                 let mut clip = windows_sys::Win32::Foundation::RECT::default();

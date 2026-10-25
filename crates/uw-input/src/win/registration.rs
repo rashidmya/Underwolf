@@ -23,7 +23,7 @@ fn native(r: Registration) -> RAWINPUTDEVICE {
 }
 pub(super) fn targets() -> Vec<hooks::Target> {
     vec![hooks::Target {
-        address: RegisterRawInputDevices as *const () as usize,
+        address: hooks::resolve(c"RegisterRawInputDevices"),
         detour: register as *const () as usize,
         original: &REGISTER,
     }]

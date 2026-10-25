@@ -139,3 +139,30 @@ fn cleanup_callback_focus_change_prevents_synthetic_injection() {
 fn double_clicks_are_captured_as_button_edges() {
     probe(&["--mouse", "--double-click"]);
 }
+
+#[test]
+#[ignore = "build Windows input_probe; run under xvfb-run"]
+fn raw_export_calls_from_other_modules_are_neutralized() {
+    probe(&["--mouse", "--raw-exports"]);
+}
+#[test]
+#[ignore = "build Windows input_probe; run under xvfb-run"]
+fn buffered_raw_export_calls_from_other_modules_are_neutralized() {
+    probe(&["--mouse", "--raw-exports", "--buffered"]);
+}
+
+#[test]
+#[ignore = "build Windows input_probe; run under xvfb-run"]
+fn exported_api_polling_registration_cursor_and_mouse_follow_capture() {
+    probe(&["--api-exports", "--cursor", "--mouse", "--unicode"]);
+}
+#[test]
+#[ignore = "build Windows input_probe; run under xvfb-run"]
+fn exported_api_buffered_mouse_is_neutralized() {
+    probe(&["--api-exports", "--mouse", "--buffered"]);
+}
+#[test]
+#[ignore = "build Windows input_probe; run under xvfb-run"]
+fn exported_api_held_key_quarantine_survives_exit() {
+    probe(&["--api-exports", "--held"]);
+}

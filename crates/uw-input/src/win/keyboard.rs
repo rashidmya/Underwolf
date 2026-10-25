@@ -10,17 +10,17 @@ static GET_KEYS: AtomicUsize = AtomicUsize::new(0);
 pub(super) fn targets() -> Vec<hooks::Target> {
     vec![
         hooks::Target {
-            address: GetKeyState as *const () as usize,
+            address: hooks::resolve(c"GetKeyState"),
             detour: key_state as *const () as usize,
             original: &GET_KEY,
         },
         hooks::Target {
-            address: GetAsyncKeyState as *const () as usize,
+            address: hooks::resolve(c"GetAsyncKeyState"),
             detour: async_state as *const () as usize,
             original: &GET_ASYNC,
         },
         hooks::Target {
-            address: GetKeyboardState as *const () as usize,
+            address: hooks::resolve(c"GetKeyboardState"),
             detour: keyboard_state as *const () as usize,
             original: &GET_KEYS,
         },
