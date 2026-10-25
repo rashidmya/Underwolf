@@ -6,8 +6,8 @@
 //! own events (the last four `Event` variants) to the stream it hands its user. Serialized with
 //! serde; `to_line` never contains a newline.
 
-use serde::{Deserialize, Serialize};
 pub use crate::routing::json::{RoutingCommand, RoutingEvent};
+use serde::{Deserialize, Serialize, de::Error as _};
 
 use crate::data::SchemaCategory;
 use crate::input::{CaptureCode, InputAck, InputBatch, InputChallenge, InputState};
@@ -40,6 +40,8 @@ pub enum Command {
     Ping {
         request_id: u32,
     },
+    #[serde(untagged)]
+    Routing(RoutingCommand),
 }
 
 /// Helper -> host, and `uw-host`'s own events.
@@ -164,6 +166,8 @@ pub enum Event {
     Stopped {
         reason: String,
     },
+    #[serde(untagged)]
+    Routing(RoutingEvent),
 }
 
 impl Event {
@@ -191,6 +195,10 @@ impl Event {
             | Event::Status { request_id, .. }
             | Event::StateSet { request_id, .. }
             | Event::Pong { request_id, .. } => Some(*request_id),
+            Event::Routing(RoutingEvent::RoutingAcked { request_id }) => Some(*request_id),
+            Event::Routing(RoutingEvent::RoutingConfigured { result } | RoutingEvent::RoutingResult { result }) => {
+                Some(result.request_id)
+            }
             Event::Error { request_id, .. } => *request_id,
             _ => None,
         }
@@ -203,6 +211,10 @@ impl Event {
             | Event::Status { request_id, .. }
             | Event::StateSet { request_id, .. }
             | Event::Pong { request_id, .. } => Some(request_id),
+            Event::Routing(RoutingEvent::RoutingAcked { request_id }) => Some(request_id),
+            Event::Routing(RoutingEvent::RoutingConfigured { result } | RoutingEvent::RoutingResult { result }) => {
+                Some(&mut result.request_id)
+            }
             Event::Error { request_id, .. } => request_id.as_mut(),
             _ => None,
         }
@@ -212,13 +224,21 @@ impl Event {
         serde_json::to_string(self).expect("Event serializes")
     }
     pub fn parse(line: &str) -> Result<Event, serde_json::Error> {
-        serde_json::from_str(line.trim())
+        let event = serde_json::from_str(line.trim())?;
+        if let Self::Routing(routing) = &event {
+            if line.len() > crate::routing::json::MAX_JSON_BYTES {
+                return Err(serde_json::Error::custom("routing JSON too large"));
+            }
+            routing.validate().map_err(|_| serde_json::Error::custom("invalid routing event"))?;
+        }
+        Ok(event)
     }
 }
 
 impl Command {
     pub fn request_id(&self) -> u32 {
         match self {
+            Command::Routing(routing) => routing.request_id(),
             Command::InputAck { request_id, .. }
             | Command::LoadOverlay { request_id, .. }
             | Command::SetState { request_id, .. }
@@ -230,7 +250,14 @@ impl Command {
         serde_json::to_string(self).expect("Command serializes")
     }
     pub fn parse(line: &str) -> Result<Command, serde_json::Error> {
-        serde_json::from_str(line.trim())
+        let command = serde_json::from_str(line.trim())?;
+        if let Self::Routing(routing) = &command {
+            if line.len() > crate::routing::json::MAX_JSON_BYTES {
+                return Err(serde_json::Error::custom("routing JSON too large"));
+            }
+            routing.validate().map_err(|_| serde_json::Error::custom("invalid routing command"))?;
+        }
+        Ok(command)
     }
 
     /// Parse a line of the `uw-inject` CLI's stdin, where `request_id` is optional (design:
@@ -244,8 +271,33 @@ impl Command {
             if let Some(given) = obj.get("request_id") {
                 user = Some(serde_json::from_value::<u32>(given.clone())?);
             }
+            let nested = match obj.get("cmd").and_then(|v| v.as_str()) {
+                Some("configure_input") => Some("config"),
+                Some("route_request") => Some("request"),
+                _ => None,
+            };
+            if let Some(field) = nested {
+                if line.len() > crate::routing::json::MAX_JSON_BYTES {
+                    return Err(serde_json::Error::custom("routing JSON too large"));
+                }
+                if let Some(nested) = obj.get_mut(field).and_then(|v| v.as_object_mut()) {
+                    if let Some(user) = user
+                        && nested.get("request_id") != Some(&serde_json::Value::from(user))
+                    {
+                        return Err(serde_json::Error::custom("routing request ids disagree"));
+                    }
+                    nested.insert("request_id".into(), id.into());
+                }
+            }
             obj.insert("request_id".into(), id.into());
         }
-        Ok((serde_json::from_value(v)?, user))
+        let command: Command = serde_json::from_value(v)?;
+        if let Self::Routing(routing) = &command {
+            if line.len() > crate::routing::json::MAX_JSON_BYTES || user == Some(0) {
+                return Err(serde_json::Error::custom("invalid routing command envelope"));
+            }
+            routing.validate().map_err(|_| serde_json::Error::custom("invalid routing command"))?;
+        }
+        Ok((command, user))
     }
 }

@@ -37,7 +37,10 @@ impl std::ops::DerefMut for Owner {
 impl InputHandle {
     /// Select v2 before any lease can enable the legacy fixed chord.
     pub fn connect_routing(&self) {
-        self.shared.routing_mode.store(true, Ordering::Release);
+        if !self.shared.routing_mode.swap(true, Ordering::AcqRel) {
+            self.shared.announced_epoch.store(0, Ordering::Release);
+            self.shared.submit(PolicyEvent::Disconnected);
+        }
         self.shared.submit(PolicyEvent::Connected);
     }
     pub fn configure(&self, config: PreparedConfig) -> Result<(), Full> {
@@ -49,10 +52,23 @@ impl InputHandle {
         result
     }
     pub fn route_request(&self, request: RoutingRequest) -> Result<(), Full> {
+        let release_now = request.action == RoutingAction::LeaveEdit
+            && RoutingMessage::Request(request).validate().is_ok()
+            && (self.shared.state_sequence.is_current(request.state_seq)
+                || !self.shared.visible_intent.load(Ordering::Acquire)
+                    && self.shared.state_sequence.not_future(request.state_seq))
+            && self
+                .shared
+                .policy
+                .try_lock()
+                .is_ok_and(|p| p.epoch() == request.epoch && p.router.revision() == request.revision);
         let result = if let Ok(mut queue) = self.shared.route_requests.try_lock()
             && queue.len() < 32
         {
             queue.push_back(request);
+            if release_now {
+                self.shared.revoke(InputReason::Requested);
+            }
             Ok(())
         } else {
             self.shared.revoke(InputReason::Overflow);
@@ -86,13 +102,23 @@ impl Shared {
         if !self.routing_mode.load(Ordering::Acquire) {
             return;
         }
+        if !self.visible_intent.load(Ordering::Acquire) {
+            self.permit.store(false, Ordering::Release);
+            native::revoke(InputReason::Requested);
+            return;
+        }
         if let Ok(p) = self.policy.try_lock() {
             if p.active() && self.permit.load(Ordering::Acquire) && self.release.load(Ordering::Acquire) == 0 {
                 if p.router.exclusive() {
                     cursor::exclusive();
                 }
                 if !native::publish_ownership(p.epoch(), p.domains(), p.router.exclusive()) {
-                    self.revoke(InputReason::Unavailable);
+                    if self.state_sequence.publication_allowed() {
+                        self.revoke(InputReason::Unavailable);
+                    } else {
+                        self.permit.store(false, Ordering::Release);
+                        native::revoke(InputReason::Requested);
+                    }
                 }
             } else {
                 native::revoke(InputReason::Unavailable);
@@ -103,17 +129,19 @@ impl Shared {
     }
     fn context(&self, p: &Owner, cursor: bool, at: u64) -> RouteContext {
         let healthy = self.lease.try_lock().is_ok_and(|lease| lease.healthy_in(p.epoch(), at));
-        p.route_context(healthy && native::ready(), cursor)
+        let mut context = p.route_context(healthy && native::ready(), cursor);
+        context.visible &= self.visible_intent.load(Ordering::Acquire);
+        context
     }
     pub(super) fn report_routing(&self, state: InputState) {
         if let Ok(p) = self.policy.try_lock() {
             let (epoch, published, exclusive) = native::ownership();
             let active = state.active && epoch == state.epoch;
             let domains = if active { published } else { Domains::default() };
-            let report = RoutingState {
+            let mut report = RoutingState {
                 epoch: state.epoch,
                 revision: p.router.revision(),
-                state_seq: state.state_seq,
+                state_seq: state.state_seq.filter(|sequence| *sequence != 0),
                 width: state.width,
                 height: state.height,
                 pointer: p.router.pointer(),
@@ -124,13 +152,21 @@ impl Shared {
                 reason: state.reason,
             };
             if let Ok(mut latest) = self.routing_state.try_lock() {
+                if let Some(previous) = latest.as_ref()
+                    && previous.epoch == report.epoch
+                    && report.domains == Domains::default()
+                    && !matches!(previous.reason, InputReason::Ready | InputReason::Requested | InputReason::Hotkey)
+                    && matches!(report.reason, InputReason::Ready | InputReason::Requested)
+                {
+                    report.reason = previous.reason;
+                }
                 *latest = Some(report);
                 return;
             }
         }
         self.revoke(InputReason::Overflow);
     }
-    fn queue_routed(&self, effects: &RouteEffects, barrier: Option<RoutingResult>, request: bool) {
+    pub(super) fn queue_routed(&self, effects: &RouteEffects, barrier: Option<RoutingResult>, request: bool) {
         let mut records =
             [RoutedEvent { revision: 1, target: None, kind: EventKind::Hotkey, argument: 1, input: None }; 35];
         let mut count = 0;
@@ -300,30 +336,58 @@ impl Shared {
             let Some(request) = next else { break };
             let cursor = cursor::available();
             let at = now();
-            let (effects, changed_focus) = {
+            let (effects, changed_focus, stale_state) = {
                 let Ok(mut p) = self.policy.try_lock() else {
                     self.revoke(InputReason::Overflow);
                     return;
                 };
                 let context = self.context(&p, cursor, at);
                 let focus = p.router.focus();
-                let effects = p.router.request(request, context);
+                let stale_state = request.epoch == context.epoch
+                    && RoutingMessage::Request(request).validate().is_ok()
+                    && !self.state_sequence.is_current(request.state_seq)
+                    && !(request.action == RoutingAction::LeaveEdit
+                        && !self.visible_intent.load(Ordering::Acquire)
+                        && self.state_sequence.not_future(request.state_seq));
+                let effects = if stale_state {
+                    let mut effects = RouteEffects::default();
+                    effects.domains = p.router.domains();
+                    effects.exclusive = p.router.exclusive();
+                    effects.code = Some(RoutingCode::Superseded);
+                    effects
+                } else {
+                    p.router.request(request, context)
+                };
                 let changed = focus != p.router.focus();
                 if changed {
                     p.text.reset();
                 }
-                (effects, changed)
+                (effects, changed, stale_state)
             };
             if changed_focus {
                 lowlevel::reset_text();
             }
             let mut code = effects.code.unwrap_or(RoutingCode::Invalid);
-            let success = self.apply_domains(effects.domains);
+            let release = request.action == RoutingAction::LeaveEdit;
+            let _applying = self.state_sequence.begin(if stale_state || release { None } else { request.state_seq });
+            let success = stale_state || self.apply_domains(effects.domains);
             if code == RoutingCode::Applied && !success {
                 code = RoutingCode::SetupFailed;
             }
+            let mut final_effects = effects;
+            if !stale_state && !release && !self.state_sequence.is_current(request.state_seq) {
+                code = RoutingCode::Superseded;
+                self.queue_routed(&final_effects, None, false);
+                let cancellation = self.policy.try_lock().ok().map(|mut p| p.router.revoke(InputReason::Requested));
+                if let Some(cancellation) = cancellation {
+                    self.apply_domains(cancellation.domains);
+                    final_effects = cancellation;
+                } else {
+                    self.revoke(InputReason::Unavailable);
+                }
+            }
             self.queue_routed(
-                &effects,
+                &final_effects,
                 Some(RoutingResult {
                     epoch: request.epoch,
                     revision: request.revision,
@@ -333,7 +397,14 @@ impl Shared {
                 }),
                 true,
             );
-            self.report(InputReason::Requested, request.state_seq);
+            if code == RoutingCode::Applied
+                && self.release.load(Ordering::Acquire) == 0
+                && self.epoch.load(Ordering::Acquire) == request.epoch
+                && let Some(sequence) = request.state_seq
+            {
+                self.emit(RuntimeEvent::Applied(sequence));
+            }
+            self.report(InputReason::Requested, if code == RoutingCode::Applied { request.state_seq } else { None });
         }
     }
     pub(super) fn ingress(&self, record: InputRecord, raw: bool) -> Option<Effects> {

@@ -4,7 +4,7 @@
 //! (design 2a "Failures": no orphan helper keeps the helper mutex).
 
 use std::io::BufRead;
-use std::sync::mpsc::{sync_channel, Receiver};
+use std::sync::mpsc::{Receiver, sync_channel};
 
 use uw_pipe_proto::jsonl::{Command, Event};
 
@@ -28,7 +28,9 @@ impl Commands {
         while let Ok(cmd) = self.rx.try_recv() {
             let code = match cmd {
                 Command::LoadOverlay { .. } => "bootstrap_not_connected",
-                Command::InputAck { .. } | Command::SetState { .. } | Command::Ping { .. } => "overlay_not_connected",
+                Command::InputAck { .. } | Command::SetState { .. } | Command::Ping { .. } | Command::Routing(_) => {
+                    "overlay_not_connected"
+                }
             };
             emit(&Event::reply_error(cmd.request_id(), code));
         }

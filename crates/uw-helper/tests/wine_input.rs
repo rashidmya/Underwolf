@@ -11,8 +11,9 @@ use std::{
     time::{Duration, Instant},
 };
 use uw_pipe_proto::{
-    input::{CaptureCode, InputAck},
-    jsonl::{Command as Cmd, Event},
+    input::InputAck,
+    jsonl::{Command as Cmd, Event, RoutingCommand, RoutingEvent},
+    routing::*,
 };
 struct Prefix {
     dir: PathBuf,
@@ -51,6 +52,11 @@ struct Helper {
     stdin: Option<ChildStdin>,
     events: Receiver<String>,
     stderr: Arc<Mutex<Vec<String>>>,
+    receiver: uw_host::routing::RoutingReceiver,
+    configured_epoch: u64,
+    configuration_id: u32,
+    held: std::collections::HashSet<(u32, u32, u8, i32)>,
+    focus: Option<WidgetRef>,
 }
 impl Drop for Helper {
     fn drop(&mut self) {
@@ -72,8 +78,75 @@ impl Helper {
     fn next_event(&self, within: Duration) -> String {
         self.events.recv_timeout(within).unwrap_or_else(|e| panic!("{e}; {:?}", self.stderr_lines()))
     }
-    fn next_parsed(&self, within: Duration) -> Event {
-        Event::parse(&self.next_event(within)).unwrap()
+    fn next_parsed(&mut self, within: Duration) -> Event {
+        use uw_host::routing::RoutingReceiverAction;
+        let event = Event::parse(&self.next_event(within)).unwrap();
+        match self.receiver.event(&event).unwrap() {
+            RoutingReceiverAction::Reset(_) => {
+                self.held.clear();
+                self.focus = None;
+            }
+            RoutingReceiverAction::Records(batch) => {
+                for event in &batch.events {
+                    if let Some(target) = event.target {
+                        match event.kind {
+                            EventKind::Cancel => self
+                                .held
+                                .retain(|(id, generation, _, _)| (*id, *generation) != (target.id, target.generation)),
+                            EventKind::Focus => self.focus = (event.argument != 0).then_some(target),
+                            EventKind::Input => {
+                                let record = event.input.unwrap();
+                                if matches!(record.kind, 1 | 4) {
+                                    let key = (target.id, target.generation, record.kind, record.a);
+                                    if record.flags & 1 != 0 {
+                                        self.held.insert(key);
+                                    } else {
+                                        self.held.remove(&key);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                self.receiver.consumed(batch.first_seq + batch.events.len() as u64 - 1).unwrap();
+            }
+            _ => {}
+        }
+        if let Event::Routing(RoutingEvent::RoutingState { state }) = &event
+            && state.epoch != self.configured_epoch
+        {
+            self.configured_epoch = state.epoch;
+            self.configuration_id = self.configuration_id.checked_add(1).unwrap();
+            let config = RoutingConfig {
+                epoch: state.epoch,
+                revision: state.revision.checked_add(1).unwrap(),
+                request_id: self.configuration_id,
+                width: state.width.max(1),
+                height: state.height.max(1),
+                widgets: vec![WidgetSpec {
+                    instance: WidgetRef { id: 1, generation: 1 },
+                    x: 0,
+                    y: 0,
+                    width: state.width.max(1) as i32,
+                    height: state.height.max(1) as i32,
+                    z: 1,
+                    mode: InputMode::Block,
+                    visible: true,
+                    keyboard: true,
+                }],
+                hotkeys: vec![HotkeySpec {
+                    id: 1,
+                    vk: 9,
+                    modifiers: 8,
+                    flags: 0,
+                    action: HotkeyAction::ToggleEdit,
+                    target: None,
+                }],
+            };
+            self.send_cmd(&Cmd::Routing(RoutingCommand::ConfigureInput { request_id: self.configuration_id, config }));
+        }
+        event
     }
 }
 fn start_helper(p: &Prefix, _extra: &[&str], _envs: &[(&str, &str)]) -> Helper {
@@ -111,23 +184,32 @@ fn start_helper(p: &Prefix, _extra: &[&str], _envs: &[(&str, &str)]) -> Helper {
             output.lock().unwrap().push(line);
         }
     });
-    Helper { stdout_gate, child, stdin, events, stderr: diagnostics }
+    Helper {
+        stdout_gate,
+        child,
+        stdin,
+        events,
+        stderr: diagnostics,
+        receiver: uw_host::routing::RoutingReceiver::default(),
+        configured_epoch: 0,
+        configuration_id: 10000,
+        held: std::collections::HashSet::new(),
+        focus: None,
+    }
 }
 fn load_overlay_line(path: &str) -> String {
     Cmd::LoadOverlay { request_id: 1, path: path.into() }.to_line()
 }
 fn ack(helper: &mut Helper, c: uw_pipe_proto::input::InputChallenge, id: &mut u32) {
     *id += 1;
-    helper.send_cmd(&Cmd::InputAck {
-        request_id: *id,
-        ack: InputAck { epoch: c.epoch, nonce: c.nonce, through_seq: c.through_seq },
-    });
+    let ack = helper.receiver.acknowledge(c).expect("fixture has actually consumed challenge progress");
+    helper.send_cmd(&Cmd::Routing(RoutingCommand::RoutingAck { request_id: *id, ack: ack.into() }));
 }
 /// Production DLL, negotiated input, application acknowledgements, and stalled receiver release.
 #[test]
 #[ignore = "needs Wine and production input DLL; run under xvfb-run"]
 fn production_input_capture_releases_when_receiver_stalls() {
-    use uw_pipe_proto::input::{CaptureCode, InputAck, InputReason};
+    use uw_pipe_proto::input::InputReason;
     let mut pfx = setup("production-input");
     pfx.game = Some(wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).spawn().unwrap());
     let mut helper = start_helper(&pfx, &[], &[]);
@@ -147,8 +229,8 @@ fn production_input_capture_releases_when_receiver_stalls() {
         let event = helper.next_parsed(deadline.saturating_duration_since(Instant::now()));
         eprintln!("input integration: {event:?}");
         match event {
-            Event::InputReady { version: 1 } => ready = true,
-            Event::InputState { state } => {
+            Event::Routing(RoutingEvent::RoutingReady { version: 2 }) => ready = true,
+            Event::Routing(RoutingEvent::RoutingState { state }) => {
                 if !visible {
                     helper.send_cmd(&Cmd::SetState {
                         request_id: 2,
@@ -158,23 +240,15 @@ fn production_input_capture_releases_when_receiver_stalls() {
                     });
                     visible = true;
                 }
-                captured |= state.active;
-                if captured && !state.active && state.reason == InputReason::LeaseExpired {
+                captured |= state.exclusive;
+                if captured && !state.exclusive && state.reason == InputReason::LeaseExpired {
                     assert!(ready && applied);
                     assert!(acknowledged_at.elapsed() < Duration::from_secs(3));
                     break;
                 }
             }
-            Event::InputChallenge { challenge } if !captured => {
-                ack_id += 1;
-                helper.send_cmd(&Cmd::InputAck {
-                    request_id: ack_id,
-                    ack: InputAck {
-                        epoch: challenge.epoch,
-                        nonce: challenge.nonce,
-                        through_seq: challenge.through_seq,
-                    },
-                });
+            Event::Routing(RoutingEvent::RoutingChallenge { challenge }) if !captured => {
+                ack(&mut helper, challenge.into(), &mut ack_id);
                 acknowledged_at = Instant::now();
                 // Give the ack a full worker/owner turn before asking to capture.
                 if visible && !entering && ack_id >= 103 {
@@ -187,8 +261,8 @@ fn production_input_capture_releases_when_receiver_stalls() {
                     entering = true;
                 }
             }
-            Event::CaptureResult { capture_request_id: 3, code, .. } => {
-                assert_eq!(code, CaptureCode::Applied);
+            Event::Routing(RoutingEvent::RoutingResult { result: RoutingResult { request_id: 3, code, .. } }) => {
+                assert_eq!(code, RoutingCode::Applied);
                 applied = true;
             }
             Event::Error { .. } => panic!("{event:?}; stderr: {:?}", helper.stderr_lines()),
@@ -211,7 +285,7 @@ fn helper_restart_never_recaptures_and_old_epoch_is_refused() {
     let deadline = Instant::now() + Duration::from_secs(15);
     let old_epoch = loop {
         match helper.next_parsed(deadline.saturating_duration_since(Instant::now())) {
-            Event::InputState { state } => {
+            Event::Routing(RoutingEvent::RoutingState { state }) => {
                 if !shown {
                     helper.send_cmd(&Cmd::SetState {
                         request_id: 2,
@@ -221,12 +295,12 @@ fn helper_restart_never_recaptures_and_old_epoch_is_refused() {
                     });
                     shown = true;
                 }
-                if state.active {
+                if state.exclusive {
                     break state.epoch;
                 }
             }
-            Event::InputChallenge { challenge } => {
-                ack(&mut helper, challenge, &mut id);
+            Event::Routing(RoutingEvent::RoutingChallenge { challenge }) => {
+                ack(&mut helper, challenge.into(), &mut id);
                 if shown && !asked && id >= 103 {
                     helper.send_cmd(&Cmd::SetState {
                         request_id: 3,
@@ -251,19 +325,19 @@ fn helper_restart_never_recaptures_and_old_epoch_is_refused() {
     let mut fresh_sent = false;
     loop {
         match helper.next_parsed(deadline.saturating_duration_since(Instant::now())) {
-            Event::InputState { state } => {
+            Event::Routing(RoutingEvent::RoutingState { state }) => {
                 new_epoch = state.epoch;
                 assert!(new_epoch > old_epoch);
                 if !fresh_sent {
-                    assert!(!state.active, "helper restart recaptured");
+                    assert!(!state.exclusive, "helper restart recaptured");
                 }
-                if fresh_sent && state.active {
+                if fresh_sent && state.exclusive {
                     assert!(stale_refused);
                     break;
                 }
             }
-            Event::InputChallenge { challenge } => {
-                ack(&mut helper, challenge, &mut id);
+            Event::Routing(RoutingEvent::RoutingChallenge { challenge }) => {
+                ack(&mut helper, challenge.into(), &mut id);
                 challenges += 1;
                 if new_epoch != 0 && !stale_sent {
                     helper.send_cmd(&Cmd::SetState {
@@ -286,11 +360,13 @@ fn helper_restart_never_recaptures_and_old_epoch_is_refused() {
                 }
             }
             Event::Error { request_id: Some(4), code, .. } => {
-                assert_eq!(code, "input_stale_epoch");
+                assert_eq!(code, "routing_stale_epoch");
                 stale_refused = true;
             }
             Event::Error { code, .. } => panic!("{code}"),
-            Event::CaptureResult { capture_request_id: 5, code, .. } => assert_eq!(code, CaptureCode::Applied),
+            Event::Routing(RoutingEvent::RoutingResult { result: RoutingResult { request_id: 5, code, .. } }) => {
+                assert_eq!(code, RoutingCode::Applied)
+            }
             _ => {}
         }
     }
@@ -310,10 +386,11 @@ fn receiver_stall_releases_even_when_helper_stdout_blocks() {
     let mut id = 100;
     let mut shown = false;
     let mut asked = false;
+    let mut takeover = false;
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         match helper.next_parsed(deadline.saturating_duration_since(Instant::now())) {
-            Event::InputState { state } => {
+            Event::Routing(RoutingEvent::RoutingState { state }) => {
                 if !shown {
                     helper.send_cmd(&Cmd::SetState {
                         request_id: 2,
@@ -323,12 +400,26 @@ fn receiver_stall_releases_even_when_helper_stdout_blocks() {
                     });
                     shown = true;
                 }
-                if state.active {
+                if state.exclusive && !takeover {
+                    helper.send_cmd(&Cmd::Routing(RoutingCommand::RouteRequest {
+                        request_id: 4,
+                        request: RoutingRequest {
+                            epoch: state.epoch,
+                            revision: state.revision,
+                            request_id: 4,
+                            target: Some(WidgetRef { id: 1, generation: 1 }),
+                            action: RoutingAction::Takeover,
+                            state_seq: None,
+                        },
+                    }));
+                    takeover = true;
+                }
+                if state.exclusive && state.focus == Some(WidgetRef { id: 1, generation: 1 }) {
                     break;
                 }
             }
-            Event::InputChallenge { challenge } => {
-                ack(&mut helper, challenge, &mut id);
+            Event::Routing(RoutingEvent::RoutingChallenge { challenge }) => {
+                ack(&mut helper, challenge.into(), &mut id);
                 if shown && !asked && id >= 103 {
                     helper.send_cmd(&Cmd::SetState {
                         request_id: 3,
@@ -373,7 +464,6 @@ fn receiver_stall_releases_even_when_helper_stdout_blocks() {
 }
 
 fn visibility_commands(separate: bool) {
-    use uw_pipe_proto::input::{CaptureCode, InputAck};
     let mut pfx = setup(if separate { "separate-hide" } else { "combined-hide" });
     pfx.game = Some(wine_cmd(&pfx, &win_artifact("uw-test-game.exe")).spawn().unwrap());
     let mut helper = start_helper(&pfx, &[], &[]);
@@ -411,14 +501,14 @@ fn visibility_commands(separate: bool) {
                 bad_ack = true;
             }
             Event::Pong { request_id: 701, .. } => pong = true,
-            Event::CaptureResult { capture_request_id: 4, state_seq, code, .. } => {
-                assert_eq!(code, CaptureCode::Applied);
-                assert_eq!(Some(state_seq), capture_seq);
+            Event::Routing(RoutingEvent::RoutingResult { result: RoutingResult { request_id: 4, code, .. } }) => {
+                assert_eq!(code, RoutingCode::Applied);
+                assert!(capture_seq.is_some());
                 off_result = true;
             }
             Event::Bell { applied_seq, .. } if off_seq == Some(applied_seq) => off_bell = true,
-            Event::InputReady { version: 1 } => ready = true,
-            Event::InputState { state } => {
+            Event::Routing(RoutingEvent::RoutingReady { version: 2 }) => ready = true,
+            Event::Routing(RoutingEvent::RoutingState { state }) => {
                 if !visible {
                     helper.send_cmd(&Cmd::SetState {
                         request_id: 2,
@@ -428,12 +518,12 @@ fn visibility_commands(separate: bool) {
                     });
                     visible = true;
                 }
-                captured |= state.active;
-                if off_seq.is_some() && !state.active && state.state_seq == off_seq {
+                captured |= state.exclusive;
+                if off_seq.is_some() && !state.exclusive && state.state_seq == off_seq {
                     off_state = true;
                 }
             }
-            Event::InputChallenge { challenge } => {
+            Event::Routing(RoutingEvent::RoutingChallenge { challenge }) => {
                 if ack_id == 100 {
                     helper.send_cmd(&Cmd::InputAck {
                         request_id: 700,
@@ -441,15 +531,7 @@ fn visibility_commands(separate: bool) {
                     });
                     helper.send_cmd(&Cmd::Ping { request_id: 701 });
                 }
-                ack_id += 1;
-                helper.send_cmd(&Cmd::InputAck {
-                    request_id: ack_id,
-                    ack: InputAck {
-                        epoch: challenge.epoch,
-                        nonce: challenge.nonce,
-                        through_seq: challenge.through_seq,
-                    },
-                });
+                ack(&mut helper, challenge.into(), &mut ack_id);
 
                 // Give the ack a full worker/owner turn before asking to capture.
                 if visible && !entering && ack_id >= 103 {
@@ -462,8 +544,10 @@ fn visibility_commands(separate: bool) {
                     entering = true;
                 }
             }
-            Event::CaptureResult { capture_request_id: 3, epoch, code, .. } => {
-                assert_eq!(code, CaptureCode::Applied);
+            Event::Routing(RoutingEvent::RoutingResult {
+                result: RoutingResult { request_id: 3, epoch, code, .. },
+            }) => {
+                assert_eq!(code, RoutingCode::Applied);
                 applied = true;
                 helper.send_cmd(&Cmd::SetState {
                     request_id: 4,

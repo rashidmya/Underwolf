@@ -76,6 +76,8 @@ pub struct InputHandle {
     shared: Arc<Shared>,
 }
 pub(super) struct Shared {
+    state_sequence: crate::requests::StateSequence,
+    visible_intent: AtomicBool,
     hwnd: AtomicUsize,
     thread: AtomicU32,
     message: u32,
@@ -124,6 +126,8 @@ impl InputRuntime {
         }
         let message = window::message()?;
         let shared = Arc::new(Shared {
+            state_sequence: crate::requests::StateSequence::new(),
+            visible_intent: AtomicBool::new(false),
             hwnd: AtomicUsize::new(hwnd as usize),
             thread: AtomicU32::new(thread),
             message,
@@ -196,13 +200,26 @@ impl InputHandle {
         self.shared.revoke(InputReason::Disconnected);
         self.shared.submit(PolicyEvent::Disconnected);
     }
+    pub fn observe_state_sequence(&self, sequence: u64) {
+        if self.shared.state_sequence.observe(sequence) {
+            native::revoke(InputReason::Requested);
+        }
+    }
+    pub fn defer_hidden(&self) {
+        self.shared.visible_intent.store(false, Ordering::Release);
+        self.shared.permit.store(false, Ordering::Release);
+        native::revoke(InputReason::Requested);
+    }
     pub fn set_visible_state(&self, on: bool, state_seq: u64) {
+        self.shared.visible_intent.store(on, Ordering::Release);
+        self.observe_state_sequence(state_seq);
         self.shared.submit(PolicyEvent::VisibleState { on, state_seq });
         if !on {
             self.shared.revoke(InputReason::Hidden);
         }
     }
     pub fn set_visible(&self, on: bool) {
+        self.shared.visible_intent.store(on, Ordering::Release);
         self.shared.submit(PolicyEvent::Visible(on));
         if !on {
             self.shared.revoke(InputReason::Hidden);
@@ -249,6 +266,7 @@ impl InputHandle {
             }
             return vec![RuntimeEvent::Disconnect];
         }
+        let routing = self.shared.routing_mode.load(Ordering::Acquire);
         let mut events = self.shared.events.lock().map(|mut q| q.drain(..).collect::<Vec<_>>()).unwrap_or_default();
         if let Ok(mut state) = self.shared.state.lock()
             && let Some(state) = state.take()
@@ -258,18 +276,33 @@ impl InputHandle {
         if let Ok(mut state) = self.shared.routing_state.lock()
             && let Some(state) = state.take()
         {
-            events.push(RuntimeEvent::RoutingState(state));
+            events.insert(0, RuntimeEvent::RoutingState(state));
         }
         for event in &events {
             let epoch = match event {
-                RuntimeEvent::State(s) => s.epoch,
-                RuntimeEvent::RoutingState(s) => s.epoch,
+                RuntimeEvent::State(s) if !routing => s.epoch,
+                RuntimeEvent::RoutingState(s) if routing => s.epoch,
                 _ => continue,
             };
             if let Ok(mut progress) = self.shared.progress.lock() {
                 progress.announce(epoch);
             }
-            self.shared.announced_epoch.store(epoch, Ordering::Release);
+            let previous = self.shared.announced_epoch.swap(epoch, Ordering::AcqRel);
+            if routing && previous != epoch {
+                native::request_coverage();
+            }
+        }
+        if routing {
+            let announced = self.shared.announced_epoch.load(Ordering::Acquire);
+            events.retain(|event| {
+                if let RuntimeEvent::NativeCoverage(coverage) = event {
+                    if coverage.epoch > announced {
+                        native::request_coverage();
+                    }
+                    return coverage.epoch == announced;
+                }
+                true
+            });
         }
         let epoch = self.shared.epoch.load(Ordering::Acquire);
         if self.shared.announced_epoch.load(Ordering::Acquire) != epoch {
@@ -384,6 +417,7 @@ impl Shared {
         let healthy = self.lease.try_lock().is_ok_and(|lease| lease.healthy_in(p.epoch(), at));
         let effects = p.event_with_lease(event, healthy);
         let epoch = p.epoch();
+        let mut routed_release = None;
         if self.routing_mode.load(Ordering::Acquire) {
             let reason = match event {
                 PolicyEvent::Disconnected => Some(InputReason::Disconnected),
@@ -395,7 +429,10 @@ impl Shared {
                 _ => None,
             };
             if let Some(reason) = reason {
-                p.router.revoke(reason);
+                let routed = p.router.revoke(reason);
+                if reason == InputReason::Requested {
+                    routed_release = Some(routed);
+                }
                 p.text.reset();
                 let physical = p.core.physical_keys();
                 p.hotkeys.reseed(&physical);
@@ -408,6 +445,9 @@ impl Shared {
             Ordering::Release,
         );
         drop(p);
+        if let Some(routed) = routed_release {
+            self.queue_routed(&routed, None, false);
+        }
         self.publish_route_permission();
         Some(effects)
     }
@@ -417,7 +457,7 @@ impl Shared {
         unsafe {
             windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(self.hwnd() as HWND, &mut rect);
         }
-        let state = InputState {
+        let mut state = InputState {
             epoch: self.epoch.load(Ordering::Acquire),
             active: self.capture(),
             reason,
@@ -430,6 +470,14 @@ impl Shared {
             return;
         }
         if let Ok(mut latest) = self.state.try_lock() {
+            if let Some(previous) = latest.as_ref()
+                && previous.epoch == state.epoch
+                && !state.active
+                && !matches!(previous.reason, InputReason::Ready | InputReason::Requested | InputReason::Hotkey)
+                && matches!(state.reason, InputReason::Ready | InputReason::Requested)
+            {
+                state.reason = previous.reason;
+            }
             *latest = Some(state);
         } else {
             self.revoke(InputReason::Overflow);

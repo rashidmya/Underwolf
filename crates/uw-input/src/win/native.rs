@@ -165,7 +165,9 @@ pub fn publish_ownership(epoch: u64, domains: uw_pipe_proto::routing::Domains, e
     let Some(shared) = super::SHARED.get() else {
         return false;
     };
-    if shared.release.load(Ordering::Acquire) != 0
+    if !shared.visible_intent.load(Ordering::Acquire)
+        || !shared.state_sequence.publication_allowed()
+        || shared.release.load(Ordering::Acquire) != 0
         || !shared.permit.load(Ordering::Acquire)
         || shared.epoch.load(Ordering::Acquire) != epoch
     {

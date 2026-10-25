@@ -15,14 +15,16 @@ use uw_game_channel::objects::{LOCK_TIMEOUT_MS, LockError, Objects};
 use uw_helper::decide::{HelloWait, hello_wait_from_bytes};
 use uw_helper::input::{CapturePending, InputRelay};
 use uw_helper::pending::Pending;
+use uw_helper::routing::{First, Purpose, RoutingPending, RoutingRelay, classify_first};
 use uw_pipe_proto::bells::{bit_names, to_host};
 use uw_pipe_proto::input::{CaptureRequest, InputMessage};
 use uw_pipe_proto::jsonl::{Command, Event};
+use uw_pipe_proto::jsonl::{RoutingCommand, RoutingEvent};
 use uw_pipe_proto::pipe::encode_input;
 use uw_pipe_proto::pipe::{
-    MAX_PATH_UNITS, Message, OverlayFirst, OverlayMessage, PROTOCOL_VERSION, check_overlay_first, decode,
-    decode_overlay, encode, encode_overlay,
+    MAX_PATH_UNITS, Message, OverlayMessage, PROTOCOL_VERSION, decode, decode_overlay, encode, encode_overlay,
 };
+use uw_pipe_proto::routing::{ROUTING_VERSION, RoutingAction, RoutingMessage, RoutingRequest};
 use uw_pipe_proto::state;
 
 use windows_sys::Win32::Foundation::CloseHandle;
@@ -47,6 +49,8 @@ pub(crate) fn emit(event: &Event) {
 
 struct Relay<'a> {
     input: Option<InputRelay>,
+    routing: Option<RoutingRelay>,
+    routing_pending: RoutingPending,
     captures: CapturePending,
     objects: &'a Objects,
     bootstrap: &'a mut PipeServer,
@@ -78,6 +82,8 @@ pub(crate) fn run(
     let mut r = Relay {
         input: None,
         captures: CapturePending::default(),
+        routing: None,
+        routing_pending: RoutingPending::default(),
         objects: &channel.objects,
         bootstrap,
         overlay: &mut channel.overlay,
@@ -107,9 +113,19 @@ pub(crate) fn run(
         for id in r.captures.expire(now_ms()) {
             emit(&Event::reply_error(id, "input_application_timeout"));
         }
+        for (_, id) in r.routing_pending.expire(now_ms()) {
+            emit(&Event::reply_error(id, "routing_application_timeout"));
+        }
         let handles = [commands.event, r.objects.bell_host(), r.bootstrap.event(), r.overlay.event()];
-        let next =
-            [r.loads.next_deadline(), r.pings.next_deadline(), r.captures.next_deadline()].into_iter().flatten().min();
+        let next = [
+            r.loads.next_deadline(),
+            r.pings.next_deadline(),
+            r.captures.next_deadline(),
+            r.routing_pending.next_deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         let timeout = next.map_or(MAX_WAIT_MS, |d| d.saturating_sub(now_ms()).min(MAX_WAIT_MS));
         // SAFETY: waits on four handles this process owns; the result only says "something may be
         // ready", and every source is polled at the top of the loop.
@@ -118,8 +134,52 @@ pub(crate) fn run(
 }
 
 impl Relay<'_> {
+    fn write_routing(&mut self, message: RoutingMessage) -> bool {
+        encode_input(&OverlayMessage::Routing(message)).is_ok_and(|frame| self.overlay.write(&frame))
+    }
+    fn routing_command(&mut self, command: RoutingCommand) {
+        let id = command.request_id();
+        if command.validate().is_err() {
+            emit(&Event::reply_error(id, "routing_bad_message"));
+            return;
+        }
+        let epoch = match &command {
+            RoutingCommand::ConfigureInput { config, .. } => config.epoch,
+            RoutingCommand::RouteRequest { request, .. } => request.epoch,
+            RoutingCommand::RoutingAck { ack, .. } => ack.epoch,
+        };
+        if self.routing.as_ref().is_none_or(|relay| relay.request_epoch(epoch).is_err()) {
+            emit(&Event::reply_error(id, "routing_stale_epoch"));
+            return;
+        }
+        let (message, pending) = match command {
+            RoutingCommand::ConfigureInput { config, .. } => {
+                let pending = (Purpose::Configure, config.revision);
+                (RoutingMessage::Configure(config), Some(pending))
+            }
+            RoutingCommand::RouteRequest { request, .. } => {
+                (RoutingMessage::Request(request), Some((Purpose::Request, request.revision)))
+            }
+            RoutingCommand::RoutingAck { ack, .. } => (RoutingMessage::Ack(ack.into()), None),
+        };
+        if let Some((purpose, revision)) = pending
+            && let Err(code) = self.routing_pending.add(purpose, epoch, revision, id, now_ms())
+        {
+            emit(&Event::reply_error(id, code));
+            return;
+        }
+        if !self.write_routing(message) {
+            if pending.is_none() {
+                emit(&Event::reply_error(id, "overlay_not_connected"));
+            }
+            self.drop_overlay();
+        } else if pending.is_none() {
+            emit(&Event::Routing(RoutingEvent::RoutingAcked { request_id: id }));
+        }
+    }
     fn command(&mut self, cmd: Command) {
         match cmd {
+            Command::Routing(command) => self.routing_command(command),
             Command::InputAck { request_id, ack } => {
                 let Ok(frame) = encode_input(&OverlayMessage::Input(InputMessage::Ack(ack))) else {
                     emit(&Event::reply_error(request_id, "input_bad_ack"));
@@ -161,6 +221,17 @@ impl Relay<'_> {
                     emit(&Event::reply_error(request_id, "input_requests_full"));
                     return;
                 }
+                if edit_mode.is_some() && self.routing.is_some() {
+                    let current = self.routing.as_ref().and_then(|relay| relay.state);
+                    if current.is_none_or(|state| Some(state.epoch) != input_epoch || state.revision == 0) {
+                        emit(&Event::reply_error(request_id, "routing_stale_epoch"));
+                        return;
+                    }
+                    if !self.routing_pending.available(Purpose::Request, request_id) {
+                        emit(&Event::reply_error(request_id, "routing_requests_full"));
+                        return;
+                    }
+                }
                 let (change, applied_visible) = match self.objects.lock(LOCK_TIMEOUT_MS) {
                     Ok(mut g) => {
                         let change = state::apply(g.bytes_mut(), edit_mode, visible);
@@ -181,6 +252,46 @@ impl Relay<'_> {
                     self.objects.ring_game(change.bits);
                 }
                 emit(&Event::StateSet { request_id, seq: change.seq });
+                if self.routing.is_some() {
+                    if visible.is_some()
+                        // The release carries the same hidden snapshot. Let its result
+                        // cross the pipe before hiding advances the routing epoch.
+                        && !(edit_mode == Some(false) && visible == Some(false))
+                        && !self
+                            .write_routing(RoutingMessage::Visibility { state_seq: change.seq, on: applied_visible })
+                    {
+                        self.drop_overlay();
+                        return;
+                    }
+                    if let Some(on) = edit_mode {
+                        let Some(current) = self.routing.as_ref().and_then(|relay| relay.state) else {
+                            emit(&Event::reply_error(request_id, "routing_unavailable"));
+                            return;
+                        };
+                        let request = RoutingRequest {
+                            epoch: current.epoch,
+                            revision: current.revision,
+                            request_id,
+                            target: None,
+                            action: if on { RoutingAction::EnterEdit } else { RoutingAction::LeaveEdit },
+                            state_seq: (change.seq != 0).then_some(change.seq),
+                        };
+                        if let Err(code) = self.routing_pending.add(
+                            Purpose::Request,
+                            request.epoch,
+                            request.revision,
+                            request_id,
+                            now_ms(),
+                        ) {
+                            emit(&Event::reply_error(request_id, code));
+                            return;
+                        }
+                        if !self.write_routing(RoutingMessage::Request(request)) {
+                            self.drop_overlay();
+                        }
+                    }
+                    return;
+                }
                 if edit_mode.is_some()
                     && let Some(input) = &self.input
                     && let Some(current) = input.state
@@ -305,36 +416,61 @@ impl Relay<'_> {
                 PipeEvent::Connected => self.overlay_hello_due = true,
                 PipeEvent::Message(bytes) if self.overlay_hello_due => {
                     self.overlay_hello_due = false;
-                    match check_overlay_first(&bytes) {
-                        OverlayFirst::Hello { module_version } => {
+                    match classify_first(&bytes) {
+                        First::State(module_version) => {
                             self.overlay_up = true;
                             emit(&Event::OverlayConnected { module_version });
                         }
-                        OverlayFirst::InputHello { module_version } => {
-                            if !self.overlay.write(
-                                &encode_input(&OverlayMessage::Input(InputMessage::Welcome { input_version: 1 }))
-                                    .unwrap(),
-                            ) {
+                        First::Routing(module_version) => {
+                            if !self.write_routing(RoutingMessage::Welcome { input_version: ROUTING_VERSION }) {
                                 self.drop_overlay();
                                 continue;
                             }
-                            self.input = Some(InputRelay::default());
+                            self.routing = Some(RoutingRelay::default());
                             self.overlay_up = true;
-                            emit(&Event::InputReady { version: 1 });
+                            emit(&Event::Routing(RoutingEvent::RoutingReady { version: ROUTING_VERSION }));
                             emit(&Event::OverlayConnected { module_version });
                         }
-                        OverlayFirst::VersionMismatch => {
+                        First::VersionMismatch => {
                             emit(&Event::error("version_mismatch"));
                             self.overlay.disconnect();
                         }
-                        OverlayFirst::Bad(why) => {
-                            eprintln!("[uw-helper64] overlay pipe: {why}");
+                        First::Bad => {
+                            eprintln!("[uw-helper64] expected a state-only or v2 routing hello");
                             emit(&Event::error("pipe_error"));
                             self.overlay.disconnect();
                         }
                     }
                 }
                 PipeEvent::Message(bytes) => match decode_overlay(&bytes) {
+                    Ok(OverlayMessage::Routing(message)) => {
+                        let correlation = match &message {
+                            RoutingMessage::Configured(result) => Some((Purpose::Configure, *result)),
+                            RoutingMessage::Result(result) => Some((Purpose::Request, *result)),
+                            _ => None,
+                        };
+                        match self.routing.as_mut().ok_or("routing_unavailable").and_then(|relay| relay.accept(message))
+                        {
+                            Ok(event) => {
+                                if let Event::Routing(RoutingEvent::RoutingState { state }) = &event {
+                                    for (_, id) in self.routing_pending.retire_before(state.epoch) {
+                                        emit(&Event::reply_error(id, "routing_application_lost"));
+                                    }
+                                }
+                                if let Some((purpose, result)) = correlation
+                                    && !self.routing_pending.take(purpose, &result)
+                                {
+                                    eprintln!("[uw-helper64] late or unmatched routing result: {result:?}");
+                                    continue;
+                                }
+                                emit(&event);
+                            }
+                            Err(code) => {
+                                emit(&Event::error(code));
+                                self.drop_overlay();
+                            }
+                        }
+                    }
                     Ok(OverlayMessage::Input(message)) => {
                         if let InputMessage::Result(result) = &message
                             && !self.captures.take(*result)
@@ -401,6 +537,10 @@ impl Relay<'_> {
             emit(&Event::reply_error(id, "input_application_lost"));
         }
         self.input = None;
+        self.routing = None;
+        for (_, id) in self.routing_pending.drain() {
+            emit(&Event::reply_error(id, "routing_application_lost"));
+        }
         if self.overlay_up {
             emit(&Event::OverlayDisconnected);
         }

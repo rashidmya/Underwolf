@@ -3,8 +3,8 @@
 //! supervision state machine (request ids, restarts, stop rules, the overlay timeout); `host`
 //! runs it with real helper processes (unix only).
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 pub mod driver;
 pub mod supervisor;
@@ -32,9 +32,29 @@ pub fn exe_matches(name: &str, target: &str) -> bool {
 pub struct RequestIds(Arc<AtomicU32>);
 
 impl RequestIds {
+    pub fn try_next(&self) -> Option<u32> {
+        self.0
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |id| id.checked_add(1))
+            .ok()
+            .and_then(|id| id.checked_add(1))
+    }
     pub fn next(&self) -> u32 {
-        self.0.fetch_add(1, Ordering::SeqCst).wrapping_add(1)
+        self.try_next().expect("request id space exhausted")
     }
 }
 
 pub mod input;
+
+pub mod routing;
+
+#[cfg(test)]
+mod request_id_tests {
+    use super::*;
+    #[test]
+    fn exhausted_ids_never_wrap_to_zero_or_reuse_an_earlier_id() {
+        let ids = RequestIds(Arc::new(AtomicU32::new(u32::MAX - 1)));
+        assert_eq!(ids.try_next(), Some(u32::MAX));
+        assert_eq!(ids.try_next(), None);
+        assert_eq!(ids.try_next(), None);
+    }
+}

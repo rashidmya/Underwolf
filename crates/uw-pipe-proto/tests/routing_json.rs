@@ -85,3 +85,46 @@ fn unknown_fields_and_oversized_json_cannot_be_accepted() {
     );
     assert!(RoutingCommand::parse(&" ".repeat(32_769)).is_err());
 }
+
+#[test]
+fn root_json_envelopes_accept_v2_without_adding_a_wrapper_tag() {
+    use uw_pipe_proto::jsonl::{Command, Event};
+    let line = RoutingCommand::RoutingAck {
+        request_id: 3,
+        ack: RoutingProgress { epoch: u64::MAX, nonce: 2, through_seq: 0 },
+    }
+    .to_line()
+    .unwrap();
+    let command = Command::parse(&line).expect("root command must accept routing v2");
+    assert_eq!(command.request_id(), 3);
+    assert_eq!(command.to_line(), line);
+    assert!(Command::parse(&line.replace("\"18446744073709551615\"", "18446744073709551615")).is_err());
+    let line = RoutingEvent::RoutingReady { version: 2 }.to_line().unwrap();
+    assert_eq!(Event::parse(&line).unwrap().to_line(), line);
+}
+
+#[test]
+fn cli_remaps_outer_and_nested_routing_request_ids_together() {
+    use uw_pipe_proto::jsonl::Command;
+    let line = r#"{"cmd":"route_request","request_id":42,"request":{"epoch":"1","revision":"1","request_id":42,"target":null,"action":"enter_edit","state_seq":null}}"#;
+    let (command, user) = Command::parse_with_id(line, 7).unwrap();
+    assert_eq!(user, Some(42));
+    let v: serde_json::Value = serde_json::from_str(&command.to_line()).unwrap();
+    assert_eq!(v["request_id"], 7);
+    assert_eq!(v["request"]["request_id"], 7);
+    assert!(
+        Command::parse_with_id(&line.replace("\"request_id\":42,\"target\"", "\"request_id\":41,\"target\""), 7)
+            .is_err()
+    );
+}
+
+#[test]
+fn cli_cannot_bypass_routing_json_bounds_or_remap_a_zero_user_id() {
+    use uw_pipe_proto::jsonl::Command;
+    let line =
+        RoutingCommand::RoutingAck { request_id: 1, ack: RoutingProgress { epoch: 1, nonce: 1, through_seq: 0 } }
+            .to_line()
+            .unwrap();
+    assert!(Command::parse_with_id(&(line.clone() + &" ".repeat(MAX_JSON_BYTES)), 7).is_err());
+    assert!(Command::parse_with_id(&line.replace("\"request_id\":1", "\"request_id\":0"), 7).is_err());
+}

@@ -20,6 +20,8 @@ use windows_sys::{
     core::w,
 };
 static CLICK_TARGET: AtomicUsize = AtomicUsize::new(0);
+static SUPERSEDE_REQUEST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SEQUENCE_HANDLE: std::sync::OnceLock<(InputHandle, u64)> = std::sync::OnceLock::new();
 static GAME_KEYS: AtomicUsize = AtomicUsize::new(0);
 static PARTIAL_QUERY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static MOUSE_LEAK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -29,6 +31,20 @@ static ROLLBACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     if msg == WM_LBUTTONDOWN {
         CLICK_TARGET.store(h as usize, Ordering::Release);
+    }
+    if msg == WM_KEYUP && w == 87 && SUPERSEDE_REQUEST.swap(false, Ordering::AcqRel) {
+        let (handle, epoch) = SEQUENCE_HANDLE.get().unwrap();
+        handle.set_visible_state(true, 2);
+        handle
+            .route_request(RoutingRequest {
+                epoch: *epoch,
+                revision: 1,
+                request_id: 3,
+                target: None,
+                action: RoutingAction::LeaveEdit,
+                state_seq: Some(2),
+            })
+            .unwrap();
     }
     if msg == WM_KEYUP && w == 87 && PARTIAL_QUERY.load(Ordering::Acquire) {
         // SAFETY: real state query during reentrant game cleanup for a continuing mouse domain.
@@ -188,8 +204,27 @@ pub fn run() {
     let directinput = if case.starts_with("directinput") { Some(directinput::Fixture::create(hwnd)) } else { None };
     let runtime = InputRuntime::install(hwnd).expect("install");
     let h = runtime.handle();
+    if case == "first-routing-state" {
+        h.connect();
+        h.set_visible(true);
+        drive(&h, 100);
+    }
     h.connect_routing();
     h.set_visible(true);
+    if case == "first-routing-state" {
+        std::thread::sleep(Duration::from_millis(110));
+        let first = h.drain();
+        assert!(!first.iter().any(|event| matches!(event, RuntimeEvent::RoutingState(_))));
+        assert!(h.challenge().is_none(), "legacy state authorized a v2 challenge before a routing state");
+        h.disconnect();
+        drive(&h, 30);
+        // SAFETY: only this fixture's live window is destroyed.
+        unsafe {
+            DestroyWindow(hwnd);
+        }
+        println!("PASS routing probe first-routing-state");
+        return;
+    }
     let events = drive(&h, 200);
     let epoch = events
         .iter()
@@ -249,6 +284,103 @@ pub fn run() {
             DestroyWindow(hwnd);
         }
         println!("PASS routing probe directinput");
+        return;
+    }
+    if case == "sequence-reentrant" {
+        assert!(SEQUENCE_HANDLE.set((h.clone(), epoch)).is_ok());
+        h.set_visible_state(true, 1);
+        key_vk(87, true);
+        drive(&h, 30);
+        SUPERSEDE_REQUEST.store(true, Ordering::Release);
+        h.route_request(RoutingRequest {
+            epoch,
+            revision: 1,
+            request_id: 2,
+            target: None,
+            action: RoutingAction::EnterEdit,
+            state_seq: Some(1),
+        })
+        .unwrap();
+        let events = drive(&h, 100);
+        assert!(!SUPERSEDE_REQUEST.load(Ordering::Acquire), "game cleanup callback did not run");
+        assert!(events.iter().any(|event| matches!(event, RuntimeEvent::RoutingResult(r) if r.request_id == 2 && r.code == RoutingCode::Superseded)), "reentrant state change did not supersede native entry: {events:?}");
+        assert!(!h.capture_permitted());
+        key_vk(87, false);
+        drive(&h, 30);
+        h.disconnect();
+        drive(&h, 30);
+        // SAFETY: destroy only the fixture's window.
+        unsafe {
+            DestroyWindow(hwnd);
+        }
+        println!("PASS routing probe sequence-reentrant");
+        return;
+    }
+    if case == "sequence" {
+        h.set_visible_state(true, 1);
+        h.route_request(RoutingRequest {
+            epoch,
+            revision: 1,
+            request_id: 2,
+            target: None,
+            action: RoutingAction::EnterEdit,
+            state_seq: Some(1),
+        })
+        .unwrap();
+        h.set_visible_state(true, 2);
+        h.route_request(RoutingRequest {
+            epoch,
+            revision: 1,
+            request_id: 3,
+            target: None,
+            action: RoutingAction::LeaveEdit,
+            state_seq: Some(2),
+        })
+        .unwrap();
+        let events = drive(&h, 80);
+        assert!(events.iter().any(|e| matches!(e, RuntimeEvent::RoutingResult(r) if r.request_id == 2 && r.code == RoutingCode::Superseded)), "old queued edit-on applied after a newer state: {events:?}");
+        assert!(!h.capture_permitted());
+        h.route_request(RoutingRequest {
+            epoch,
+            revision: 1,
+            request_id: 4,
+            target: None,
+            action: RoutingAction::EnterEdit,
+            state_seq: Some(999),
+        })
+        .unwrap();
+        let events = drive(&h, 60);
+        assert!(events.iter().any(|e| matches!(e, RuntimeEvent::RoutingResult(r) if r.request_id == 4 && r.code == RoutingCode::Superseded)), "a request invented an unobserved state sequence");
+        assert!(!h.capture_permitted());
+        h.route_request(RoutingRequest {
+            epoch,
+            revision: 1,
+            request_id: 5,
+            target: None,
+            action: RoutingAction::EnterEdit,
+            state_seq: None,
+        })
+        .unwrap();
+        assert!(drive(&h, 60).iter().any(|event| matches!(event, RuntimeEvent::RoutingResult(result) if result.request_id == 5 && result.code == RoutingCode::Applied)));
+        assert!(h.capture_permitted());
+        h.route_request(RoutingRequest {
+            epoch,
+            revision: 1,
+            request_id: 6,
+            target: None,
+            action: RoutingAction::LeaveEdit,
+            state_seq: Some(999),
+        })
+        .unwrap();
+        assert!(drive(&h, 60).iter().any(|event| matches!(event, RuntimeEvent::RoutingResult(result) if result.request_id == 6 && result.code == RoutingCode::Superseded)));
+        assert!(h.capture_permitted(), "an invalid future sequence released current ownership");
+        h.disconnect();
+        drive(&h, 30);
+        // SAFETY: destroy only this fixture's live window.
+        unsafe {
+            DestroyWindow(hwnd);
+        }
+        println!("PASS routing probe sequence");
         return;
     }
     if case == "rollback" {
@@ -408,7 +540,7 @@ pub fn run() {
             "standard exit warped the physical pointer"
         );
     }
-    if matches!(case.as_str(), "exclusive" | "optional-load") {
+    if matches!(case.as_str(), "exclusive" | "optional-load" | "optional-order") {
         h.route_request(RoutingRequest {
             epoch,
             revision: 1,
@@ -505,12 +637,32 @@ pub fn run() {
         let events = drive(&h, 60);
         assert!(events.iter().any(|e| matches!(e, RuntimeEvent::RoutedBatch(b) if b.events.iter().any(|e| e.target == Some(WidgetRef { id: 1, generation: 1 }) && e.input.is_some_and(|r| r.kind == 2 && r.a == 0xe9)))), "native Unicode packet lost the focused widget target");
     }
-    if case == "optional-load" {
+    if matches!(case.as_str(), "optional-load" | "optional-order") {
         assert!(h.capture_permitted());
         // SAFETY: load a system input runtime into this private probe process only.
         assert!(!unsafe { LoadLibraryW(w!("dinput8.dll")) }.is_null());
         assert!(!h.capture_permitted(), "optional load must revoke before discovery");
-        let events = drive(&h, 150);
+        let events = if case == "optional-order" {
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_millis(250) {
+                pump();
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            let events = h.drain();
+            let mut announced = epoch;
+            for event in &events {
+                match event {
+                    RuntimeEvent::RoutingState(state) => announced = announced.max(state.epoch),
+                    RuntimeEvent::NativeCoverage(coverage) => {
+                        assert!(coverage.epoch <= announced, "coverage preceded its epoch state: {events:?}")
+                    }
+                    _ => {}
+                }
+            }
+            events
+        } else {
+            drive(&h, 150)
+        };
         assert!(!h.capture_permitted(), "discovery must never rearm ownership");
         assert!(
             events

@@ -1,10 +1,7 @@
 use super::*;
-use uw_game_channel::input::{SessionEvent, start_input};
+use uw_game_channel::input::{SessionEvent, start_routing};
 use uw_input::win::{InputRuntime, RuntimeEvent};
-use uw_pipe_proto::{
-    input::{InputMessage, InputReason},
-    pipe::OverlayMessage,
-};
+use uw_pipe_proto::{input::InputReason, pipe::OverlayMessage, routing::RoutingMessage};
 use windows_sys::Win32::{
     Foundation::{HWND, LPARAM},
     System::{LibraryLoader::*, Threading::GetCurrentProcessId},
@@ -89,13 +86,23 @@ fn run() {
     };
     let handle = runtime.handle();
     let callbacks = handle.clone();
-    let endpoint = match start_input(
-        2,
+    let endpoint = match start_routing(
+        3,
         Box::new(move |event| match event {
-            SessionEvent::Connected => callbacks.connect(),
+            SessionEvent::Connected => callbacks.connect_routing(),
             SessionEvent::Disconnected => callbacks.disconnect(),
+            SessionEvent::DeferHidden => callbacks.defer_hidden(),
+            SessionEvent::Configure(config) => match uw_input::configuration::PreparedConfig::compile(config) {
+                Ok(config) => {
+                    let _ = callbacks.configure(config);
+                }
+                Err(_) => callbacks.revoke(InputReason::Unavailable),
+            },
+            SessionEvent::RouteRequest(request) => {
+                let _ = callbacks.route_request(request);
+            }
             // Input-capable state commands carry their own ordered snapshots; legacy bells coalesce.
-            SessionEvent::State { .. } => {}
+            SessionEvent::State { state, .. } => callbacks.observe_state_sequence(state.seq),
             SessionEvent::Visibility { state_seq, on } => callbacks.set_visible_state(on, state_seq),
             SessionEvent::ApplyCapture { request, visible, state_seq } => {
                 callbacks.apply_capture(request, visible, state_seq);
@@ -121,28 +128,26 @@ fn run() {
                         endpoint.disconnect();
                         break;
                     }
-                    RuntimeEvent::State(s) => InputMessage::State(s),
-                    RuntimeEvent::Result(r) => InputMessage::Result(r),
-                    RuntimeEvent::Batch(b) => InputMessage::Batch(b),
+                    RuntimeEvent::State(_) | RuntimeEvent::Result(_) | RuntimeEvent::Batch(_) => continue,
                     RuntimeEvent::Applied(seq) => {
                         if endpoint.applied(seq).is_err() {
                             handle.revoke(InputReason::Overflow)
                         }
                         continue;
                     }
-                    RuntimeEvent::RoutingState(_)
-                    | RuntimeEvent::Configured(_)
-                    | RuntimeEvent::RoutedBatch(_)
-                    | RuntimeEvent::RoutingResult(_)
-                    | RuntimeEvent::NativeCoverage(_) => continue,
+                    RuntimeEvent::RoutingState(state) => RoutingMessage::State(state),
+                    RuntimeEvent::Configured(result) => RoutingMessage::Configured(result),
+                    RuntimeEvent::RoutedBatch(batch) => RoutingMessage::Events(batch),
+                    RuntimeEvent::RoutingResult(result) => RoutingMessage::Result(result),
+                    RuntimeEvent::NativeCoverage(coverage) => RoutingMessage::Coverage(coverage),
                 };
-                if endpoint.try_send(OverlayMessage::Input(message)).is_err() {
+                if endpoint.try_send(OverlayMessage::Routing(message)).is_err() {
                     handle.revoke(InputReason::Overflow);
                     break;
                 }
             }
             if let Some(c) = handle.challenge()
-                && endpoint.try_send(OverlayMessage::Input(InputMessage::Challenge(c))).is_err()
+                && endpoint.try_send(OverlayMessage::Routing(RoutingMessage::Challenge(c))).is_err()
             {
                 handle.revoke(InputReason::Overflow)
             }

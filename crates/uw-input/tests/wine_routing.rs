@@ -58,3 +58,25 @@ fn continuing_mouse_domain_stays_blocked_during_keyboard_gain() {
 fn host_focus_change_resets_pending_utf16_text() {
     probe("focus-text");
 }
+
+#[test]
+#[ignore = "Windows input_probe under xvfb-run"]
+fn queued_edit_request_uses_the_latest_observed_state_sequence() {
+    probe("sequence");
+}
+
+#[test]
+#[ignore = "Windows input_probe under xvfb-run"]
+fn reentrant_newer_state_prevents_stale_native_publication() {
+    probe("sequence-reentrant");
+}
+#[test]
+#[ignore = "Windows input_probe under xvfb-run"]
+fn legacy_state_cannot_announce_a_routing_delivery_epoch() {
+    probe("first-routing-state");
+}
+#[test]
+#[ignore = "Windows input_probe under xvfb-run"]
+fn native_coverage_follows_its_routing_epoch_state() {
+    probe("optional-order");
+}

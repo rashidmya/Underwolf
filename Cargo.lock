@@ -626,6 +626,7 @@ name = "uw-helper"
 version = "0.0.0"
 dependencies = [
  "uw-game-channel",
+ "uw-host",
  "uw-pipe-proto",
  "windows-sys",
 ]

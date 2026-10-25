@@ -94,11 +94,48 @@ pub struct Supervisor {
 fn not_connected(cmd: &Command) -> Event {
     let code = match cmd {
         Command::LoadOverlay { .. } => "bootstrap_not_connected",
-        Command::InputAck { .. } | Command::SetState { .. } | Command::Ping { .. } => "overlay_not_connected",
+        Command::InputAck { .. } | Command::SetState { .. } | Command::Ping { .. } | Command::Routing(_) => {
+            "overlay_not_connected"
+        }
     };
     Event::reply_error(cmd.request_id(), code)
 }
 
+fn routing_capacity(pending: &[Command], command: &Command) -> bool {
+    let purpose = |command: &Command| match command {
+        Command::Routing(uw_pipe_proto::jsonl::RoutingCommand::ConfigureInput { .. }) => Some(true),
+        Command::Routing(uw_pipe_proto::jsonl::RoutingCommand::RouteRequest { .. }) => Some(false),
+        _ => None,
+    };
+    purpose(command).is_none_or(|kind| pending.iter().filter(|entry| purpose(entry) == Some(kind)).count() < 32)
+}
+fn answers(command: &Command, event: &Event) -> bool {
+    use uw_pipe_proto::jsonl::{RoutingCommand, RoutingEvent};
+    if event.request_id() != Some(command.request_id()) {
+        return false;
+    }
+    if matches!(event, Event::Error { .. }) {
+        return true;
+    }
+    match (command, event) {
+        (Command::LoadOverlay { .. }, Event::Status { .. })
+        | (Command::SetState { .. }, Event::StateSet { .. })
+        | (Command::Ping { .. }, Event::Pong { .. })
+        | (Command::InputAck { .. }, Event::InputAcked { .. })
+        | (Command::Routing(RoutingCommand::RoutingAck { .. }), Event::Routing(RoutingEvent::RoutingAcked { .. })) => {
+            true
+        }
+        (
+            Command::Routing(RoutingCommand::ConfigureInput { config, .. }),
+            Event::Routing(RoutingEvent::RoutingConfigured { result }),
+        ) => config.epoch == result.epoch && config.revision == result.revision,
+        (
+            Command::Routing(RoutingCommand::RouteRequest { request, .. }),
+            Event::Routing(RoutingEvent::RoutingResult { result }),
+        ) => request.epoch == result.epoch && request.revision == result.revision,
+        _ => false,
+    }
+}
 impl Supervisor {
     /// `ids` is the counter the host's user also takes ids from.
     pub fn new(desired: Desired, ids: RequestIds) -> Supervisor {
@@ -163,8 +200,15 @@ impl Supervisor {
                 out
             }
             Input::User(cmd) => {
+                if !routing_capacity(&self.pending, &cmd) {
+                    return vec![Action::Emit(Event::reply_error(cmd.request_id(), "routing_requests_full"))];
+                }
                 self.driver.note_command(&cmd);
-                self.send(cmd)
+                if let Some(code) = self.driver.take_routing_error() {
+                    vec![Action::Emit(Event::reply_error(cmd.request_id(), code))]
+                } else {
+                    self.send(cmd)
+                }
             }
             Input::Shutdown => {
                 if self.is_stopped() {
@@ -197,6 +241,9 @@ impl Supervisor {
 
     fn send(&mut self, cmd: Command) -> Vec<Action> {
         if matches!(self.phase, Phase::Running { .. }) {
+            if !routing_capacity(&self.pending, &cmd) {
+                return vec![Action::Emit(Event::reply_error(cmd.request_id(), "routing_requests_full"))];
+            }
             self.pending.push(cmd.clone());
             vec![Action::Send(cmd)]
         } else {
@@ -214,9 +261,7 @@ impl Supervisor {
     }
 
     fn on_event(&mut self, event: Event, now: u64) -> Vec<Action> {
-        if let Some(id) = event.request_id() {
-            self.pending.retain(|c| c.request_id() != id);
-        }
+        self.pending.retain(|command| !answers(command, &event));
         match &event {
             Event::Status { code, .. } if code == "ok" && !self.overlay_up => {
                 self.overlay_deadline = Some(now + OVERLAY_TIMEOUT_MS);
@@ -247,6 +292,9 @@ impl Supervisor {
             _ if !self.is_stopped() => {
                 for cmd in self.driver.on_event(&event) {
                     out.extend(self.send(cmd));
+                }
+                if let Some(code) = self.driver.take_routing_error() {
+                    out.push(Action::Emit(Event::error(code)));
                 }
             }
             _ => {}

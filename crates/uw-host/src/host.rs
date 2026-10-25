@@ -163,13 +163,14 @@ fn spawn(mut cmd: Command, tx: &Sender<Input>, backlog: Arc<AtomicUsize>) -> Res
             let line = String::from_utf8_lossy(&buf);
             let line = line.trim_end_matches(['\n', '\r']);
             if Event::parse(line).is_ok_and(|e| input_event(&e))
-                && backlog.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < 64).then_some(n + 1)).is_err() {
-                    // No input can be silently dropped: end the helper session and
-                    // let its local game lease expire independently of the reader.
-                    let _ = tx.send(Input::HelperLine(Event::error("input_queue_overflow").to_line()));
-                    let _ = child.kill();
-                    break;
-                }
+                && backlog.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < 64).then_some(n + 1)).is_err()
+            {
+                // No input can be silently dropped: end the helper session and
+                // let its local game lease expire independently of the reader.
+                let _ = tx.send(Input::HelperLine(Event::error("input_queue_overflow").to_line()));
+                let _ = child.kill();
+                break;
+            }
             if !line.trim().is_empty() && tx.send(Input::HelperLine(line.to_string())).is_err() {
                 break;
             }
@@ -253,7 +254,8 @@ fn run(
 fn input_event(event: &Event) -> bool {
     matches!(
         event,
-        Event::InputReady { .. }
+        Event::Routing(_)
+            | Event::InputReady { .. }
             | Event::InputState { .. }
             | Event::InputBatch { .. }
             | Event::InputChallenge { .. }

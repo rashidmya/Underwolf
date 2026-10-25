@@ -44,34 +44,99 @@ struct UserIdState {
     replies: std::collections::HashMap<u32, u32>,
     captures: std::collections::HashMap<u32, u32>,
     input: bool,
+    routing: bool,
+    configurations: std::collections::HashMap<u32, RoutingApplication>,
+    requests: std::collections::HashMap<u32, RoutingApplication>,
 }
 
 #[cfg(unix)]
+#[derive(Clone, Copy)]
+struct RoutingApplication {
+    user: u32,
+    epoch: u64,
+    revision: Option<u64>,
+}
+#[cfg(unix)]
+impl UserIdState {
+    fn routing_result(&mut self, configuration: bool, result: &mut uw_pipe_proto::routing::RoutingResult) {
+        let pending = if configuration { &mut self.configurations } else { &mut self.requests };
+        if let Some(app) = pending.get(&result.request_id).copied()
+            && app.epoch == result.epoch
+            && app.revision.is_none_or(|revision| revision == result.revision)
+        {
+            pending.remove(&result.request_id);
+            result.request_id = app.user;
+        }
+    }
+}
+#[cfg(unix)]
 impl UserIds {
     fn outgoing(&self, line: &str, host_id: u32) -> Result<uw_pipe_proto::jsonl::Command, String> {
-        use uw_pipe_proto::jsonl::Command;
+        use uw_pipe_proto::jsonl::{Command, RoutingCommand};
         let (cmd, user) = Command::parse_with_id(line, host_id).map_err(|e| e.to_string())?;
         let mut state = self.0.lock().unwrap();
-        if state.input && matches!(cmd, Command::SetState { edit_mode: Some(_), .. }) {
+        let application = match &cmd {
+            Command::Routing(RoutingCommand::ConfigureInput { config, .. }) => {
+                Some((true, config.epoch, Some(config.revision)))
+            }
+            Command::Routing(RoutingCommand::RouteRequest { request, .. }) => {
+                Some((false, request.epoch, Some(request.revision)))
+            }
+            Command::SetState { input_epoch: Some(epoch), edit_mode: Some(_), .. } if state.routing => {
+                Some((false, *epoch, None))
+            }
+            _ => None,
+        };
+        if let Some((configuration, epoch, revision)) = application {
+            let pending = if configuration { &mut state.configurations } else { &mut state.requests };
+            if pending.len() >= 32 || pending.contains_key(&host_id) {
+                return Err("routing_requests_full".into());
+            }
+            pending.insert(host_id, RoutingApplication { user: user.unwrap_or(host_id), epoch, revision });
+        }
+        if state.input && !state.routing && matches!(cmd, Command::SetState { edit_mode: Some(_), .. }) {
             if state.captures.len() >= 32 {
                 return Err("input_requests_full".into());
             }
             state.captures.insert(host_id, user.unwrap_or(host_id));
         }
-        if let Some(user) = user {
+        if let Some(user) = user
+            && !matches!(
+                cmd,
+                Command::Routing(RoutingCommand::ConfigureInput { .. } | RoutingCommand::RouteRequest { .. })
+            )
+        {
             state.replies.insert(host_id, user);
         }
         Ok(cmd)
     }
 
     fn incoming(&self, event: &mut uw_pipe_proto::jsonl::Event) {
-        use uw_pipe_proto::jsonl::Event;
+        use uw_pipe_proto::jsonl::{Event, RoutingEvent};
         let mut state = self.0.lock().unwrap();
         match event {
-            Event::InputReady { .. } => state.input = true,
+            Event::InputReady { .. } => {
+                state.input = true;
+                state.routing = false;
+            }
+            Event::Routing(RoutingEvent::RoutingReady { .. }) => {
+                state.input = true;
+                state.routing = true;
+            }
+            Event::Routing(RoutingEvent::RoutingConfigured { result }) => {
+                state.routing_result(true, result);
+                return;
+            }
+            Event::Routing(RoutingEvent::RoutingResult { result }) => {
+                state.routing_result(false, result);
+                return;
+            }
             Event::OverlayDisconnected | Event::GameExited | Event::Stopped { .. } => {
                 state.captures.clear();
+                state.configurations.clear();
+                state.requests.clear();
                 state.input = false;
+                state.routing = false;
             }
             Event::CaptureResult { capture_request_id, .. } => {
                 if let Some(user) = state.captures.remove(capture_request_id) {
@@ -80,7 +145,9 @@ impl UserIds {
                 return;
             }
             Event::Error { request_id: Some(id), .. } => {
-                if let Some(user) = state.captures.remove(id) {
+                let routing_user =
+                    state.configurations.remove(id).or_else(|| state.requests.remove(id)).map(|app| app.user);
+                if let Some(user) = routing_user.or_else(|| state.captures.remove(id)) {
                     state.replies.remove(id);
                     *id = user;
                     return;
@@ -273,6 +340,117 @@ mod tests {
         assert!(matches!(late, Event::CaptureResult { capture_request_id: 8, .. }));
     }
 
+    #[test]
+    fn routing_application_ids_require_exact_purpose_epoch_and_revision() {
+        use uw_pipe_proto::{
+            jsonl::{RoutingCommand, RoutingEvent},
+            routing::*,
+        };
+        let ids = UserIds::default();
+        let config = RoutingConfig {
+            epoch: 1,
+            revision: 3,
+            request_id: 42,
+            width: 100,
+            height: 100,
+            widgets: vec![],
+            hotkeys: vec![HotkeySpec {
+                id: 1,
+                vk: 9,
+                modifiers: 8,
+                flags: 0,
+                action: HotkeyAction::ToggleEdit,
+                target: None,
+            }],
+        };
+        ids.outgoing(&RoutingCommand::ConfigureInput { request_id: 42, config }.to_line().unwrap(), 7).unwrap();
+        let result = RoutingResult { epoch: 1, revision: 3, request_id: 7, code: RoutingCode::Applied, through_seq: 0 };
+        let mut wrong_purpose = Event::Routing(RoutingEvent::RoutingResult { result });
+        ids.incoming(&mut wrong_purpose);
+        assert_eq!(wrong_purpose.request_id(), Some(7));
+        let mut wrong_revision =
+            Event::Routing(RoutingEvent::RoutingConfigured { result: RoutingResult { revision: 4, ..result } });
+        ids.incoming(&mut wrong_revision);
+        assert_eq!(wrong_revision.request_id(), Some(7));
+        let mut wrong_epoch =
+            Event::Routing(RoutingEvent::RoutingConfigured { result: RoutingResult { epoch: 2, ..result } });
+        ids.incoming(&mut wrong_epoch);
+        assert_eq!(wrong_epoch.request_id(), Some(7));
+        let mut exact = Event::Routing(RoutingEvent::RoutingConfigured { result });
+        ids.incoming(&mut exact);
+        assert_eq!(exact.request_id(), Some(42));
+    }
+    #[test]
+    fn v2_set_state_mapping_survives_state_acceptance_until_application() {
+        use uw_pipe_proto::{jsonl::RoutingEvent, routing::*};
+        let ids = UserIds::default();
+        ids.incoming(&mut Event::Routing(RoutingEvent::RoutingReady { version: 2 }));
+        ids.outgoing(r#"{"cmd":"set_state","request_id":42,"input_epoch":1,"edit_mode":true}"#, 7).unwrap();
+        let mut accepted = Event::StateSet { request_id: 7, seq: 2 };
+        ids.incoming(&mut accepted);
+        assert_eq!(accepted.request_id(), Some(42));
+        let mut applied = Event::Routing(RoutingEvent::RoutingResult {
+            result: RoutingResult { epoch: 1, revision: 3, request_id: 7, code: RoutingCode::Applied, through_seq: 0 },
+        });
+        ids.incoming(&mut applied);
+        assert_eq!(applied.request_id(), Some(42));
+    }
+    #[test]
+    fn routing_application_maps_are_bounded_and_loss_clears_both_kinds() {
+        use uw_pipe_proto::{
+            jsonl::{RoutingCommand, RoutingEvent},
+            routing::*,
+        };
+        let ids = UserIds::default();
+        let config = RoutingConfig {
+            epoch: 1,
+            revision: 3,
+            request_id: 42,
+            width: 100,
+            height: 100,
+            widgets: vec![],
+            hotkeys: vec![HotkeySpec {
+                id: 1,
+                vk: 9,
+                modifiers: 8,
+                flags: 0,
+                action: HotkeyAction::ToggleEdit,
+                target: None,
+            }],
+        };
+        let line = RoutingCommand::ConfigureInput { request_id: 42, config }.to_line().unwrap();
+        for host_id in 1..=32 {
+            ids.outgoing(&line, host_id).unwrap();
+        }
+        assert!(ids.outgoing(&line, 33).is_err());
+        let request = RoutingRequest {
+            epoch: 1,
+            revision: 3,
+            request_id: 43,
+            target: None,
+            action: RoutingAction::EnterEdit,
+            state_seq: None,
+        };
+        ids.outgoing(&RoutingCommand::RouteRequest { request_id: 43, request }.to_line().unwrap(), 100).unwrap();
+        let mut lost = Event::reply_error(1, "routing_application_timeout");
+        ids.incoming(&mut lost);
+        assert_eq!(lost.request_id(), Some(42));
+        ids.outgoing(&line, 33).unwrap();
+        ids.incoming(&mut Event::OverlayDisconnected);
+        let mut late = Event::Routing(RoutingEvent::RoutingResult {
+            result: RoutingResult {
+                epoch: 1,
+                revision: 3,
+                request_id: 100,
+                code: RoutingCode::Applied,
+                through_seq: 0,
+            },
+        });
+        ids.incoming(&mut late);
+        assert_eq!(late.request_id(), Some(100));
+        let state = ids.0.lock().unwrap();
+        assert!(state.configurations.is_empty() && state.requests.is_empty());
+    }
     /// Catches a line that is not UTF-8 ending the reader: every later command would be ignored.
     #[test]
     fn a_line_that_is_not_utf8_is_passed_on_and_later_commands_still_arrive() {
