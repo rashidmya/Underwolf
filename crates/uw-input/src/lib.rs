@@ -14,3 +14,4 @@ pub mod win;
 pub mod configuration;
 pub mod cursor;
 pub mod hotkeys;
+pub mod routing;

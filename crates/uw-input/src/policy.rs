@@ -1,6 +1,7 @@
 //! Pure capture state machine. Its effects are bounded and allocate nothing on a hook path.
 use crate::text::Utf16Text;
 use uw_pipe_proto::input::*;
+use uw_pipe_proto::routing::Domains;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Inactive,
@@ -25,6 +26,7 @@ pub enum PolicyEvent {
     Installed(bool),
     Destroyed,
     Input(InputRecord),
+    RoutedInput { record: InputRecord, pass: bool },
     Observed(InputRecord),
     Snapshot(InputRecord),
     Char(u16),
@@ -64,6 +66,9 @@ pub struct Policy {
     pending: Option<CaptureRequest>,
     pending_visibility: Option<u64>,
     text: Utf16Text,
+    domains: Domains,
+    legacy_hotkey: bool,
+    notify_text: bool,
 }
 impl Default for Policy {
     fn default() -> Self {
@@ -89,10 +94,57 @@ impl Policy {
             pending: None,
             pending_visibility: None,
             text: Utf16Text::default(),
+            domains: Domains { keyboard: true, mouse: true },
+            legacy_hotkey: true,
+            notify_text: false,
         }
     }
     pub fn active(&self) -> bool {
         self.mode == Mode::Capturing
+    }
+    pub fn physical_keys(&self) -> [bool; 256] {
+        self.keys
+    }
+    pub fn physical_buttons(&self) -> [bool; 5] {
+        self.buttons
+    }
+    pub fn domains(&self) -> Domains {
+        self.domains
+    }
+    pub fn use_configured_hotkeys(&mut self) {
+        self.legacy_hotkey = false;
+    }
+    pub fn reset_text(&mut self) {
+        self.text.reset();
+    }
+    pub fn text_notifications(&mut self, enabled: bool) {
+        if self.notify_text != enabled {
+            self.text.reset();
+        }
+        self.notify_text = enabled;
+    }
+    /// The owner applies native effects before publishing the corresponding permission mask.
+    pub fn set_domains(&mut self, domains: Domains) -> Effects {
+        let old = self.domains;
+        let mut effects = Effects::default();
+        if matches!(self.mode, Mode::Entering | Mode::Capturing) {
+            if domains == Domains::default() {
+                self.release(InputReason::Requested, &mut effects);
+            } else {
+                self.quarantine(
+                    Domains { keyboard: domains.keyboard && !old.keyboard, mouse: domains.mouse && !old.mouse },
+                    &mut effects,
+                );
+                if old.keyboard && !domains.keyboard {
+                    self.suppressed_keys = self.keys;
+                }
+                if old.mouse && !domains.mouse {
+                    self.suppressed_buttons = self.buttons;
+                }
+            }
+        }
+        self.domains = domains;
+        effects
     }
     pub fn key_suppressed(&self, vk: usize) -> bool {
         let held = |key: usize| self.suppressed_keys[key];
@@ -127,6 +179,7 @@ impl Policy {
             && self.visible
             && self.healthy
             && self.installed
+            && self.domains != Domains::default()
             && self.mode != Mode::Unavailable
     }
     fn bump(&mut self) {
@@ -142,8 +195,12 @@ impl Policy {
         if matches!(self.mode, Mode::Entering | Mode::Capturing) {
             self.mode = Mode::Releasing;
             self.bump();
-            self.suppressed_keys = self.keys;
-            self.suppressed_buttons = self.buttons;
+            if self.domains.keyboard {
+                self.suppressed_keys = self.keys;
+            }
+            if self.domains.mouse {
+                self.suppressed_buttons = self.buttons;
+            }
             e.transition = Some(Transition::Release { epoch: self.epoch, reason });
             if let Some(r) = self.pending.take() {
                 e.result = Some(result(r, CaptureCode::Superseded))
@@ -152,17 +209,30 @@ impl Policy {
     }
     fn enter(&mut self, reason: InputReason, e: &mut Effects) {
         self.mode = Mode::Entering;
+        self.quarantine(self.domains, e);
+        e.transition = Some(Transition::Enter { epoch: self.epoch, reason });
+    }
+    fn quarantine(&mut self, domains: Domains, e: &mut Effects) {
         let mut n = 0;
-        for r in self.game_keys.iter_mut().chain(self.game_buttons.iter_mut()) {
-            if let Some(mut r) = r.take() {
-                r.flags &= !5;
-                e.releases[n] = Some(r);
-                n += 1;
+        for (records, owned) in
+            [(&mut self.game_keys[..], domains.keyboard), (&mut self.game_buttons[..], domains.mouse)]
+        {
+            if owned {
+                for r in records {
+                    if let Some(mut r) = r.take() {
+                        r.flags &= !5;
+                        e.releases[n] = Some(r);
+                        n += 1;
+                    }
+                }
             }
         }
-        self.suppressed_keys = self.keys;
-        self.suppressed_buttons = self.buttons;
-        e.transition = Some(Transition::Enter { epoch: self.epoch, reason });
+        if domains.keyboard {
+            self.suppressed_keys = self.keys;
+        }
+        if domains.mouse {
+            self.suppressed_buttons = self.buttons;
+        }
     }
     /// The owner samples the current epoch's lease at execution, never at enqueue time.
     pub fn event_with_lease(&mut self, event: PolicyEvent, healthy: bool) -> Effects {
@@ -172,6 +242,7 @@ impl Policy {
         if matches!(
             event,
             PolicyEvent::Input(_)
+                | PolicyEvent::RoutedInput { .. }
                 | PolicyEvent::Observed(_)
                 | PolicyEvent::Snapshot(_)
                 | PolicyEvent::Request(_)
@@ -344,11 +415,11 @@ impl Policy {
                 }
             }
             PolicyEvent::Char(unit) => {
-                if self.active() {
+                let owned = self.domains.keyboard && self.active();
+                if owned || self.notify_text {
                     e.host = self.text.push(unit).map(|c| c.map(|c| InputRecord::text(c, self.modifiers())))
-                } else {
-                    e.pass = self.mode == Mode::Inactive
                 }
+                e.pass = !owned && (!self.domains.keyboard || matches!(self.mode, Mode::Inactive | Mode::Unavailable));
             }
             PolicyEvent::Snapshot(r) => {
                 // Query APIs report generic modifier aliases as well as left/right
@@ -360,8 +431,28 @@ impl Policy {
             PolicyEvent::Observed(r) => {
                 // Raw and legacy streams overlap. Raw reads track passthrough held
                 // state/hotkeys, but never provide a second captured host event.
-                if !self.active() {
+                let owned = if r.kind == 1 || r.kind == 2 { self.domains.keyboard } else { self.domains.mouse };
+                if !self.active() || !owned {
                     return self.event(PolicyEvent::Input(r));
+                }
+            }
+            PolicyEvent::RoutedInput { record, pass } => {
+                let key = (record.kind == 1 && (1..=255).contains(&record.a)).then_some(record.a as usize);
+                let button = (record.kind == 4 && (0..5).contains(&record.a)).then_some(record.a as usize);
+                let old_key = key.and_then(|k| self.game_keys[k]);
+                let old_button = button.and_then(|b| self.game_buttons[b]);
+                e = self.event(PolicyEvent::Input(record));
+                if !pass && e.pass {
+                    if let Some(k) = key {
+                        self.game_keys[k] = old_key;
+                        if record.flags & 1 != 0 {
+                            self.suppressed_keys[k] = true;
+                        }
+                    }
+                    if let Some(b) = button {
+                        self.game_buttons[b] = old_button;
+                    }
+                    e.pass = false;
                 }
             }
             PolicyEvent::Input(r) => {
@@ -379,7 +470,7 @@ impl Policy {
                     if !down {
                         self.suppressed_keys[k] = false;
                     }
-                    if k == 9 && rising && self.modifiers() & 2 != 0 {
+                    if self.legacy_hotkey && k == 9 && rising && self.modifiers() & 2 != 0 {
                         self.suppressed_keys[k] = true;
                         if self.active() {
                             self.release(InputReason::Hotkey, &mut e)
@@ -396,11 +487,12 @@ impl Policy {
                         self.suppressed_buttons[b] = false;
                     }
                 }
-                if self.active() {
+                let owned = if r.kind == 1 || r.kind == 2 { self.domains.keyboard } else { self.domains.mouse };
+                if self.active() && owned {
                     if !quarantined {
                         e.host[0] = Some(r);
                     }
-                } else if matches!(self.mode, Mode::Inactive | Mode::Unavailable) && !quarantined {
+                } else if (!owned || matches!(self.mode, Mode::Inactive | Mode::Unavailable)) && !quarantined {
                     e.pass = true;
                     if r.kind == 1 {
                         self.game_keys[r.a as usize] = down.then_some(r)
@@ -408,6 +500,9 @@ impl Policy {
                     if r.kind == 4 {
                         self.game_buttons[r.a as usize] = down.then_some(r)
                     }
+                }
+                if r.kind == 2 && self.notify_text {
+                    e.host[0] = Some(r);
                 }
             }
         }
