@@ -1,8 +1,8 @@
 # Input 3b — configurable hotkeys and widget input routing
 
 **Date:** 2026-10-25
-**Status:** Draft for owner review. The 3a/3b split and the scope below were agreed in
-the approved 3a design; the new behavior and limits in this document are proposals.
+**Status:** Approved by the owner on 2026-10-25 after the builder review. The
+behavior and limits below originated as the author's proposals.
 **Starting point:** `main` at `28996ad`, following the integration of input 3a.
 
 ## Intent
@@ -77,10 +77,10 @@ Existing Electron, Rust and MinHook dependencies remain the starting stack.
 
 ## Configuration and protocol
 
-**Proposed compatibility policy:** matching 3b input-capable host/helper/DLL
-builds are required; reject input v1/v2 mixing clearly. This is the author's
-default, pending the owner's compatibility preference. The bootstrap, legacy
-state-only path and game-data layouts retain their existing contracts.
+**Compatibility policy:** matching 3b input-capable host/helper/DLL builds are
+required; reject input v1/v2 mixing clearly. This was the author's recommended
+default, accepted with the design approval. The bootstrap, legacy state-only
+path and game-data layouts retain their existing contracts.
 
 Use input protocol v2, with explicit negotiation and reports for routing,
 hotkeys and native API coverage. Do not reinterpret v1 records or the existing
@@ -347,5 +347,6 @@ takeover and background-click focus clearing. Both are now explicit above;
 these resolutions are the author's proposals. The same reviewer reread the
 changes and reported "nothing important left" for making an implementation plan.
 
-Owner approval of this draft is pending. No product code, dependencies, game
-processes or game settings were changed to prepare it.
+The owner approved the reviewed design on 2026-10-25 and authorized the
+implementation plan. No product code, dependencies, game processes or game
+settings were changed to prepare the design.
