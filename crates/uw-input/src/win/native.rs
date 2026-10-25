@@ -104,8 +104,7 @@ pub(super) fn poll(shared: &super::Shared) {
                 }
             });
         }
-        let ready = matches!(report.directinput.status, DiscoveryStatus::Absent | DiscoveryStatus::Supported)
-            && report.gameinput.status != DiscoveryStatus::Discovered;
+        let ready = report.capture_available();
         if let Ok(mut current) = DISCOVERY.lock() {
             *current = Some(report);
         }

@@ -130,3 +130,18 @@ pub struct DiscoveryReport {
     pub targets: Vec<DiscoveryTarget>,
     pub diagnostics: Vec<String>,
 }
+
+impl DiscoveryReport {
+    /// All present native paths must be covered before ownership can be published.
+    /// E_NOTIMPL from an object-free factory permits other paths to work, without claiming isolation.
+    pub fn capture_available(&self) -> bool {
+        let covered = |api: AdapterCoverage| {
+            api.status == DiscoveryStatus::Absent || api.status == DiscoveryStatus::Supported && api.abi_mask != 0
+        };
+        covered(self.directinput)
+            && (covered(self.gameinput)
+                || self.gameinput.status == DiscoveryStatus::Unsupported
+                    && self.gameinput.abi_mask == 0
+                    && self.gameinput.detail as u32 == 0x8000_4001)
+    }
+}
