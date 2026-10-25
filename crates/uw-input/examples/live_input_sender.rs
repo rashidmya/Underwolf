@@ -66,6 +66,19 @@ fn main() {
         return;
     }
     assert!(foreground(), "Deadlock must already be foreground");
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(at) = args.iter().position(|arg| arg == "--close-window") {
+        let expected: u32 = args.get(at + 1).expect("expected Windows owner PID").parse().expect("numeric owner PID");
+        let mut owner = 0;
+        // SAFETY: writable process-id output for the exact foreground window.
+        assert_ne!(unsafe { GetWindowThreadProcessId(hwnd, &mut owner) }, 0);
+        assert!(expected != 0 && owner == expected, "window owner does not match measured game");
+        assert!(foreground(), "foreground changed before normal close request");
+        // SAFETY: requests the application's ordinary close handler; no pointer arguments.
+        assert_ne!(unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) }, 0);
+        println!("POSTED: normal WM_CLOSE to verified game owner {owner}.");
+        return;
+    }
     let send = |events: &[INPUT]| {
         assert!(foreground(), "foreground changed; cancelling remaining fixture input");
         // SAFETY: initialized INPUT array and native element size.
