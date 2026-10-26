@@ -22,7 +22,8 @@ UW_SPIKE_CAPTURE=win32 UW_INPUT_PID=12345 npm start -- \
   --capture routing --input-command /absolute/checkout/scripts/input-3b-launch.sh
 ```
 
-`UW_INPUT_PROTON` optionally selects the existing Proton installation;
+`UW_INPUT_PROTON` optionally selects the existing Wine distribution directory
+containing `bin/wine`, for example `/path/to/Proton 11.0/files`;
 `UW_INPUT_EXE` defaults to `deadlock.exe`. The PID restricts discovery to the
 intended process. This mode starts the production helper/bootstrap/overlay only.
 

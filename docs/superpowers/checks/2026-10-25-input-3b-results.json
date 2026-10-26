@@ -2,9 +2,9 @@
   "schema_version": 1,
   "phase": "input 3b",
   "status": "open",
-  "recorded_utc": "2026-10-25T23:57:01.812527+00:00",
+  "recorded_utc": "2026-10-26T02:40:37.111448+00:00",
   "implementation_base": "468d024",
-  "verification_head_before_evidence_commit": "f2f34fb947ea07b3d446c966b69870f72dcff126",
+  "verification_head_before_evidence_commit": "3836fe378f4932052bb9618a4fdab00e44589f7a",
   "environment": {
     "kernel": "Linux 7.2.11-1-cachyos",
     "wine": "11.20",
@@ -32,7 +32,7 @@
     },
     {
       "path": "target/x86_64-pc-windows-gnu/release/uw_overlay.dll",
-      "sha256": "56b608e4ce4b7e842b890100ab288c354653cf9ff36ed104ad740affa159f859"
+      "sha256": "db770bcd36b13b89ba98207c875bca607c75ceccb173b91f354e7cc9110d75c6"
     },
     {
       "path": "target/x86_64-pc-windows-gnu/release/uw-test-game.exe",
@@ -40,11 +40,11 @@
     },
     {
       "path": "target/x86_64-pc-windows-gnu/release/examples/input_probe.exe",
-      "sha256": "822379f1aeaac381a5e249598d0fa207bc5c12658be1dbb86f9826d6204930d3"
+      "sha256": "ea5fdd89ee4c461ee49975a19be4dda0aa1ee1e917ccdeb735776f1821b7cff2"
     },
     {
       "path": "target/x86_64-pc-windows-gnu/release/examples/native_input_probe.exe",
-      "sha256": "e3a7eb7ea00093209d027c21a9d3f9b4186b3bfd23d110acd7533867d47beafa"
+      "sha256": "95d4bb83e02b1a1de0beb68da6056d3d73ea1f0b4e0e3aea00f18eae22529028"
     },
     {
       "path": "target/release/libuw_spike_osr_bridge.so",
@@ -52,10 +52,10 @@
     }
   ],
   "portable_workspace": {
-    "passed": 709,
+    "passed": 711,
     "failed": 0,
-    "ignored": 89,
-    "log": ".superpowers/sdd/2026-10-25-input-3b/final-fix2-workspace.log"
+    "ignored": 90,
+    "log": ".superpowers/sdd/2026-10-25-input-3b/live-focus-workspace.log"
   },
   "static_gates": {
     "portable_clippy": "passed",
@@ -66,7 +66,7 @@
     "repository_default_rustfmt": "pre-existing unrelated differences; preserved"
   },
   "native_wine": {
-    "routing_v2": 18,
+    "routing_v2": 19,
     "directinput": 2,
     "legacy_input": 23,
     "production_helper_chain_v2": 5,
@@ -75,12 +75,11 @@
     "legacy_injector_state_data": 4,
     "failed": 0,
     "main_logs": [
-      "final-fix2-routing-native.log",
-      "final-fix2-chain-native.log",
-      "final-fix2-legacy-native.log",
+      "live-focus-chain-native.log",
+      "live-focus-input-native.log",
       "task-9-legacy-chain.log"
     ],
-    "final_rebuild_smoke": "passed: all 53 Wine cases against final rebuilt production artifacts"
+    "final_rebuild_smoke": "passed: all 54 unique Wine cases against the focus-fix artifacts; earlier unchanged legacy state/data gates retained"
   },
   "receiver": {
     "routing_ts_passed": 10,
@@ -93,75 +92,97 @@
   "runtime_evidence": [
     {
       "runtime": "proton",
-      "case": "directinput",
+      "case": "focus-return",
       "exit": 0,
-      "sha256": "822379f1aeaac381a5e249598d0fa207bc5c12658be1dbb86f9826d6204930d3",
+      "sha256": "ea5fdd89ee4c461ee49975a19be4dda0aa1ee1e917ccdeb735776f1821b7cff2",
       "scope": "isolated native routing fixture",
       "owner_acceptance": "open",
       "gameinput_acceptance": "open",
       "passed": true,
-      "path": "target/input-3b-native/final-review2-proton-directinput/result.json"
+      "path": "target/input-3b-native/live-focus-proton-focus-return/result.json"
+    },
+    {
+      "runtime": "proton",
+      "case": "directinput",
+      "exit": 0,
+      "sha256": "ea5fdd89ee4c461ee49975a19be4dda0aa1ee1e917ccdeb735776f1821b7cff2",
+      "scope": "isolated native routing fixture",
+      "owner_acceptance": "open",
+      "gameinput_acceptance": "open",
+      "passed": true,
+      "path": "target/input-3b-native/live-focus-proton-directinput/result.json"
     },
     {
       "runtime": "proton",
       "case": "directinput-exclusive",
       "exit": 0,
-      "sha256": "822379f1aeaac381a5e249598d0fa207bc5c12658be1dbb86f9826d6204930d3",
+      "sha256": "ea5fdd89ee4c461ee49975a19be4dda0aa1ee1e917ccdeb735776f1821b7cff2",
       "scope": "isolated native routing fixture",
       "owner_acceptance": "open",
       "gameinput_acceptance": "open",
       "passed": true,
-      "path": "target/input-3b-native/final-review2-proton-directinput-exclusive/result.json"
+      "path": "target/input-3b-native/live-focus-proton-directinput-exclusive/result.json"
     },
     {
       "runtime": "proton",
       "case": "raw-block",
       "exit": 0,
-      "sha256": "822379f1aeaac381a5e249598d0fa207bc5c12658be1dbb86f9826d6204930d3",
+      "sha256": "ea5fdd89ee4c461ee49975a19be4dda0aa1ee1e917ccdeb735776f1821b7cff2",
       "scope": "isolated native routing fixture",
       "owner_acceptance": "open",
       "gameinput_acceptance": "open",
       "passed": true,
-      "path": "target/input-3b-native/final-review2-proton-raw-block/result.json"
+      "path": "target/input-3b-native/live-focus-proton-raw-block/result.json"
     },
     {
       "runtime": "proton",
       "case": "raw-thread",
       "exit": 0,
-      "sha256": "822379f1aeaac381a5e249598d0fa207bc5c12658be1dbb86f9826d6204930d3",
+      "sha256": "ea5fdd89ee4c461ee49975a19be4dda0aa1ee1e917ccdeb735776f1821b7cff2",
       "scope": "isolated native routing fixture",
       "owner_acceptance": "open",
       "gameinput_acceptance": "open",
       "passed": true,
-      "path": "target/input-3b-native/final-review2-proton-raw-thread/result.json"
+      "path": "target/input-3b-native/live-focus-proton-raw-thread/result.json"
     },
     {
       "runtime": "proton",
       "case": "raw-thread-notify",
       "exit": 0,
-      "sha256": "822379f1aeaac381a5e249598d0fa207bc5c12658be1dbb86f9826d6204930d3",
+      "sha256": "ea5fdd89ee4c461ee49975a19be4dda0aa1ee1e917ccdeb735776f1821b7cff2",
       "scope": "isolated native routing fixture",
       "owner_acceptance": "open",
       "gameinput_acceptance": "open",
       "passed": true,
-      "path": "target/input-3b-native/final-review2-proton-raw-thread-notify/result.json"
+      "path": "target/input-3b-native/live-focus-proton-raw-thread-notify-retry/result.json"
     },
     {
       "runtime": "proton",
       "case": "resize",
       "exit": 0,
-      "sha256": "822379f1aeaac381a5e249598d0fa207bc5c12658be1dbb86f9826d6204930d3",
+      "sha256": "ea5fdd89ee4c461ee49975a19be4dda0aa1ee1e917ccdeb735776f1821b7cff2",
       "scope": "isolated native routing fixture",
       "owner_acceptance": "open",
       "gameinput_acceptance": "open",
       "passed": true,
-      "path": "target/input-3b-native/final-review2-proton-resize/result.json"
+      "path": "target/input-3b-native/live-focus-proton-resize/result.json"
+    },
+    {
+      "runtime": "wine",
+      "case": "focus-return",
+      "exit": 0,
+      "sha256": "ea5fdd89ee4c461ee49975a19be4dda0aa1ee1e917ccdeb735776f1821b7cff2",
+      "scope": "isolated native routing fixture",
+      "owner_acceptance": "open",
+      "gameinput_acceptance": "open",
+      "passed": true,
+      "path": "target/input-3b-native/live-focus-wine-final/result.json"
     },
     {
       "runtime": "wine",
       "case": "discovery",
       "exit": 0,
-      "sha256": "e3a7eb7ea00093209d027c21a9d3f9b4186b3bfd23d110acd7533867d47beafa",
+      "sha256": "95d4bb83e02b1a1de0beb68da6056d3d73ea1f0b4e0e3aea00f18eae22529028",
       "scope": "isolated ABI discovery",
       "owner_acceptance": "open",
       "gameinput_acceptance": "open",
@@ -175,13 +196,13 @@
         "targets": 52
       },
       "passed": true,
-      "path": "target/input-3b-native/final-review2-wine-discovery/result.json"
+      "path": "target/input-3b-native/live-focus-wine-discovery/result.json"
     },
     {
       "runtime": "proton",
       "case": "discovery",
       "exit": 0,
-      "sha256": "e3a7eb7ea00093209d027c21a9d3f9b4186b3bfd23d110acd7533867d47beafa",
+      "sha256": "95d4bb83e02b1a1de0beb68da6056d3d73ea1f0b4e0e3aea00f18eae22529028",
       "scope": "isolated ABI discovery",
       "owner_acceptance": "open",
       "gameinput_acceptance": "open",
@@ -195,7 +216,7 @@
         "targets": 52
       },
       "passed": true,
-      "path": "target/input-3b-native/final-review2-proton-discovery/result.json"
+      "path": "target/input-3b-native/live-focus-proton-discovery/result.json"
     }
   ],
   "gameinput": {
@@ -210,12 +231,57 @@
     "isolation_passed": false
   },
   "owner_acceptance": {
-    "status": "open",
-    "availability": "awaiting response",
-    "game_client_version": null,
-    "resolution": null,
+    "status": "partial; fixed-build live retest open",
+    "availability": "owner ended this session and will reopen a fresh Hideout later",
+    "game_client_version": 6819,
+    "resolution": [
+      2560,
+      1440
+    ],
     "dpi": null,
-    "observations": []
+    "observations": [
+      {
+        "check": "exclusive toggle, dimming, native pointer, game isolation and normal recovery",
+        "result": "owner accepted initial test",
+        "reply": "all ok; then all is ok"
+      },
+      {
+        "check": "outside-widget exit",
+        "result": "owner observed expected exit; consumption of the initiating click not separately confirmed"
+      },
+      {
+        "check": "separate widget text and wheel counters",
+        "result": "owner accepted",
+        "reply": "text and wheel counters are working"
+      },
+      {
+        "check": "focus-return hotkey",
+        "result": "failed live on initial build; tapping Alt restored it; native correction awaits fixed-build owner retest",
+        "reply": "yes after tapping Alt once, it works now."
+      }
+    ],
+    "tested_head": "fbac75b13d4ee20cbf6ef09a6127d0c8e53f8d94",
+    "live_game_pid": 3709627,
+    "live_artifacts": {
+      "target/release/uw-inject": "11286ab2df03ae4d9c424eac75a7fbd09de7313c78a65cf9858090089f2f945c",
+      "target/x86_64-pc-windows-gnu/release/uw-helper64.exe": "a295f2dc5b13b87c50358dba3b8f8fb4f69f2d5289f63e562be0026a3f863b50",
+      "target/x86_64-pc-windows-gnu/release/uw_bootstrap64.dll": "46dcc770fba394f3451328eb039d2686d01ef6d213582c4a31f656181a448987",
+      "target/x86_64-pc-windows-gnu/release/uw_overlay.dll": "56b608e4ce4b7e842b890100ab288c354653cf9ff36ed104ad740affa159f859"
+    },
+    "raw_evidence": "target/input-3b-live-20261026/manual-02",
+    "cleanup": {
+      "requested_utc": "2026-10-26T02:06:18.168842+00:00",
+      "authorization": "Owner explicitly requested normal game exit after testing; further manual tests deferred until owner reopens Hideout.",
+      "window_query": "WINDOW_OWNER 308 65710\nFOREGROUND 0\n",
+      "windows_owner": 308,
+      "receiver_stopped": 3711377,
+      "close_returncode": 0,
+      "close_output": "POSTED: normal WM_CLOSE to verified game owner 308.\n",
+      "game_exited": true,
+      "receiver_exited": true,
+      "drawing_control_restored": "passthrough",
+      "receiver_stop_escalation": "SIGTERM closed owned helper stdin but Electron stayed alive; SIGKILL sent only to its verified process group after normal game exit."
+    }
   },
   "performance": {
     "status": "open",
@@ -306,11 +372,61 @@
         "status": "fixed",
         "evidence": "final-fixture-bounds-red.log -> final-fixture-bounds-green.log"
       }
-    ]
+    ],
+    "post_review_live_fix": {
+      "commit": "3836fe378f4932052bb9618a4fdab00e44589f7a",
+      "reason": "new owner-demonstrated Alt focus-return failure",
+      "verification": "real native RED-to-GREEN, 711 portable tests, 54 Wine scenarios, Wine/Proton focus tests; separate Proton notification repeatability acceptance open",
+      "fresh_review_repeated": false
+    }
   },
   "integration": {
     "main_untouched": true,
     "pushed": false,
     "merged": false
+  },
+  "static_gate_logs": {
+    "portable_clippy": ".superpowers/sdd/2026-10-25-input-3b/live-focus-clippy.log",
+    "windows_all_targets_check": ".superpowers/sdd/2026-10-25-input-3b/live-focus-windows-check.log",
+    "windows_clippy_with_unsafe_comments": ".superpowers/sdd/2026-10-25-input-3b/live-focus-windows-clippy.log"
+  },
+  "focus_return_fix": {
+    "commit": "3836fe378f4932052bb9618a4fdab00e44589f7a",
+    "status": "native verified; owner retest open",
+    "cause": "focus-return seeding OR-ed old tracked keys into current physical state, retaining Alt whose release went to another foreground window",
+    "correction": "resample core physical keys and released-key quarantine, retain actually held keys, reseed trigger latches without synthesizing edges",
+    "red": "target/input-3b-native/live-focus-red2/result.json",
+    "wine_green": "target/input-3b-native/live-focus-wine-final/result.json",
+    "proton_green": "target/input-3b-native/live-focus-proton-focus-return/result.json",
+    "portable_regressions": 2,
+    "native_guards": [
+      "Alt released outside game permits fresh Ctrl+Tab",
+      "held chord cannot activate on focus return",
+      "fresh Tab press recognizes Ctrl held before focus return"
+    ],
+    "invalid_fixture_attempt": "target/input-3b-native/live-focus-red: default scratch system menu blocked the fixture; not RED evidence"
+  },
+  "proton_repeatability": {
+    "status": "open; successful retry does not explain the initial missed notification",
+    "failed_run": {
+      "runtime": "proton",
+      "case": "raw-thread-notify",
+      "exit": 101,
+      "sha256": "ea5fdd89ee4c461ee49975a19be4dda0aa1ee1e917ccdeb735776f1821b7cff2",
+      "scope": "isolated native routing fixture",
+      "owner_acceptance": "open",
+      "gameinput_acceptance": "open",
+      "passed": false,
+      "path": "target/input-3b-native/live-focus-proton-raw-thread-notify/result.json"
+    },
+    "successful_retry": "target/input-3b-native/live-focus-proton-raw-thread-notify-retry/result.json",
+    "audit_root": "target/input-3b-native/notify-audit",
+    "baseline_successes": 4,
+    "fixed_diagnostic_successes": 7,
+    "fixed_diagnostic_failures": 1,
+    "diagnostic_failure": "cancellation reason LeaseExpired during keyboard-layout translation; consistent with interrupted same-thread fixture consumption",
+    "timed_fixed_successes": 5,
+    "initial_f3_miss_explained": false,
+    "production_changes_from_audit": false
   }
 }
