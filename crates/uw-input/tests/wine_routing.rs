@@ -4,6 +4,11 @@ mod fixture;
 use fixture::probe;
 #[test]
 #[ignore = "Windows input_probe under xvfb-run"]
+fn focus_return_reconciles_released_and_still_held_modifiers() {
+    probe("focus-return");
+}
+#[test]
+#[ignore = "Windows input_probe under xvfb-run"]
 fn mouse_only_keeps_keyboard_original() {
     probe("mouse-only");
 }

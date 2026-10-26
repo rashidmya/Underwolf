@@ -29,6 +29,7 @@ static RAW_KEYS: AtomicUsize = AtomicUsize::new(0);
 static RAW_MOUSE: AtomicUsize = AtomicUsize::new(0);
 static ROLLBACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static PACKET_COUNT: AtomicUsize = AtomicUsize::new(0);
+static FOCUS_RETURN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static PACKET_EDGES: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
 unsafe extern "system" fn packet_observer(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
@@ -45,6 +46,9 @@ unsafe extern "system" fn packet_observer(code: i32, w: WPARAM, l: LPARAM) -> LR
     unsafe { CallNextHookEx(std::ptr::null_mut(), code, w, l) }
 }
 unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    if FOCUS_RETURN.load(Ordering::Acquire) && msg == WM_SYSCOMMAND && w & 0xfff0 == SC_KEYMENU as usize {
+        return 0;
+    }
     if msg == WM_LBUTTONDOWN {
         CLICK_TARGET.store(h as usize, Ordering::Release);
     }
@@ -243,6 +247,7 @@ impl Drop for RawWorker {
 }
 pub fn run() {
     let case = std::env::args().skip_while(|a| a != "--routing").nth(1).expect("routing case");
+    FOCUS_RETURN.store(case == "focus-return", Ordering::Release);
     let raw_mode = case.starts_with("raw-");
     // SAFETY: process-owned class and window; callback remains resident.
     let hwnd = unsafe {
@@ -361,13 +366,111 @@ pub fn run() {
         ],
     })
     .unwrap();
-    h.configure(config).unwrap();
+    h.configure(config.clone()).unwrap();
     let configured = drive(&h, 80);
     assert!(
         configured
             .iter()
             .any(|e| matches!(e, RuntimeEvent::Configured(r) if r.code == RoutingCode::Applied && r.request_id == 1))
     );
+    if case == "focus-return" {
+        println!("focus-return: configured");
+        // SAFETY: this scratch background window belongs to the fixture's UI thread.
+        let background = unsafe {
+            CreateWindowExW(
+                0,
+                w!("UnderwolfRoutingProbe"),
+                w!("Routing background"),
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                260,
+                160,
+                320,
+                240,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                GetModuleHandleW(std::ptr::null()),
+                std::ptr::null(),
+            )
+        };
+        assert!(!background.is_null());
+        let focus = |target| {
+            // SAFETY: both windows are owned by this fixture and remain live.
+            unsafe {
+                SetForegroundWindow(target);
+                SetFocus(target);
+                assert_eq!(GetForegroundWindow(), target);
+                assert_eq!(GetFocus(), target);
+            }
+        };
+        let configure_current =
+            |events: &[RuntimeEvent], revision| {
+                let epoch = events
+                    .iter()
+                    .filter_map(
+                        |event| if let RuntimeEvent::RoutingState(state) = event { Some(state.epoch) } else { None },
+                    )
+                    .next_back()
+                    .expect("focus return state");
+                let mut next = config.config().clone();
+                next.epoch = epoch;
+                next.revision = revision;
+                next.request_id = revision as u32;
+                h.configure(PreparedConfig::compile(next).unwrap()).unwrap();
+                assert!(drive(&h, 80).iter().any(
+                    |event| matches!(event, RuntimeEvent::Configured(result) if result.code == RoutingCode::Applied)
+                ));
+            };
+        focus(hwnd);
+        drive(&h, 40);
+        println!("focus-return: pressing Alt in game");
+        key_vk(VK_LMENU, true);
+        drive(&h, 40);
+        focus(background);
+        drive(&h, 40);
+        println!("focus-return: releasing Alt outside game");
+        key_vk(VK_LMENU, false);
+        drive(&h, 40);
+        focus(hwnd);
+        let returned = drive(&h, 100);
+        configure_current(&returned, 2);
+        println!("focus-return: returned, pressing Ctrl+Tab");
+        assert!(!h.capture_permitted(), "focus return automatically recaptured");
+        key_vk(VK_LCONTROL, true);
+        drive(&h, 20);
+        key_vk(VK_TAB, true);
+        let mut pressed = drive(&h, 80);
+        key_vk(VK_TAB, false);
+        key_vk(VK_LCONTROL, false);
+        pressed.extend(drive(&h, 40));
+        assert!(h.capture_permitted(), "Alt released outside the game still prevented Ctrl+Tab: {pressed:?}");
+
+        focus(background);
+        drive(&h, 40);
+        key_vk(VK_LCONTROL, true);
+        key_vk(VK_TAB, true);
+        drive(&h, 40);
+        focus(hwnd);
+        let returned = drive(&h, 100);
+        configure_current(&returned, 3);
+        assert!(!h.capture_permitted(), "returning with the chord held activated capture");
+        key_vk(VK_TAB, false);
+        drive(&h, 20);
+        key_vk(VK_TAB, true);
+        let mut pressed = drive(&h, 80);
+        key_vk(VK_TAB, false);
+        key_vk(VK_LCONTROL, false);
+        pressed.extend(drive(&h, 40));
+        assert!(h.capture_permitted(), "a fresh Tab press lost Ctrl held before focus return: {pressed:?}");
+        h.disconnect();
+        drive(&h, 30);
+        // SAFETY: destroy only this fixture's two live windows.
+        unsafe {
+            DestroyWindow(background);
+            DestroyWindow(hwnd);
+        }
+        println!("PASS routing probe focus-return");
+        return;
+    }
     if case == "resize" {
         let request = |id| RoutingRequest {
             epoch,

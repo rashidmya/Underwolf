@@ -23,6 +23,44 @@ fn enter(p: &mut Policy) {
 }
 
 #[test]
+fn focus_snapshot_releases_stale_keys_and_preserves_actual_held_quarantine() {
+    let mut p = ready();
+    p.event(PolicyEvent::Input(key(164, true)));
+    p.event(PolicyEvent::Input(key(87, true)));
+    enter(&mut p);
+    p.event(PolicyEvent::Foreground(false));
+    p.event(PolicyEvent::Restored { epoch: p.epoch() });
+    let mut physical = [false; 256];
+    physical[87] = true;
+    physical[162] = true;
+    p.resample_keyboard(physical);
+    assert_eq!(p.modifiers(), 2, "released Alt survived or newly held Ctrl was lost");
+    assert!(!p.key_suppressed(164));
+    assert!(p.key_suppressed(87), "a still-held captured key escaped quarantine");
+    assert!(!p.active(), "a physical snapshot recaptured");
+    p.event(PolicyEvent::Foreground(true));
+    assert!(!p.event(PolicyEvent::Input(key(87, true))).pass);
+    assert!(!p.event(PolicyEvent::Input(key(87, false))).pass);
+    assert!(p.event(PolicyEvent::Input(key(87, true))).pass);
+}
+
+#[test]
+fn keyboard_snapshot_keeps_modifier_aliases_and_mouse_buttons_out_of_key_history() {
+    let mut p = ready();
+    p.event(PolicyEvent::Input(InputRecord::button(0, true, 10, 10, 0)));
+    let mut physical = [false; 256];
+    for vk in [1, 2, 4, 5, 6, 16, 17, 18, 162] {
+        physical[vk] = true;
+    }
+    p.resample_keyboard(physical);
+    assert_eq!(p.modifiers(), 2);
+    assert!(p.physical_buttons()[0]);
+    assert_eq!(p.physical_keys().iter().filter(|held| **held).count(), 1);
+    enter(&mut p);
+    assert!(p.key_suppressed(17));
+}
+
+#[test]
 fn configured_local_ownership_changes_keep_the_delivery_session_healthy() {
     let mut p = ready();
     p.use_configured_hotkeys();

@@ -108,6 +108,17 @@ impl Policy {
     pub fn physical_buttons(&self) -> [bool; 5] {
         self.buttons
     }
+    /// Reconcile a native focus-return snapshot without inventing game or host edges.
+    /// Mouse buttons are tracked separately and modifier events use left/right VKs.
+    pub fn resample_keyboard(&mut self, mut physical: [bool; 256]) {
+        for vk in [0, 1, 2, 4, 5, 6, 16, 17, 18] {
+            physical[vk] = false;
+        }
+        self.keys = physical;
+        for (suppressed, held) in self.suppressed_keys.iter_mut().zip(physical) {
+            *suppressed &= held;
+        }
+    }
     /// A previously tracked physical release outside the game changes no game-delivery history.
     pub fn physical_release(&mut self, record: InputRecord) {
         if record.validate().is_err() || record.flags & 1 != 0 {

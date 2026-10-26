@@ -107,15 +107,16 @@ pub(super) fn seed(s: &Shared) {
     }
     TEXT_KEYS.with(|keys| keys.set(state));
     if let Ok(mut p) = s.policy.try_lock() {
-        let held = p.physical_keys();
-        let physical = std::array::from_fn(|vk| state[vk] & 0x80 != 0 || held[vk]);
-        p.hotkeys.reseed(&physical);
-        for (byte, held) in state.iter_mut().zip(physical) {
-            if held {
-                *byte |= 0x80;
+        // Queue-local key-up messages can be delivered to another foreground
+        // window. The current native snapshot replaces those stale held bits.
+        p.resample_keyboard(std::array::from_fn(|vk| state[vk] & 0x80 != 0));
+        let physical = p.physical_keys();
+        for (vk, held) in physical.iter().enumerate().skip(1) {
+            if !held {
+                p.router.physical_release(InputRecord::key(vk as i32, 0, false, false, false, 0));
             }
         }
-        TEXT_KEYS.with(|keys| keys.set(state));
+        p.hotkeys.reseed(&physical);
     } else {
         s.revoke(InputReason::Unavailable);
     }
