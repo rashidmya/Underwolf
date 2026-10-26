@@ -5,10 +5,11 @@
 behavior and limits below originated as the author's proposals. Implementation
 and automated gates for Tasks 1–7 and 9–11 are recorded in the
 [3b check](../checks/2026-10-25-input-3b.md). GameInput implementation/native
-acceptance and remaining owner/performance gates remain open; this phase is
-incomplete. Initial owner observations are recorded, and the demonstrated
-focus-return hotkey fix awaits a fresh live retest. A Proton notification
-repeatability limitation also remains open in the check record.
+acceptance remain open; this phase is incomplete. Owner observations, the passed
+fixed-build focus-return retest, delegated live recovery checks, three matched
+idle-performance pairs and separate release/restoration upper bounds are
+recorded. Proton notification repeatability and an explicit owner-perceived
+hitch assessment remain open in the check record.
 **Starting point:** `main` at `28996ad`, following the integration of input 3a.
 
 ## Intent

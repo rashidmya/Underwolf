@@ -2,7 +2,7 @@
   "schema_version": 1,
   "phase": "input 3b",
   "status": "open",
-  "recorded_utc": "2026-10-26T02:40:37.111448+00:00",
+  "recorded_utc": "2026-10-26T18:36:40.636390+00:00",
   "implementation_base": "468d024",
   "verification_head_before_evidence_commit": "3836fe378f4932052bb9618a4fdab00e44589f7a",
   "environment": {
@@ -231,14 +231,14 @@
     "isolation_passed": false
   },
   "owner_acceptance": {
-    "status": "partial; fixed-build live retest open",
-    "availability": "owner ended this session and will reopen a fresh Hideout later",
+    "status": "manual checks recorded; automated live recovery accepted separately; timing and hitch assessment remain open",
+    "availability": "Owner delegated remaining E2E automation and explicitly resumed; no further manual testing required for automated cases",
     "game_client_version": 6819,
     "resolution": [
       2560,
       1440
     ],
-    "dpi": null,
+    "dpi": 96,
     "observations": [
       {
         "check": "exclusive toggle, dimming, native pointer, game isolation and normal recovery",
@@ -256,8 +256,98 @@
       },
       {
         "check": "focus-return hotkey",
-        "result": "failed live on initial build; tapping Alt restored it; native correction awaits fixed-build owner retest",
+        "result": "Failed on initial build; tapping Alt restored it. Fixed-build acceptance is recorded in the following observation.",
         "reply": "yes after tapping Alt once, it works now."
+      },
+      {
+        "check": "fixed-build focus-return hotkey",
+        "result": "passed owner check; 10+ cycles, apparent misses confirmed inactive-window attempts",
+        "tested_head": "dc321b45a5f7fb9f1c6b44809179ee153b105506",
+        "source_fix_commit": "3836fe378f4932052bb9618a4fdab00e44589f7a",
+        "session": "target/input-3b-live-20261026/manual-03"
+      },
+      {
+        "check": "rebound-toggle-and-old-binding-inert",
+        "result": "passed owner check: Ctrl+F8 enters/exits, old Ctrl+Tab inactive",
+        "tested_head": "dc321b4",
+        "session": "target/input-3b-live-20261026/manual-03",
+        "binding": {
+          "vk": 119,
+          "modifiers": 8
+        }
+      },
+      {
+        "check": "fixed-build targeted text, buttons and wheel",
+        "result": "passed owner check for targeted text, all five buttons and vertical wheel; physical horizontal scroll unavailable",
+        "tested_head": "dc321b4",
+        "session": "target/input-3b-live-20261026/manual-03",
+        "targeted_text": {
+          "2:1": {
+            "abc_present": false,
+            "xyz_present": true
+          },
+          "1:1": {
+            "abc_present": true,
+            "xyz_present": true
+          }
+        },
+        "button_ids_observed": [
+          0,
+          1,
+          2,
+          3,
+          4
+        ],
+        "vertical_observed": true,
+        "horizontal_observed": false,
+        "middle_click_owner": "label appears",
+        "middle_native_edges": {
+          "down": 3,
+          "up": 3
+        },
+        "physical_horizontal_scroll": "unavailable",
+        "horizontal_live_software_test": "passed separately by agent in auto-05 for both widgets; physical horizontal hardware remains unavailable"
+      },
+      {
+        "check": "held-game-key capture/release quarantine",
+        "result": "PASSED owner check: capture stops held-W movement, exit while held stays stopped, release and fresh press resumes movement",
+        "tested_head": "dc321b4",
+        "session": "target/input-3b-live-20261026/manual-03"
+      },
+      {
+        "check": "consumed outside-click exit",
+        "result": "PASSED owner check: outside click exits exclusive without a shot or ammo use; a second fresh click fires normally",
+        "tested_head": "dc321b4",
+        "session": "target/input-3b-live-20261026/manual-03"
+      },
+      {
+        "check": "standard block with visible game pointer",
+        "result": "PASSED owner check: widget text and Escape consumed in standard mode, game menu remains open, no dimming",
+        "tested_head": "dc321b4",
+        "session": "target/input-3b-live-20261026/manual-03",
+        "native_text_contains_block": false,
+        "escape_edges_observed": true,
+        "standard_ownership_observed": true,
+        "native_text_received": true,
+        "game_ui": "cursor-visible hero-selection/back screen observed after owner reply"
+      },
+      {
+        "check": "standard pass-through with visible game pointer",
+        "result": "Game menu reacts immediately to click through Widget1; zero Widget1 input records observed. Escape step became unnecessary for observing mouse passthrough and was not performed.",
+        "tested_head": "dc321b4",
+        "session": "target/input-3b-live-20261026/manual-03",
+        "widget1_input_count": 0,
+        "keyboard_escape_step": "not performed"
+      },
+      {
+        "check": "standard notify with game delivery",
+        "result": "PASSED owner check of requested simultaneous widget/game input without dimming; native record qualification below",
+        "tested_head": "dc321b4",
+        "session": "target/input-3b-live-20261026/manual-03",
+        "standard_unowned_records": 717,
+        "exclusive_records": 0,
+        "text_observed": true,
+        "w_observed": true
       }
     ],
     "tested_head": "fbac75b13d4ee20cbf6ef09a6127d0c8e53f8d94",
@@ -281,22 +371,62 @@
       "receiver_exited": true,
       "drawing_control_restored": "passthrough",
       "receiver_stop_escalation": "SIGTERM closed owned helper stdin but Electron stayed alive; SIGKILL sent only to its verified process group after normal game exit."
-    }
+    },
+    "current_session": "target/input-3b-live-20261026/manual-03",
+    "dpi_source": "Agent GetDpiForWindow in auto-05; owner observation not substituted"
   },
   "performance": {
-    "status": "open",
+    "status": "idle comparison passed; owner-perceived hitch assessment open",
     "baseline_commit": "468d024",
     "baseline_condition": "3a enabled but idle",
     "candidate_condition": "3b enabled but idle",
     "required_pairs": 3,
-    "pairs": [],
-    "fps": null,
-    "p99": null,
-    "permission_release_ms": null,
-    "ui_restoration_ms": null,
-    "hitches": null,
+    "pairs": [
+      {
+        "pair": 1,
+        "baseline_fps": 448.8002616632221,
+        "candidate_fps": 445.5068760590561,
+        "baseline_mean_p99_ms": 3.363101,
+        "candidate_mean_p99_ms": 3.368525,
+        "fps_loss_pct": 0.7338198939459092,
+        "p99_increase_pct": 0.16127972368359128
+      },
+      {
+        "pair": 2,
+        "baseline_fps": 444.00386528519863,
+        "candidate_fps": 444.0872197538251,
+        "baseline_mean_p99_ms": 3.379684,
+        "candidate_mean_p99_ms": 3.403345,
+        "fps_loss_pct": -0.018773365536561656,
+        "p99_increase_pct": 0.7000950384710437
+      },
+      {
+        "pair": 3,
+        "baseline_fps": 442.2049395980308,
+        "candidate_fps": 446.0575811133058,
+        "baseline_mean_p99_ms": 3.422956,
+        "candidate_mean_p99_ms": 3.38188,
+        "fps_loss_pct": -0.871234391632319,
+        "p99_increase_pct": -1.2000154252640083
+      }
+    ],
+    "fps": {
+      "baseline": 445.0030221821505,
+      "candidate": 445.2172256420623
+    },
+    "p99": {
+      "baseline_mean_per_run_ms": 3.3885803333333335,
+      "candidate_mean_per_run_ms": 3.3845833333333335
+    },
+    "permission_release_ms": 20.657535,
+    "ui_restoration_ms": 39.105111,
+    "hitches": {
+      "automated_frames_over_16_667ms": 0,
+      "scope": "Frame outlier counts are automated observations, not an owner-visible hitch assessment.",
+      "owner_perceived_assessment": "not separately obtained; remains open"
+    },
     "preserved_baseline_artifacts": {
-      "scope": "read-only verification of preserved 3a artifacts; no execution or modification",
+      "scope": "Preserved artifacts read and executed without rebuilding or modifying the baseline worktree; fresh-process measurement underway",
       "source_equivalence": "git diff 6a6bed5 468d024 -- crates spikes/osr-host/src/production-input.ts is empty",
       "accepted_overlay_matches_3a_record": true,
       "artifacts": [
@@ -317,7 +447,429 @@
           "sha256": "5c36962762efbbc4e81eb92da2f36408067181cc965300bef3dcea1b8f421ca0"
         }
       ]
-    }
+    },
+    "samples": [
+      {
+        "label": "A1",
+        "game_pid": 3783780,
+        "receiver_pid": 3784033,
+        "video_sha256": "349bebac1466aee7bff6ca2eebfbc3fd0a7c033f05034f327dcb57b7dc3c2118",
+        "duration_seconds": 65.001641781,
+        "retained_seconds": 60.002193181,
+        "frames": 26929,
+        "avg_fps": 448.8002616632221,
+        "p99_ms": 3.363101,
+        "acked_during_sample": 676,
+        "module_paths": [
+          "/home/buga/.codex/worktrees/d200/underwolf/target/x86_64-pc-windows-gnu/release/uw_overlay.dll"
+        ],
+        "foreground_losses": 0,
+        "capture_entries": 0,
+        "csv": "target/input-3b-performance/A1/frames.csv",
+        "csv_sha256": "2983cb32d0ea8a4611d7a426167025f33dc54813e28ed2088999e0c2c73dd991",
+        "raw_sha256": "c281d6935408d87560de6f4851fc06e1fd03f3cebc7502e268118a93f9947a07",
+        "max_ms": 9.637667,
+        "p999_ms": 4.018427,
+        "frames_over_8_333ms": 1,
+        "frames_over_16_667ms": 0
+      },
+      {
+        "label": "B1",
+        "game_pid": 3784688,
+        "receiver_pid": 3784920,
+        "video_sha256": "349bebac1466aee7bff6ca2eebfbc3fd0a7c033f05034f327dcb57b7dc3c2118",
+        "duration_seconds": 65.000110378,
+        "retained_seconds": 60.00131858,
+        "frames": 26731,
+        "avg_fps": 445.5068760590561,
+        "p99_ms": 3.368525,
+        "acked_during_sample": 677,
+        "module_paths": [
+          "/home/buga/.codex/worktrees/102d/underwolf/target/x86_64-pc-windows-gnu/release/uw_overlay.dll"
+        ],
+        "foreground_losses": 0,
+        "capture_entries": 0,
+        "csv": "target/input-3b-performance/B1/frames.csv",
+        "csv_sha256": "c3e9a18d5848e0a020dee5d4a6220ed622afc2eaf27b44011823895195e783df",
+        "raw_sha256": "43df983f0c4ca47f82fa067b42c88e3e19325d18c21bd07fa5d4cef7640073ae",
+        "max_ms": 4.599621,
+        "p999_ms": 4.040349,
+        "frames_over_8_333ms": 0,
+        "frames_over_16_667ms": 0
+      },
+      {
+        "label": "A2",
+        "game_pid": 3786442,
+        "receiver_pid": 3786693,
+        "video_sha256": "349bebac1466aee7bff6ca2eebfbc3fd0a7c033f05034f327dcb57b7dc3c2118",
+        "duration_seconds": 65.001236059,
+        "retained_seconds": 60.003982134,
+        "frames": 26642,
+        "avg_fps": 444.00386528519863,
+        "p99_ms": 3.379684,
+        "acked_during_sample": 677,
+        "module_paths": [
+          "/home/buga/.codex/worktrees/d200/underwolf/target/x86_64-pc-windows-gnu/release/uw_overlay.dll"
+        ],
+        "foreground_losses": 0,
+        "capture_entries": 0,
+        "idle_state_notifications": [],
+        "csv": "target/input-3b-performance/A2/frames.csv",
+        "csv_sha256": "f229f3fbd19600d2019a14d2004dae9cbcf4b2cbb1b1f497eb7270477e0063bf",
+        "raw_sha256": "9058885439623934ba38142fb325885fa8ae64227ee2442aeef603b4003d203e",
+        "max_ms": 11.749513,
+        "p999_ms": 4.1137,
+        "frames_over_8_333ms": 2,
+        "frames_over_16_667ms": 0
+      },
+      {
+        "label": "B2",
+        "game_pid": 3787298,
+        "receiver_pid": 3787524,
+        "video_sha256": "349bebac1466aee7bff6ca2eebfbc3fd0a7c033f05034f327dcb57b7dc3c2118",
+        "duration_seconds": 65.001495016,
+        "retained_seconds": 60.003978531,
+        "frames": 26647,
+        "avg_fps": 444.0872197538251,
+        "p99_ms": 3.403345,
+        "acked_during_sample": 677,
+        "module_paths": [
+          "/home/buga/.codex/worktrees/102d/underwolf/target/x86_64-pc-windows-gnu/release/uw_overlay.dll"
+        ],
+        "foreground_losses": 0,
+        "capture_entries": 0,
+        "idle_state_notifications": [],
+        "csv": "target/input-3b-performance/B2/frames.csv",
+        "csv_sha256": "7b02945f44e4541d7b1ac2716cbacca2c804b019a2a3bbe212ae5649de261dc0",
+        "raw_sha256": "14041d4f061d8dd7338dbd1a393bde3c0c37addcaeeb58ff6d6e0634ddfe5698",
+        "max_ms": 4.655458,
+        "p999_ms": 3.997463,
+        "frames_over_8_333ms": 0,
+        "frames_over_16_667ms": 0
+      },
+      {
+        "label": "A3",
+        "game_pid": 3788147,
+        "receiver_pid": 3788384,
+        "video_sha256": "349bebac1466aee7bff6ca2eebfbc3fd0a7c033f05034f327dcb57b7dc3c2118",
+        "duration_seconds": 65.000734211,
+        "retained_seconds": 60.001591172,
+        "frames": 26533,
+        "avg_fps": 442.2049395980308,
+        "p99_ms": 3.422956,
+        "acked_during_sample": 676,
+        "module_paths": [
+          "/home/buga/.codex/worktrees/d200/underwolf/target/x86_64-pc-windows-gnu/release/uw_overlay.dll"
+        ],
+        "foreground_losses": 0,
+        "capture_entries": 0,
+        "idle_state_notifications": [],
+        "csv": "target/input-3b-performance/A3/frames.csv",
+        "csv_sha256": "47e1d3de10af03550ed916740dcfebff11206fa7b6ec53c6ac69a6670a32b315",
+        "raw_sha256": "18400133af304ae2507b695338f2f8bd068b27507bef13a502adc945484b7b89",
+        "max_ms": 4.867115,
+        "p999_ms": 4.12438,
+        "frames_over_8_333ms": 0,
+        "frames_over_16_667ms": 0
+      },
+      {
+        "label": "B3",
+        "game_pid": 3788978,
+        "receiver_pid": 3789234,
+        "video_sha256": "349bebac1466aee7bff6ca2eebfbc3fd0a7c033f05034f327dcb57b7dc3c2118",
+        "duration_seconds": 65.001571107,
+        "retained_seconds": 60.003463977,
+        "frames": 26765,
+        "avg_fps": 446.0575811133058,
+        "p99_ms": 3.38188,
+        "acked_during_sample": 676,
+        "module_paths": [
+          "/home/buga/.codex/worktrees/102d/underwolf/target/x86_64-pc-windows-gnu/release/uw_overlay.dll"
+        ],
+        "foreground_losses": 0,
+        "capture_entries": 0,
+        "idle_state_notifications": [],
+        "csv": "target/input-3b-performance/B3/frames.csv",
+        "csv_sha256": "b01cf7b55118469473e8945adee84ae2c75271a39c0a35c7fcdcd0b79937ea82",
+        "raw_sha256": "1502bca835f4fb90805adf3ea3316d3f5e4ee7c0d76b5ae70d1c91d03e6d2ec7",
+        "max_ms": 4.421591,
+        "p999_ms": 4.054905,
+        "frames_over_8_333ms": 0,
+        "frames_over_16_667ms": 0
+      }
+    ],
+    "comparison": {
+      "baseline_fps": 445.0030221821505,
+      "candidate_fps": 445.2172256420623,
+      "baseline_mean_p99_ms": 3.3885803333333335,
+      "candidate_mean_p99_ms": 3.3845833333333335,
+      "fps_loss_pct": -0.048135282061999546,
+      "p99_increase_pct": -0.11795500200133058
+    },
+    "procedure": "Six separate fresh game processes in A1 B1 A2 B2 A3 B3 order; same stationary fresh Hideout spawn, hero, camera, settings, 2560x1440/DPI96, native drawing adapter and common idle receiver. Passthrough disables composition in both. Settle15s, record67s, cropfirst65s rounded to full frame, skipfirst5s.",
+    "scope": "Input-only idle comparison; fixed A then B ordering and fresh-process variation remain. No complete overlay budget or causal FPS improvement claim.",
+    "evidence": "target/input-3b-performance/summary.json",
+    "benchmark": {
+      "command": [
+        "/home/buga/.codex/worktrees/d200/underwolf/target/release/uw-spike-bench",
+        "compare",
+        "/home/buga/.codex/worktrees/102d/underwolf/target/input-3b-performance/A1/frames.csv",
+        "/home/buga/.codex/worktrees/102d/underwolf/target/input-3b-performance/A2/frames.csv",
+        "/home/buga/.codex/worktrees/102d/underwolf/target/input-3b-performance/A3/frames.csv",
+        "--",
+        "/home/buga/.codex/worktrees/102d/underwolf/target/input-3b-performance/B1/frames.csv",
+        "/home/buga/.codex/worktrees/102d/underwolf/target/input-3b-performance/B2/frames.csv",
+        "/home/buga/.codex/worktrees/102d/underwolf/target/input-3b-performance/B3/frames.csv"
+      ],
+      "sha256": "3f76c1944cd132ee13f08a3394ab1e86580106e1662d44a83531647893057e72",
+      "exit_code": 0,
+      "output": "base:   445.00 fps  p99   3.389 ms  (80104 frames, 3 runs)\ntest:   445.22 fps  p99   3.385 ms  (80143 frames, 3 runs)\nfps loss -0.05%  p99 increase -0.12%\nPASS\n",
+      "threshold_scope": "Existing 3% tool threshold applied only to this input-idle comparison"
+    },
+    "rejected": [
+      {
+        "path": "target/input-3b-performance/rejected-A1-epoch",
+        "error": "AssertionError('idle epoch changed')",
+        "included": false
+      },
+      {
+        "path": "target/input-3b-performance/rejected-A1-foreground",
+        "error": "AssertionError('foreground observer exited or game lost foreground')",
+        "included": false
+      },
+      {
+        "path": "target/input-3b-performance/rejected-A2-epoch",
+        "error": "AssertionError('idle epoch changed')",
+        "included": false
+      }
+    ],
+    "epoch_audit": "An extra constant-epoch guard rejected two exploratory runs despite continuous observed foreground and timely ACKs. Final measurements use approved foreground/ACK/capture/disconnect checks, and retain all idle state notifications. A third exploratory run had actual observed foreground loss.",
+    "foreground_observer_ms": 10,
+    "tool_sha256": {
+      "fps-limit.py": "051036748e5ddb502449488af8c940e8c273bb26b72bb95d2f13576e11f37c3d",
+      "window_snapshot.c": "25eec17334a82538057b955910d5c3f0852192c53d1958bdf5af00ffda5c1fb0",
+      "window_snapshot.exe": "5aa750f645951934a92069e3b0bdc121bd5b965d2f3e1530e6d02babe10d434d",
+      "game_control.c": "c4e969ccc5ddb3c98b229945307241845f5ed59246e0264d2e47f3ec0e23f503",
+      "game_ops.py": "7e3861108121c9d8f44112aeca4e91429c260f730b31d319c24c36fd1d28badb",
+      "game_control.exe": "85840096ab279addb3d5bed02c5f829866bd384f6876ef5e3273bb3bd550db87",
+      "sample.py": "d3ec330cc2e16412186f3c59ba629dc2241a0e3159591e1259c97a4fb20d9496",
+      "foreground_watch.c": "e9fdb588a7f8b91309d74f1858474a1b8b1066f9ddafbdf28470e8ca8304b207",
+      "foreground_watch.exe": "a4f6c2494cc8b5a98a1b823fd3db118eeb564e7ccd6f5a88ed43be3c556a76e6",
+      "remaining.py": "60c02f2d1ab1dacc0f4c9b03898d4a99f75efe53652288864b94baef5ff53b07",
+      "timing.py": "8e02beee8396e879ae79d4c3a0545d5f59fbeb652bf144fa355dab9dabbcb79f",
+      "finalize.py": "7b13445ce6ba407d578274de8e9a0e3b27fa9c23502393fa5f29ec093cb9b3d1",
+      "update_record.py": "97ae8674341dae6caa96a6cb8619922b34fe8d394ca1b7c1a15c77f78981a60c"
+    },
+    "installed_drawing_layer_sha256": "bef3059c18e8b8124bd69d4fdf771407813af2d213f37d1042b8a891e970c7e0",
+    "latency": {
+      "status": "three separately correlated external-bound trials passed",
+      "scope": "External upper intervals from atomic helper-command write to independently observed notifications, including IPC/scheduling. No exact internal timestamps or subtraction.",
+      "permission_observation": "First Hidden RoutingState in a newer epoch after the unique hide command: exclusive false and both domains false; state_seq is optional. No competing state/focus/connection change, plus an exactly correlated StateApplied bell.",
+      "ui_observation": "StateApplied bell with exactly the fresh hide sequence; emitted only after owner-thread restoration",
+      "trials": [
+        {
+          "trial": 1,
+          "request_id": 4000001001,
+          "hide_sequence": 6,
+          "captured_epoch": "10",
+          "write_start_ns": 298581564246775,
+          "release_receipt_ns": 298581576882629,
+          "restoration_receipt_ns": 298581587129353,
+          "permission_release_upper_bound_ms": 12.635854,
+          "ui_restoration_upper_bound_ms": 22.882578,
+          "before_os": {
+            "owner": 304,
+            "foreground": true,
+            "client": [
+              2560,
+              1440
+            ],
+            "origin": [
+              0,
+              0
+            ],
+            "dpi": 96,
+            "cursor_flags": 1,
+            "cursor": [
+              1280,
+              720
+            ],
+            "clip": [
+              0,
+              -1120,
+              4000,
+              1440
+            ]
+          },
+          "after_os": {
+            "owner": 304,
+            "foreground": true,
+            "client": [
+              2560,
+              1440
+            ],
+            "origin": [
+              0,
+              0
+            ],
+            "dpi": 96,
+            "cursor_flags": 1,
+            "cursor": [
+              1280,
+              720
+            ],
+            "clip": [
+              1280,
+              720,
+              1281,
+              721
+            ]
+          }
+        },
+        {
+          "trial": 2,
+          "request_id": 4000001003,
+          "hide_sequence": 8,
+          "captured_epoch": "11",
+          "write_start_ns": 298584750106135,
+          "release_receipt_ns": 298584770763670,
+          "restoration_receipt_ns": 298584781126054,
+          "permission_release_upper_bound_ms": 20.657535,
+          "ui_restoration_upper_bound_ms": 31.019919,
+          "before_os": {
+            "owner": 304,
+            "foreground": true,
+            "client": [
+              2560,
+              1440
+            ],
+            "origin": [
+              0,
+              0
+            ],
+            "dpi": 96,
+            "cursor_flags": 1,
+            "cursor": [
+              1280,
+              720
+            ],
+            "clip": [
+              0,
+              -1120,
+              4000,
+              1440
+            ]
+          },
+          "after_os": {
+            "owner": 304,
+            "foreground": true,
+            "client": [
+              2560,
+              1440
+            ],
+            "origin": [
+              0,
+              0
+            ],
+            "dpi": 96,
+            "cursor_flags": 1,
+            "cursor": [
+              1280,
+              720
+            ],
+            "clip": [
+              1280,
+              720,
+              1281,
+              721
+            ]
+          }
+        },
+        {
+          "trial": 3,
+          "request_id": 4000001005,
+          "hide_sequence": 10,
+          "captured_epoch": "12",
+          "write_start_ns": 298587957027713,
+          "release_receipt_ns": 298587974762535,
+          "restoration_receipt_ns": 298587996132824,
+          "permission_release_upper_bound_ms": 17.734822,
+          "ui_restoration_upper_bound_ms": 39.105111,
+          "before_os": {
+            "owner": 304,
+            "foreground": true,
+            "client": [
+              2560,
+              1440
+            ],
+            "origin": [
+              0,
+              0
+            ],
+            "dpi": 96,
+            "cursor_flags": 1,
+            "cursor": [
+              1280,
+              720
+            ],
+            "clip": [
+              0,
+              -1120,
+              4000,
+              1440
+            ]
+          },
+          "after_os": {
+            "owner": 304,
+            "foreground": true,
+            "client": [
+              2560,
+              1440
+            ],
+            "origin": [
+              0,
+              0
+            ],
+            "dpi": 96,
+            "cursor_flags": 1,
+            "cursor": [
+              1280,
+              720
+            ],
+            "clip": [
+              1280,
+              720,
+              1281,
+              721
+            ]
+          }
+        }
+      ],
+      "evidence": "target/input-3b-performance/release-timing/timing.json",
+      "exact_internal_timestamps_measured": false
+    },
+    "cleanup": {
+      "game_exited": true,
+      "normal_close_from_capture": true,
+      "host_game_exited": true,
+      "fps_max_restored": 400,
+      "other_saved_config_bytes_preserved_by_restore": true,
+      "drawing_control_restored": "passthrough",
+      "test_process_absence_verified": true
+    },
+    "game_build": {
+      "client_version": 6819,
+      "steam_buildid": "26147187",
+      "exe_last_modified": "2026-10-21 01:23:40 +0400",
+      "steam_inf_source_revision": "11162696",
+      "note": "Update available UI appeared during pair3 in both conditions; installed client remained6819. No game update was requested."
+    },
+    "timing_initial_attempt": {
+      "evidence": "target/input-3b-performance/release-timing-attempt1",
+      "status": "harness predicate invalid: Hidden routing state may omit state_seq; actual release and exact restoration bell were present"
+    },
+    "final_verification": "target/input-3b-performance/final-verification.json",
+    "common_receiver_commit": "de8959e"
   },
   "whole_branch_review": {
     "status": "material findings verified fixed; phase gates remain open",
@@ -392,7 +944,7 @@
   },
   "focus_return_fix": {
     "commit": "3836fe378f4932052bb9618a4fdab00e44589f7a",
-    "status": "native verified; owner retest open",
+    "status": "native and fixed-build owner retest passed",
     "cause": "focus-return seeding OR-ed old tracked keys into current physical state, retaining Alt whose release went to another foreground window",
     "correction": "resample core physical keys and released-key quarantine, retain actually held keys, reseed trigger latches without synthesizing edges",
     "red": "target/input-3b-native/live-focus-red2/result.json",
@@ -404,7 +956,14 @@
       "held chord cannot activate on focus return",
       "fresh Tab press recognizes Ctrl held before focus return"
     ],
-    "invalid_fixture_attempt": "target/input-3b-native/live-focus-red: default scratch system menu blocked the fixture; not RED evidence"
+    "invalid_fixture_attempt": "target/input-3b-native/live-focus-red: default scratch system menu blocked the fixture; not RED evidence",
+    "live_retest": {
+      "session": "target/input-3b-live-20261026/manual-03",
+      "tested_head": "dc321b45a5f7fb9f1c6b44809179ee153b105506",
+      "game_pid": 3749816,
+      "result": "owner reports 10+ cycles; confirmed the apparent misses were inactive-window attempts",
+      "clarification": "yes it was an inactive window attempt"
+    }
   },
   "proton_repeatability": {
     "status": "open; successful retry does not explain the initial missed notification",
@@ -428,5 +987,43 @@
     "timed_fixed_successes": 5,
     "initial_f3_miss_explained": false,
     "production_changes_from_audit": false
-  }
+  },
+  "automated_live": {
+    "status": "passed",
+    "evidence": "target/input-3b-live-20261026/auto-05/functional-summary.json",
+    "source_fix_commit": "3836fe3",
+    "game_pid": 3775872,
+    "dpi": 96,
+    "checks": [
+      "widget-1-unicode-five-buttons-both-wheels",
+      "widget-2-unicode-five-buttons-both-wheels",
+      "foreign-widget-release-rejected",
+      "takeover-hide-show-without-recapture",
+      "actual-renderer-stall-resume-without-recapture",
+      "helper-restart-without-recapture",
+      "fresh-request-after-helper-restart"
+    ],
+    "native_input_hide_show": "passed",
+    "visual_drawing_hide": "passed: actual MsgLayout hide/show, screenshots inspected",
+    "owner_observations_substituted": false,
+    "renderer_stall_external_signal_to_state_ms": 589.665022,
+    "timing_scope": "Includes IPC/scheduling; not separate internal permission/UI timings",
+    "harness_sha256": {
+      "scripts/input-3b-test-receiver.cjs": "03a25f6a01d8875effc126a900802a8adb1d091353e385917af8b4eac5352c23",
+      "spikes/osr-host/widgets/input-3b-idle.html": "9465b20dc8dba5ae796d9ab0640ca9a6c15cf706c396fed2b6aee80ecc1606af",
+      "target/input-3b-live-20261026/auto-05/live_e2e.py": "fec51df490d2b80efbfd32b1aef4b2313307731e2048188d0dd3d06a3f9f2279",
+      "target/input-3b-live-20261026/auto-05/window_snapshot.c": "25eec17334a82538057b955910d5c3f0852192c53d1958bdf5af00ffda5c1fb0",
+      "target/input-3b-live-20261026/auto-05/window_snapshot.exe": "5aa750f645951934a92069e3b0bdc121bd5b965d2f3e1530e6d02babe10d434d"
+    },
+    "final_exit": {
+      "status": "passed",
+      "game_pid": 3788978,
+      "normal_close_from_capture": true,
+      "actual_process_exit": true,
+      "host_game_exited": true,
+      "evidence": "target/input-3b-performance/release-timing/timing.json"
+    },
+    "test_receiver_commit": "de8959e"
+  },
+  "live_verification_head_before_evidence_commit": "dc321b45a5f7fb9f1c6b44809179ee153b105506"
 }
