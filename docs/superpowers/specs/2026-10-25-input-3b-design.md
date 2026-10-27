@@ -8,8 +8,11 @@ and automated gates for Tasks 1–7 and 9–11 are recorded in the
 acceptance remain open; this phase is incomplete. Owner observations, the passed
 fixed-build focus-return retest, delegated live recovery checks, three matched
 idle-performance pairs and separate release/restoration upper bounds are
-recorded. Proton notification repeatability and an explicit owner-perceived
-hitch assessment remain open in the check record.
+recorded. The Proton notification race is reproduced and fixed in `bca8672`,
+with fresh live and performance checks on client 6821. The owner reports no
+visible hitches during the earlier `3836fe3` live checks. GameInput is the
+remaining implementation/native acceptance item, deferred by owner choice
+until a working runtime is available. Recorded hardware/desktop limits remain.
 **Starting point:** `main` at `28996ad`, following the integration of input 3a.
 
 ## Intent
