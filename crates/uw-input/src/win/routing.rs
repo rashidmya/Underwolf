@@ -254,6 +254,7 @@ impl Shared {
             let context = self.context(&p, true, at);
             let old = p.domains();
             let effects = p.own_domains(domains, context.healthy);
+            self.publish_suppression(&p);
             if let Some(Transition::Release { reason, .. }) = effects.transition
                 && reason != InputReason::Requested
             {
@@ -562,6 +563,7 @@ impl Shared {
             let healthy = self.context(&p, cursor, at).healthy;
             let mut e =
                 p.event_with_lease(PolicyEvent::RoutedInput { record, pass: routed.pass && !consumed }, healthy);
+            self.publish_suppression(&p);
             e.host = [None; 2];
             // Signal TranslateMessage only for an actual routed, owned key-down.
             if record.kind == 1

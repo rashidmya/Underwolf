@@ -82,6 +82,7 @@ pub(super) struct Shared {
     thread: AtomicU32,
     message: u32,
     policy: Mutex<routing::Owner>,
+    suppressed_keys: [AtomicU64; 4],
     routing_mode: AtomicBool,
     configurations: crate::requests::ConfigurationQueue,
     route_requests: Mutex<VecDeque<uw_pipe_proto::routing::RoutingRequest>>,
@@ -132,6 +133,7 @@ impl InputRuntime {
             thread: AtomicU32::new(thread),
             message,
             policy: Mutex::new(routing::Owner::new()),
+            suppressed_keys: [const { AtomicU64::new(0) }; 4],
             routing_mode: AtomicBool::new(false),
             configurations: crate::requests::ConfigurationQueue::new(),
             route_requests: Mutex::new(VecDeque::with_capacity(32)),
@@ -374,14 +376,21 @@ impl Shared {
         if self.capture_domain(mouse) {
             return true;
         }
-        if !(0..256).contains(&vk) {
-            return false;
+        self.suppressed_key(vk)
+    }
+    fn suppressed_key(&self, vk: i32) -> bool {
+        (0..256).contains(&vk)
+            && self.suppressed_keys[vk as usize / 64].load(Ordering::Acquire) & (1u64 << (vk as usize % 64)) != 0
+    }
+    // The owner publishes quarantine under its policy guard, before releasing
+    // domains or invoking restoration callbacks. Foreign polling/raw readers
+    // must not contend with that guard or revoke a healthy notification session.
+    fn publish_suppression(&self, policy: &Policy) {
+        for (word, snapshot) in self.suppressed_keys.iter().enumerate() {
+            let bits = (0..64)
+                .fold(0u64, |bits, offset| bits | ((policy.key_suppressed(word * 64 + offset) as u64) << offset));
+            snapshot.store(bits, Ordering::Release);
         }
-        let Ok(p) = self.policy.try_lock() else {
-            self.revoke(InputReason::Unavailable);
-            return false;
-        };
-        p.key_suppressed(vk as usize)
     }
     fn emit(&self, event: RuntimeEvent) {
         if let Ok(mut q) = self.events.try_lock()
@@ -416,6 +425,7 @@ impl Shared {
         }
         let healthy = self.lease.try_lock().is_ok_and(|lease| lease.healthy_in(p.epoch(), at));
         let effects = p.event_with_lease(event, healthy);
+        self.publish_suppression(&p);
         let epoch = p.epoch();
         let mut routed_release = None;
         if self.routing_mode.load(Ordering::Acquire) {

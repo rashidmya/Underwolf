@@ -187,12 +187,15 @@ fn drive(h: &InputHandle, duration: u64) -> Vec<RuntimeEvent> {
 struct RawWorker {
     hwnd: usize,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    polling: std::sync::Arc<std::sync::atomic::AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 impl RawWorker {
     fn start() -> Self {
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stopping = stop.clone();
+        let polling = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let querying = polling.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         let thread = std::thread::spawn(move || {
             // SAFETY: this scratch worker owns its message-only window and its input queue.
@@ -231,12 +234,21 @@ impl RawWorker {
                 tx.send(hwnd as usize).unwrap();
                 while !stopping.load(Ordering::Acquire) {
                     pump();
+                    if querying.load(Ordering::Acquire) {
+                        // A game's worker can poll while the UI owner processes the same physical edges.
+                        // SAFETY: read-only scalar queries remain in this isolated fixture process.
+                        for _ in 0..512 {
+                            for vk in [113, 114, 65, 160, 50] {
+                                GetAsyncKeyState(vk);
+                            }
+                        }
+                    }
                     std::thread::sleep(Duration::from_millis(2));
                 }
                 DestroyWindow(hwnd);
             }
         });
-        Self { hwnd: rx.recv_timeout(Duration::from_secs(3)).unwrap(), stop, thread: Some(thread) }
+        Self { hwnd: rx.recv_timeout(Duration::from_secs(3)).unwrap(), stop, polling, thread: Some(thread) }
     }
 }
 impl Drop for RawWorker {
@@ -654,8 +666,27 @@ pub fn run() {
     drive(&h, 40);
     click(false);
     let focused = drive(&h, 40);
-    if case == "raw-thread-notify" {
+    if matches!(case.as_str(), "raw-thread-notify" | "raw-thread-poll-notify") {
         assert!(focused.iter().any(|event| matches!(event, RuntimeEvent::RoutingState(state) if state.focus == Some(WidgetRef { id: 1, generation: 1 }))), "notification fixture never focused its visible widget: {focused:?}");
+    }
+    if case == "raw-thread-poll-notify" {
+        raw_worker.as_ref().unwrap().polling.store(true, Ordering::Release);
+        let mut consumed = 0;
+        for _ in 0..32 {
+            key_vk(114, true);
+            let mut events = drive(&h, 25);
+            key_vk(114, false);
+            events.extend(drive(&h, 25));
+            consumed += events
+                .iter()
+                .filter_map(
+                    |event| if let RuntimeEvent::RoutedBatch(batch) = event { Some(&batch.events) } else { None },
+                )
+                .flatten()
+                .filter(|event| event.kind == EventKind::Hotkey && event.argument == 3)
+                .count();
+        }
+        assert_eq!(consumed, 32, "concurrent polling lost a consuming F3 notification");
     }
     if case == "focus-text" {
         // SAFETY: post UTF-16 units only to this fixture's live window.
@@ -793,7 +824,8 @@ pub fn run() {
         );
     }
     let mut named = 0;
-    for _ in 0..2 {
+    let named_cycles = if case == "raw-thread-poll-notify" { 32 } else { 2 };
+    for _ in 0..named_cycles {
         key_vk(113, true);
         let mut events = drive(&h, 25);
         key_vk(113, false);
@@ -809,7 +841,7 @@ pub fn run() {
             })
             .sum::<usize>();
     }
-    assert_eq!(named, 2, "raw/legacy full key cycles duplicated or lost a named activation");
+    assert_eq!(named, named_cycles, "raw/legacy full key cycles duplicated or lost a named activation");
     key_vk(114, true);
     let mut consuming = drive(&h, 25);
     key_vk(114, false);
@@ -857,7 +889,10 @@ pub fn run() {
     }
     key(false);
     events.extend(drive(&h, 80));
-    if matches!(case.as_str(), "raw-block" | "raw-thread" | "raw-thread-notify" | "raw-notify") {
+    if matches!(
+        case.as_str(),
+        "raw-block" | "raw-thread" | "raw-thread-notify" | "raw-thread-poll-notify" | "raw-notify"
+    ) {
         let chars = |events: &[RuntimeEvent]| -> Vec<i32> {
             events
                 .iter()

@@ -100,3 +100,8 @@ fn native_client_resize_cancels_and_rejects_an_invisible_takeover() {
 fn raw_worker_notification_preserves_game_input_and_delivers_text_once() {
     probe("raw-thread-notify");
 }
+#[test]
+#[ignore = "Windows input_probe under xvfb-run"]
+fn concurrent_worker_polling_preserves_notification_focus_and_named_edges() {
+    probe("raw-thread-poll-notify");
+}

@@ -117,6 +117,7 @@ pub(super) fn seed(s: &Shared) {
             }
         }
         p.hotkeys.reseed(&physical);
+        s.publish_suppression(&p);
     } else {
         s.revoke(InputReason::Unavailable);
     }
@@ -148,6 +149,7 @@ fn background_release(record: InputRecord) {
             p.router.physical_release(record);
             let physical = p.physical_keys();
             p.hotkeys.observe(record, &physical);
+            s.publish_suppression(&p);
         }
     }
 }

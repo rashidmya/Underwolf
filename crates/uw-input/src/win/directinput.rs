@@ -281,15 +281,10 @@ fn eligibility(token: DeviceToken) -> (bool, bool) {
     let activation_pending = matches!(s.release.load(Ordering::Acquire),
         value if value == InputReason::FocusLost as usize + 1 || value == InputReason::WindowDestroyed as usize + 1);
     let held = activation_pending
-        || if let Ok(p) = s.policy.try_lock() {
-            if mouse {
-                [1, 2, 4, 5, 6].into_iter().any(|vk| p.key_suppressed(vk))
-            } else {
-                (1..256).any(|vk| !matches!(vk, 1 | 2 | 4 | 5 | 6) && p.key_suppressed(vk))
-            }
+        || if mouse {
+            [1, 2, 4, 5, 6].into_iter().any(|vk| s.suppressed_key(vk))
         } else {
-            s.revoke(InputReason::Unavailable);
-            true
+            (1..256).any(|vk| !matches!(vk, 1 | 2 | 4 | 5 | 6) && s.suppressed_key(vk))
         };
     (owned, held)
 }
