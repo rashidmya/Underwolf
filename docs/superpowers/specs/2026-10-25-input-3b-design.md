@@ -11,8 +11,11 @@ idle-performance pairs and separate release/restoration upper bounds are
 recorded. The Proton notification race is reproduced and fixed in `bca8672`,
 with fresh live and performance checks on client 6821. The owner reports no
 visible hitches during the earlier `3836fe3` live checks. GameInput is the
-remaining implementation/native acceptance item, deferred by owner choice
-until a working runtime is available. Recorded hardware/desktop limits remain.
+remaining implementation/native acceptance item, deferred until a target game
+requires it. Test-only SDK qualification now supplies callable interfaces and
+keyboard callbacks; no production GameInput isolation is accepted. Present
+uncovered redistributables reject capture without factory initialization.
+Recorded hardware/desktop limits remain.
 **Starting point:** `main` at `28996ad`, following the integration of input 3a.
 
 ## Intent
@@ -257,6 +260,12 @@ lifetime rules. Never unregister a callback synchronously from inside itself.
 This does not add controller delivery to widgets or XInput coverage. The plan
 must specify which GameInput domains freeze in exclusive mode and test them;
 it must not advertise whole-controller isolation if another API is untouched.
+
+October 27 scope decision: future exclusive GameInput isolation includes
+controller states as requested by the owner, alongside keyboard and mouse;
+standard mode still filters only owned keyboard/mouse domains. The adapter is
+deferred until a target needs it. XInput and full controller isolation remain
+unimplemented; no controller runtime acceptance is inferred from policy tests.
 
 Optional DLLs may be absent in Proton. Their absence is a reported coverage
 state, not a passing runtime test and not a reason to install a replacement

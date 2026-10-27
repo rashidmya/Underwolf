@@ -2,9 +2,9 @@
   "schema_version": 1,
   "phase": "input 3b",
   "status": "open",
-  "recorded_utc": "2026-10-27T11:45:44.238411+00:00",
+  "recorded_utc": "2026-10-27T13:58:14.787374+00:00",
   "implementation_base": "468d024",
-  "verification_head_before_evidence_commit": "bca86725d508ca1f3df2a047d931579edfca41e6",
+  "verification_head_before_evidence_commit": "6a244f0f84c07b791dccb71ef089db28a0edf9ad",
   "environment": {
     "kernel": "Linux 7.2.11-1-cachyos",
     "wine": "11.20",
@@ -32,7 +32,7 @@
     },
     {
       "path": "target/x86_64-pc-windows-gnu/release/uw_overlay.dll",
-      "sha256": "ad79bf4bc19d5aa2b7e1eebce9fda18b5de9432767934f46fc556a88c3eb8bd3"
+      "sha256": "8cc3b8b51a86c17634650254ca0877155b930d36bcfc2a3a630303b8d3f7d45f"
     },
     {
       "path": "target/x86_64-pc-windows-gnu/release/uw-test-game.exe",
@@ -40,11 +40,11 @@
     },
     {
       "path": "target/x86_64-pc-windows-gnu/release/examples/input_probe.exe",
-      "sha256": "99ae081718b5332b75c38b1c752c9119b9acf91b5c44e2f1a94c7679ad5ebb8f"
+      "sha256": "07f5c980d2ff12022e7acb03ec019d908ad683a9e5fff1dad7e62d5c5d4c5240"
     },
     {
       "path": "target/x86_64-pc-windows-gnu/release/examples/native_input_probe.exe",
-      "sha256": "6a20c0f6535637eb77d1a15f666db92dec6027c96000bf72a401eaff170c0d8a"
+      "sha256": "692854cef9dfbdce8de34f6798e3c402b18ca90bc52941ea1f2d2e208f66a1d2"
     },
     {
       "path": "target/release/libuw_spike_osr_bridge.so",
@@ -55,7 +55,8 @@
     "passed": 711,
     "failed": 0,
     "ignored": 91,
-    "log": "target/input-3b-native/notify-repeatability-20261027/workspace-tests.log"
+    "log": "target/input-3b-native/notify-repeatability-20261027/workspace-tests.log",
+    "source_commit": "bca86725d508ca1f3df2a047d931579edfca41e6"
   },
   "static_gates": {
     "portable_clippy": "passed",
@@ -74,7 +75,8 @@
       "required_scope": "approved plan Task11 production packages",
       "status": "failed existing unrelated spike lint",
       "log": "target/input-3b-native/notify-repeatability-20261027/clippy-portable.log"
-    }
+    },
+    "source_commit": "bca86725d508ca1f3df2a047d931579edfca41e6"
   },
   "native_wine": {
     "routing_v2": 20,
@@ -244,15 +246,38 @@
     }
   ],
   "gameinput": {
-    "status": "open",
-    "implementation": "native reading/history/callback adapter remains open; no callable ABI object available",
-    "acceptance": "open until working native runtime",
-    "owner_decision": "Keep GameInput acceptance open until a working test runtime is available",
+    "status": "deferred",
+    "implementation": "Reading/history/callback adapter deferred; no unused prototype compiled into the product",
+    "acceptance": "not accepted; revisit when a target game requires GameInput",
+    "owner_decision": "Defer after owner asked whether to skip GameInput until needed; recommendation and deferral recorded",
     "factory_hresult_hex": "0x80004001",
     "wine": "E_NOTIMPL",
     "proton": "E_NOTIMPL",
     "advertised_supported_abi_mask": 0,
-    "isolation_passed": false
+    "isolation_passed": false,
+    "prior_owner_decision": "Keep GameInput acceptance open until a working test runtime is available",
+    "factory_scope": "Unmodified built-in GameInput.dll in stock Wine/Proton; official SDK qualification is recorded separately",
+    "future_exclusive_scope": "Include GameInput controller states alongside keyboard/mouse, per owner; XInput remains separate and unimplemented",
+    "runtime_qualification": {
+      "scope": "test-only interfaces, keyboard readings and callbacks; not production isolation",
+      "evidence": "target/input-3b-gameinput-20261027/summary.json",
+      "advertised_supported_abi_mask": 0,
+      "controller_accepted": false
+    },
+    "coverage_guard": {
+      "source_commit": "6a244f0f84c07b791dccb71ef089db28a0edf9ad",
+      "loaded_runtime": "GameInputRedist.dll",
+      "status": "Unsupported",
+      "abi_mask": 0,
+      "factory_invoked": false,
+      "fresh_capture": "rejected",
+      "native_cases": [
+        "target/input-3b-gameinput-20261027/deferred-guard-wine/result.json",
+        "target/input-3b-gameinput-20261027/deferred-guard-proton/result.json",
+        "target/input-3b-gameinput-20261027/deferred-guard4-wine/result.json"
+      ]
+    },
+    "saved_prototype": "target/input-3b-gameinput-20261027/deferred-source"
   },
   "owner_acceptance": {
     "status": "Manual observations recorded, including no visible hitches on earlier3836fe3; delegated automation/timing passed separately on currentbca8672",
@@ -1571,9 +1596,9 @@
     }
   ],
   "open_items": [
-    "Task 8: GameInput implementation/native acceptance until a working runtime is available, by owner choice"
+    "Deferred Task 8: GameInput implementation/native acceptance when required by a target game"
   ],
-  "acceptance_scope": "Task12 recorded; physical horizontal-wheel hardware, GNOME and physical controller acceptance remain untested; excluded features remain excluded.",
+  "acceptance_scope": "Available implemented input paths accepted within their recorded source scopes. GameInput deferred; full controller isolation unimplemented. Existing hardware/desktop/excluded-feature limits remain.",
   "artifact_history": [
     {
       "source_fix_commit": "3836fe3",
@@ -1611,9 +1636,46 @@
           "sha256": "8ff00477289d4b887735234c600f3435ab1596cf77031dbbcdfe2cf9fa230a44"
         }
       ]
+    },
+    {
+      "source_fix_commit": "bca86725d508ca1f3df2a047d931579edfca41e6",
+      "artifacts": [
+        {
+          "path": "target/release/uw-inject",
+          "sha256": "11286ab2df03ae4d9c424eac75a7fbd09de7313c78a65cf9858090089f2f945c"
+        },
+        {
+          "path": "target/x86_64-pc-windows-gnu/release/uw-helper64.exe",
+          "sha256": "a295f2dc5b13b87c50358dba3b8f8fb4f69f2d5289f63e562be0026a3f863b50"
+        },
+        {
+          "path": "target/x86_64-pc-windows-gnu/release/uw_bootstrap64.dll",
+          "sha256": "46dcc770fba394f3451328eb039d2686d01ef6d213582c4a31f656181a448987"
+        },
+        {
+          "path": "target/x86_64-pc-windows-gnu/release/uw_overlay.dll",
+          "sha256": "ad79bf4bc19d5aa2b7e1eebce9fda18b5de9432767934f46fc556a88c3eb8bd3"
+        },
+        {
+          "path": "target/x86_64-pc-windows-gnu/release/uw-test-game.exe",
+          "sha256": "c4b50063312fa6a1192e599c39dab150cdc58676a1776cfd834ad71523ad7ab9"
+        },
+        {
+          "path": "target/x86_64-pc-windows-gnu/release/examples/input_probe.exe",
+          "sha256": "99ae081718b5332b75c38b1c752c9119b9acf91b5c44e2f1a94c7679ad5ebb8f"
+        },
+        {
+          "path": "target/x86_64-pc-windows-gnu/release/examples/native_input_probe.exe",
+          "sha256": "6a20c0f6535637eb77d1a15f666db92dec6027c96000bf72a401eaff170c0d8a"
+        },
+        {
+          "path": "target/release/libuw_spike_osr_bridge.so",
+          "sha256": "8ff00477289d4b887735234c600f3435ab1596cf77031dbbcdfe2cf9fa230a44"
+        }
+      ]
     }
   ],
-  "artifact_source_commit": "bca86725d508ca1f3df2a047d931579edfca41e6",
+  "artifact_source_commit": "6a244f0f84c07b791dccb71ef089db28a0edf9ad",
   "runtime_evidence_history": [
     {
       "runtime": "proton",
@@ -1782,5 +1844,56 @@
       },
       "test_receiver_commit": "de8959e"
     }
-  ]
+  ],
+  "verification_scope": "711 workspace/55 Wine/native repeatability/live/performance evidence remains bca8672. The6a244f0 deferral guard has separately scoped checks below; no live/performance retest during owner gameplay.",
+  "gameinput_deferral_checks": {
+    "portable_uw_input_tests": {
+      "passed": 139,
+      "failed": 0,
+      "ignored": 46
+    },
+    "portable_all_target_clippy": "passed",
+    "windows_all_target_clippy": "passed",
+    "release_overlay_build": "passed",
+    "branch_formatting": "passed",
+    "git_diff_check": "passed",
+    "full_workspace": "not repeated during owner gameplay; previous711-test record remains historical",
+    "source_commit": "6a244f0f84c07b791dccb71ef089db28a0edf9ad",
+    "guard_runs": {
+      "deferred-guard-wine": {
+        "runtime": "wine",
+        "case": "optional-redist",
+        "exit": 0,
+        "sha256": "07f5c980d2ff12022e7acb03ec019d908ad683a9e5fff1dad7e62d5c5d4c5240",
+        "scope": "isolated native routing fixture",
+        "owner_acceptance": "open",
+        "gameinput_acceptance": "open",
+        "passed": true
+      },
+      "deferred-guard-proton": {
+        "runtime": "proton",
+        "case": "optional-redist",
+        "exit": 0,
+        "sha256": "07f5c980d2ff12022e7acb03ec019d908ad683a9e5fff1dad7e62d5c5d4c5240",
+        "scope": "isolated native routing fixture",
+        "owner_acceptance": "open",
+        "gameinput_acceptance": "open",
+        "passed": true
+      },
+      "deferred-guard4-wine": {
+        "runtime": "wine",
+        "case": "optional-redist",
+        "exit": 0,
+        "sha256": "07f5c980d2ff12022e7acb03ec019d908ad683a9e5fff1dad7e62d5c5d4c5240",
+        "scope": "isolated native routing fixture",
+        "owner_acceptance": "open",
+        "gameinput_acceptance": "open",
+        "passed": true
+      }
+    },
+    "logs": "target/input-3b-gameinput-20261027",
+    "new_guard_live_game_tested": false,
+    "gameplay_interacted_with": false,
+    "exploratory_actors_remaining": []
+  }
 }
