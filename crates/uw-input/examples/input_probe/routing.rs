@@ -809,7 +809,7 @@ pub fn run() {
             "standard exit warped the physical pointer"
         );
     }
-    if matches!(case.as_str(), "exclusive" | "optional-load" | "optional-order") {
+    if matches!(case.as_str(), "exclusive" | "optional-load" | "optional-order" | "optional-redist") {
         h.route_request(RoutingRequest {
             epoch,
             revision: 1,
@@ -971,10 +971,20 @@ pub fn run() {
             "native Unicode packet lost or duplicated text; original LL edges {observed:x?}: {events:?}"
         );
     }
-    if matches!(case.as_str(), "optional-load" | "optional-order") {
+    if matches!(case.as_str(), "optional-load" | "optional-order" | "optional-redist") {
         assert!(h.capture_permitted());
-        // SAFETY: load a system input runtime into this private probe process only.
-        assert!(!unsafe { LoadLibraryW(w!("dinput8.dll")) }.is_null());
+        if case == "optional-redist" {
+            let path: Vec<u16> = std::env::var("UW_TEST_GAMEINPUT_RUNTIME")
+                .expect("point UW_TEST_GAMEINPUT_RUNTIME at the isolated official GameInputRedist.dll")
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
+            // SAFETY: explicitly selected runtime is loaded into this private probe only, never the player's prefix.
+            assert!(!unsafe { LoadLibraryW(path.as_ptr()) }.is_null());
+        } else {
+            // SAFETY: load a system input runtime into this private probe process only.
+            assert!(!unsafe { LoadLibraryW(w!("dinput8.dll")) }.is_null());
+        }
         assert!(!h.capture_permitted(), "optional load must revoke before discovery");
         let events = if case == "optional-order" {
             let start = Instant::now();
@@ -998,11 +1008,65 @@ pub fn run() {
             drive(&h, 150)
         };
         assert!(!h.capture_permitted(), "discovery must never rearm ownership");
-        assert!(
-            events
+        assert!(events.iter().any(|e| matches!(e, RuntimeEvent::NativeCoverage(c) if
+                    (if case == "optional-redist" { c.gameinput.status } else { c.directinput.status })
+                        != NativeStatus::Absent)));
+        if case == "optional-redist" {
+            assert!(events.iter().any(|event| matches!(event, RuntimeEvent::NativeCoverage(coverage)
+                if coverage.gameinput.status == NativeStatus::Unsupported
+                    && coverage.gameinput.abi_mask == 0
+                    && coverage.gameinput.domains == Domains::default())));
+            let mut count = 0;
+            // SAFETY: query only this private fixture process's registrations with a writable count.
+            unsafe {
+                GetRegisteredRawInputDevices(
+                    std::ptr::null_mut(),
+                    &mut count,
+                    std::mem::size_of::<RAWINPUTDEVICE>() as u32,
+                )
+            };
+            if count != 0 {
+                let mut devices = vec![RAWINPUTDEVICE::default(); count as usize];
+                // SAFETY: count descriptors are writable and the native structure size matches.
+                assert_ne!(
+                    // SAFETY: the initialized descriptor buffer has count writable entries.
+                    unsafe {
+                        GetRegisteredRawInputDevices(
+                            devices.as_mut_ptr(),
+                            &mut count,
+                            std::mem::size_of::<RAWINPUTDEVICE>() as u32,
+                        )
+                    },
+                    u32::MAX
+                );
+                assert!(
+                    devices[..count as usize]
+                        .iter()
+                        .all(|device| device.hwndTarget.is_null() || device.hwndTarget == hwnd),
+                    "deferred discovery initialized a foreign SDK input backend"
+                );
+            }
+            let state = events
                 .iter()
-                .any(|e| matches!(e, RuntimeEvent::NativeCoverage(c) if c.directinput.status != NativeStatus::Absent))
-        );
+                .rev()
+                .find_map(|event| match event {
+                    RuntimeEvent::RoutingState(state) => Some(state),
+                    _ => None,
+                })
+                .expect("runtime state after optional load");
+            h.route_request(RoutingRequest {
+                epoch: state.epoch,
+                revision: state.revision,
+                request_id: 9000,
+                target: None,
+                action: RoutingAction::EnterEdit,
+                state_seq: None,
+            })
+            .unwrap();
+            assert!(drive(&h, 50).iter().any(|event| matches!(event, RuntimeEvent::RoutingResult(result)
+                if result.request_id == 9000 && result.code != RoutingCode::Applied)));
+            assert!(!h.capture_permitted(), "fresh request enabled an uncovered GameInput runtime");
+        }
     }
     h.disconnect();
     drive(&h, 50);

@@ -47,7 +47,7 @@ unsafe extern "system" fn loaded(reason: u32, data: *const Notification, context
     let units = unsafe { std::slice::from_raw_parts(name.buffer, name.length as usize / 2) };
     let matches =
         |ascii: &[u8]| units.len() == ascii.len() && units.iter().zip(ascii).all(|(u, a)| (*u | 32) == *a as u16);
-    if !matches(b"dinput8.dll") && !matches(b"gameinput.dll") {
+    if !matches(b"dinput8.dll") && !matches(b"gameinput.dll") && !matches(b"gameinputredist.dll") {
         return;
     }
     READY.store(false, Ordering::Release);
@@ -227,6 +227,14 @@ pub fn discover() -> DiscoveryReport {
             }
             Err(detail) => report.directinput = AdapterCoverage::failure(detail),
         }
+    }
+    // SAFETY: only checks whether the optional SDK redistributable is already loaded.
+    if !unsafe { GetModuleHandleW(w!("GameInputRedist.dll")) }.is_null() {
+        // The deferred adapter has no coverage for this runtime. Do not invoke its
+        // factory: initialization itself may replace the game's raw registrations.
+        report.gameinput = AdapterCoverage::failure(0x8000_4002u32 as i32);
+        report.diagnostics.push("GameInputRedist.dll is present; its isolation adapter is deferred".into());
+        return report;
     }
     // SAFETY: this query does not load or initialize GameInput.
     if !unsafe { GetModuleHandleW(w!("GameInput.dll")) }.is_null() {
