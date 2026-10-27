@@ -5,7 +5,8 @@
 behavior and limits below originated as the author's proposals. Implementation
 and automated gates for Tasks 1–7 and 9–11 are recorded in the
 [3b check](../checks/2026-10-25-input-3b.md). GameInput implementation/native
-acceptance remain open; this phase is incomplete. Owner observations, the passed
+acceptance is explicitly deferred from the completed and locally integrated
+3b scope; no GameInput support is claimed. Owner observations, the passed
 fixed-build focus-return retest, delegated live recovery checks, three matched
 idle-performance pairs and separate release/restoration upper bounds are
 recorded. The Proton notification race is reproduced and fixed in `bca8672`,

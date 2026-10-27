@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
   "phase": "input 3b",
-  "status": "open",
-  "recorded_utc": "2026-10-27T13:58:14.787374+00:00",
+  "status": "complete_for_agreed_scope_with_gameinput_deferred",
+  "recorded_utc": "2026-10-27T14:42:17.527613+00:00",
   "implementation_base": "468d024",
-  "verification_head_before_evidence_commit": "6a244f0f84c07b791dccb71ef089db28a0edf9ad",
+  "verification_head_before_evidence_commit": "f812a98dfe676b55988483ac6269f45b2c6f7fe1",
   "environment": {
     "kernel": "Linux 7.2.11-1-cachyos",
     "wine": "11.20",
@@ -54,9 +54,10 @@
   "portable_workspace": {
     "passed": 711,
     "failed": 0,
-    "ignored": 91,
-    "log": "target/input-3b-native/notify-repeatability-20261027/workspace-tests.log",
-    "source_commit": "bca86725d508ca1f3df2a047d931579edfca41e6"
+    "ignored": 92,
+    "source_commit": "f812a98dfe676b55988483ac6269f45b2c6f7fe1",
+    "log": "target/input-3b-merge-20261027/workspace-before-merge.log",
+    "post_merge_log": "target/input-3b-merge-20261027/workspace-main.log"
   },
   "static_gates": {
     "portable_clippy": "passed",
@@ -76,7 +77,7 @@
       "status": "failed existing unrelated spike lint",
       "log": "target/input-3b-native/notify-repeatability-20261027/clippy-portable.log"
     },
-    "source_commit": "bca86725d508ca1f3df2a047d931579edfca41e6"
+    "source_commit": "f812a98dfe676b55988483ac6269f45b2c6f7fe1"
   },
   "native_wine": {
     "routing_v2": 20,
@@ -924,7 +925,7 @@
     }
   },
   "whole_branch_review": {
-    "status": "material findings verified fixed; phase gates remain open",
+    "status": "material findings verified fixed; agreed implemented scope accepted with GameInput deferred",
     "base": "468d024",
     "head": "61404454738c909f3840db4de17085f6675a5f07",
     "reviewer": "single fresh-context gpt-6-astra",
@@ -981,19 +982,37 @@
       "commit": "3836fe378f4932052bb9618a4fdab00e44589f7a",
       "reason": "new owner-demonstrated Alt focus-return failure",
       "verification": "real native RED-to-GREEN, 711 portable tests, 54 Wine scenarios, Wine/Proton focus tests; separate Proton notification repeatability acceptance open",
-      "fresh_review_repeated": false
+      "fresh_review_repeated": false,
+      "scope": "Historical focus-return correction; later notification-race resolution is recorded separately under proton_repeatability."
     }
   },
   "integration": {
-    "main_untouched": true,
+    "status": "merged_locally_verified",
+    "branch": "main",
+    "base_head": "468d02497eb0f855b555cdcf3d29b323ca3e7a32",
+    "merged_source_head": "f812a98dfe676b55988483ac6269f45b2c6f7fe1",
+    "strategy": "fast_forward",
+    "merged": true,
     "pushed": false,
-    "merged": false
+    "main_untouched": false,
+    "post_merge_workspace": {
+      "passed": 711,
+      "failed": 0,
+      "ignored": 92
+    },
+    "evidence": "target/input-3b-merge-20261027/summary.json",
+    "preserved_worktrees": [
+      "/home/buga/.codex/worktrees/102d/underwolf",
+      "/home/buga/.codex/worktrees/d200/underwolf"
+    ],
+    "authorization": "Owner requested merge of 3b after GameInput deferral",
+    "game_interacted_with": false
   },
   "static_gate_logs": {
-    "portable_clippy": "target/input-3b-native/notify-repeatability-20261027/clippy-production.log",
-    "windows_all_targets_check": "target/input-3b-native/notify-repeatability-20261027/windows-check.log",
-    "windows_clippy_with_unsafe_comments": "target/input-3b-native/notify-repeatability-20261027/clippy-windows.log",
-    "enhanced_fixture_windows_clippy": "target/input-3b-native/notify-repeatability-20261027/clippy-enhanced-fixture.log"
+    "portable_clippy": "target/input-3b-merge-20261027/clippy-portable.log",
+    "windows_all_targets_check": "target/input-3b-merge-20261027/windows-check.log",
+    "windows_clippy_with_unsafe_comments": "target/input-3b-merge-20261027/clippy-windows.log",
+    "branch_formatting": "target/input-3b-merge-20261027/branch-format.log"
   },
   "focus_return_fix": {
     "commit": "3836fe378f4932052bb9618a4fdab00e44589f7a",
@@ -1595,10 +1614,8 @@
       "common_receiver_commit": "de8959e"
     }
   ],
-  "open_items": [
-    "Deferred Task 8: GameInput implementation/native acceptance when required by a target game"
-  ],
-  "acceptance_scope": "Available implemented input paths accepted within their recorded source scopes. GameInput deferred; full controller isolation unimplemented. Existing hardware/desktop/excluded-feature limits remain.",
+  "open_items": [],
+  "acceptance_scope": "Completed implemented 3b scope, locally integrated into main by owner request with GameInput explicitly deferred. No GameInput or full-controller isolation claim; existing native hardware/desktop/excluded-feature limits remain.",
   "artifact_history": [
     {
       "source_fix_commit": "3836fe3",
@@ -1845,7 +1862,7 @@
       "test_receiver_commit": "de8959e"
     }
   ],
-  "verification_scope": "711 workspace/55 Wine/native repeatability/live/performance evidence remains bca8672. The6a244f0 deferral guard has separately scoped checks below; no live/performance retest during owner gameplay.",
+  "verification_scope": "Fresh full portable workspace and production portable/Windows checks at f812a98; merged main workspace repeated successfully. Native/live/performance and GameInput guard records retain their explicit earlier source scopes.",
   "gameinput_deferral_checks": {
     "portable_uw_input_tests": {
       "passed": 139,
@@ -1895,5 +1912,62 @@
     "new_guard_live_game_tested": false,
     "gameplay_interacted_with": false,
     "exploratory_actors_remaining": []
+  },
+  "deferred_items": [
+    "Task 8: GameInput reading/history/callback adapter and native acceptance when required by a target game",
+    "Fixture-only local pointer diagnostic subtracts widget origin twice (cosmetic minor)"
+  ],
+  "portable_workspace_history": [
+    {
+      "passed": 711,
+      "failed": 0,
+      "ignored": 91,
+      "log": "target/input-3b-native/notify-repeatability-20261027/workspace-tests.log",
+      "source_commit": "bca86725d508ca1f3df2a047d931579edfca41e6"
+    }
+  ],
+  "merge_verification": {
+    "status": "merged_locally_verified",
+    "tested_source_head": "f812a98dfe676b55988483ac6269f45b2c6f7fe1",
+    "base_main": "468d02497eb0f855b555cdcf3d29b323ca3e7a32",
+    "workspace": {
+      "passed": 711,
+      "failed": 0,
+      "ignored": 92
+    },
+    "receiver_tests": {
+      "production_input": 8,
+      "production_routing": 10,
+      "failed": 0
+    },
+    "production_packages": 10,
+    "portable_strict_clippy": "passed",
+    "windows_all_target_check": "passed",
+    "windows_strict_clippy": "passed",
+    "gameinput": "explicitly deferred; no support/full controller isolation claim",
+    "live_testing_repeated": false,
+    "game_interacted_with": false,
+    "logs": {
+      "workspace-before-merge.log": "04a51b1652a970325560b79880524f092d4fcbd61c98f736ede7f560ec5df963",
+      "receiver-input.log": "e96d7ed0b370743d72e95b25434ba593f6f20d4de2e76fc2b0cdff32c07ab18c",
+      "receiver-routing.log": "f3d8fc21bee0e04b7ad2b86a6ad3b969efe4d983ed29a0f492a7da355143fec3",
+      "clippy-portable.log": "ac16cc056c000c595b36175aec911a2b26932ccc128312b2df2b27d59c8a8c5b",
+      "windows-check.log": "7f6e4e2a2a58f2ba159fb2f55eb99d4c50091b02406ca1e396cd7c6975fc1623",
+      "clippy-windows.log": "ad334ec7db5abd9d2a0e455c623361440faddea98e4000d2078ebae7bf3438b4",
+      "workspace-main.log": "c72bc6e7cb7ecf87421e61a9d26b76b793618947038de5e4d505bc33453a5b89",
+      "branch-format.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "post_merge_workspace": {
+      "passed": 711,
+      "failed": 0,
+      "ignored": 92
+    },
+    "merged_source_head": "f812a98dfe676b55988483ac6269f45b2c6f7fe1",
+    "merge_strategy": "fast_forward",
+    "branch": "main",
+    "pushed": false,
+    "branch_rustfmt_files": 71,
+    "branch_rustfmt": "passed",
+    "launch_shell_syntax": "passed"
   }
 }
