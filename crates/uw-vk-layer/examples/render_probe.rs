@@ -31,8 +31,6 @@ mod wsi {
         fns: ash::khr::swapchain::Device,
         swap: vk::SwapchainKHR,
         images: Vec<vk::Image>,
-        finished: Vec<vk::Semaphore>,
-        pending: Vec<bool>,
         initialized: Vec<bool>,
         slots: Vec<Slot>,
         pool: vk::CommandPool,
@@ -97,8 +95,6 @@ mod wsi {
                     fns,
                     swap: vk::SwapchainKHR::null(),
                     images: vec![],
-                    finished: vec![],
-                    pending: vec![],
                     initialized: vec![],
                     slots: vec![],
                     pool: gpu.pool,
@@ -132,15 +128,7 @@ mod wsi {
                     )
                     .map_err(err)?;
                 s.images = s.fns.get_swapchain_images(s.swap).map_err(err)?;
-                s.pending = vec![false; s.images.len()];
                 s.initialized = vec![false; s.images.len()];
-                for _ in &s.images {
-                    s.finished.push(
-                        s.device
-                            .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
-                            .map_err(err)?,
-                    );
-                }
                 for _ in 0..3 {
                     let cmd = s
                         .device
@@ -171,12 +159,12 @@ mod wsi {
                 Ok(s)
             }
         }
-        fn frame(&mut self, gpu: &mut gpu::Gpu, drain: bool) -> Result<bool, String> {
+        fn frame(&mut self, gpu: &mut gpu::Gpu) -> Result<bool, String> {
             let slot = &self.slots[self.next % self.slots.len()];
             self.next += 1;
             gpu.wait(slot.fence)?;
-            // SAFETY: acquired image and this command slot are owned until its fence;
-            // binary signal is per image, reused only after that image is reacquired.
+            // SAFETY: acquired image and this command slot remain owned through
+            // the bounded rendering fence before this probe presents the image.
             unsafe {
                 let acquired = self.fns.acquire_next_image(
                     self.swap,
@@ -190,7 +178,6 @@ mod wsi {
                     Err(e) => return Err(err(e)),
                 };
                 let i = index as usize;
-                self.pending[i] = false;
                 self.device
                     .reset_command_buffer(slot.cmd, vk::CommandBufferResetFlags::empty())
                     .map_err(err)?;
@@ -258,34 +245,24 @@ mod wsi {
                 let waits = [slot.acquire];
                 let stages = [vk::PipelineStageFlags::TRANSFER];
                 let cmds = [slot.cmd];
-                let signals = if drain {
-                    vec![]
-                } else {
-                    vec![self.finished[i]]
-                };
                 let submit = vk::SubmitInfo::default()
                     .wait_semaphores(&waits)
                     .wait_dst_stage_mask(&stages)
-                    .command_buffers(&cmds)
-                    .signal_semaphores(&signals);
+                    .command_buffers(&cmds);
                 self.device.reset_fences(&[slot.fence]).map_err(err)?;
                 if let Err(e) = self.device.queue_submit(gpu.queue, &[submit], slot.fence) {
                     gpu.destroy();
                     return Err(err(e));
                 }
                 self.initialized[i] = true;
-                // The finite retirement pass fences its own rendering on the CPU and
-                // presents without game semaphores. Reacquisition retires every older
-                // game semaphore payload, without creating another pending payload.
-                if drain {
-                    gpu.wait(slot.fence)?;
-                } else {
-                    self.pending[i] = true;
-                }
+                // Probe-only host ordering: no game-owned semaphore payload is
+                // lent to WSI. Reacquiring every image is not a fairness guarantee.
+                // The production layer still submits/signals its own binary wait
+                // and retires that presentation with the actual maintenance fence.
+                gpu.wait(slot.fence)?;
                 let swaps = [self.swap];
                 let indices = [index];
                 let present = vk::PresentInfoKHR::default()
-                    .wait_semaphores(&signals)
                     .swapchains(&swaps)
                     .image_indices(&indices);
                 match self.fns.queue_present(gpu.queue, &present) {
@@ -298,26 +275,9 @@ mod wsi {
         fn drain(&mut self, gpu: &mut gpu::Gpu) -> Result<(), String> {
             let cmd = gpu.command(|_| Ok(()))?;
             gpu.submit(cmd, &[])?;
-            for _ in 0..40 {
-                if self.pending.iter().all(|p| !*p) {
-                    break;
-                }
-                if !self.frame(gpu, true)? {
-                    // Out-of-date presentation has no presentation-engine image use;
-                    // the following queue fence drains its semaphore wait operation.
-                    let cmd = gpu.command(|_| Ok(()))?;
-                    gpu.submit(cmd, &[])?;
-                    self.pending.fill(false);
-                    break;
-                }
+            for slot in &self.slots {
+                gpu.wait(slot.fence)?;
             }
-            if self.pending.iter().any(|p| *p) {
-                return Err(
-                    "bounded presentation semaphore drain did not reacquire all used images".into(),
-                );
-            }
-            let cmd = gpu.command(|_| Ok(()))?;
-            gpu.submit(cmd, &[])?;
             Ok(())
         }
     }
@@ -326,28 +286,14 @@ mod wsi {
             if !self.life.is_live() {
                 return;
             }
-            if self.pending.iter().any(|p| *p) {
-                // SAFETY: failure teardown keeps app/layer payload owners alive through
-                // driver destruction; the host gate was released and no thread can call
-                // the device afterward. Validation records this path as a failed probe.
-                unsafe {
-                    self.device.destroy_device(None);
-                }
-                self.life
-                    .live
-                    .store(false, std::sync::atomic::Ordering::Release);
-                return;
-            }
-            // SAFETY: frame fences and the finite reacquire/no-signal retirement pass
-            // drained every game-owned semaphore before normal swapchain destruction.
+            // SAFETY: the probe fences each rendering submission before
+            // presentation, and drain fences all queued layer submissions. There
+            // are no probe-owned present wait semaphores to retire by reacquisition.
             unsafe {
                 for slot in self.slots.drain(..) {
                     self.device.destroy_fence(slot.fence, None);
                     self.device.destroy_semaphore(slot.acquire, None);
                     self.device.free_command_buffers(self.pool, &[slot.cmd]);
-                }
-                for signal in self.finished.drain(..) {
-                    self.device.destroy_semaphore(signal, None);
                 }
                 self.fns.destroy_swapchain(self.swap, None);
             }
@@ -436,7 +382,7 @@ mod wsi {
                 std::thread::sleep(Duration::from_millis(2));
                 continue;
             }
-            if !swap.frame(&mut gpu, false)? {
+            if !swap.frame(&mut gpu)? {
                 suboptimal += 1;
                 swap.drain(&mut gpu)?;
                 let new = Swap::new(&gpu, surface, &window, swap.swap)?;
