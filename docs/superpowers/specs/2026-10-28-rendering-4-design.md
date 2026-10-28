@@ -2,12 +2,13 @@
 
 **Date:** 2026-10-28
 
-**Status:** Draft for owner review; implementation has not started.
+**Status:** Approved by the owner on 2026-10-28, following review of draft commit
+`9adc270`. Implementation planning is authorized; implementation has not started.
 
 **Starting point:** `main` at `7023ccc`, after local integration of input 3b.
 
 **Builder check:** A fresh read-only reviewer reported no important unanswered
-planning questions on 2026-10-28. This is not owner approval of the design.
+planning questions on 2026-10-28; the owner subsequently approved the design.
 
 ## Intent
 
@@ -347,10 +348,10 @@ build tooling, fixture packaging and instrumentation. It must show byte bounds,
 allocation alignment and failure transitions before coding. Keep existing pinned
 libraries unless a demonstrated blocker requires an explicit change.
 
-Owner decisions are the inherited roadmap choices above. The detailed protocol,
-single outstanding upload, proposed resource limits and acceptance implementation
-are author proposals for review. No design approval, implementation, live-test
-authorization or performance pass is implied by writing this draft.
+The detailed protocol, single outstanding upload, resource limits and acceptance
+implementation originated as author proposals and are included in the owner's
+2026-10-28 design approval. No implementation, coordinated live-game test or
+performance pass is implied by that approval.
 
 ## Documentation checked
 
