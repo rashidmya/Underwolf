@@ -1,0 +1,18 @@
+[package]
+name = "uw-vk-layer"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+uw-frame-proto = { path = "../uw-frame-proto" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ash = "0.38"
+arc-swap = "1.9"
+libc = "0.2"
+uw-frame-channel = { path = "../uw-frame-channel" }
