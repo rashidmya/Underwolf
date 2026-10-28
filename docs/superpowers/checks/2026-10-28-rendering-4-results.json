@@ -2,244 +2,296 @@
   "schema_version": 1,
   "phase": "rendering 4",
   "status": "implemented_open_acceptance",
-  "implementation_head": "working tree after a72bcd0; source-file hashes identify tested code",
+  "implementation_head": "6de3aee7c44477e2af7e0e4dfe81873394c24ea0",
   "artifacts": {
-    "tools/render-fixture/package.json": "f292c01cd0ba60f3b2d6857ae8ead199da334f4ef374323df3b8bb033c2dd2a6",
-    "tools/render-fixture/package-lock.json": "10780bdb4c397f0782692af0cbffc79aba84fef9361117394b93efd0842f63d0",
-    "tools/render-fixture/tsconfig.json": "cff9ee06be1a35e967561b9738968d79281f78c12fec64ea0c08d1f71f807d76",
-    "tools/render-fixture/src/image-source.ts": "613454500add8e3291624472a5a12c6ed718dcbe22d1c51dd58dfbde49f68efb",
-    "tools/render-fixture/src/image-source.test.ts": "7b343c95dd2102a9bc98608a9a9db994aaec32ea425829b230a9e37e18a0cbf8",
-    "tools/render-fixture/src/image-contract.ts": "20cf6417ed6a37272354d68b958b3345c4b2c5db181b980e5ed728e19b48da51",
-    "tools/render-fixture/widgets/image-contract.html": "a395e04520050dabba14efbc9f2329f09656ccd498eba53504d8f02f0ed42f20",
+    "target/release/libuw_vk_layer.so": {
+      "sha256": "ce8cbdcd0143a8f9c2109763c343ce0613d89211e58bccbe61830379c84321f2",
+      "size": 874768
+    },
+    "tools/render-fixture/native/render_bridge.node": {
+      "sha256": "060c2ac199875fe05faadedd2ec78705d58513ef044cbbbe42b0d9feb0e4844c",
+      "size": 953368
+    },
+    "target/release/uw-inject": {
+      "sha256": "11286ab2df03ae4d9c424eac75a7fbd09de7313c78a65cf9858090089f2f945c",
+      "size": 1584712
+    },
+    "target/x86_64-pc-windows-gnu/release/uw-helper64.exe": {
+      "sha256": "5532d70fee5089da13fc15036d5d303485110b6fe06928df515084d1d98f6aff",
+      "size": 2664402
+    },
+    "target/x86_64-pc-windows-gnu/release/uw_bootstrap64.dll": {
+      "sha256": "8f9df3acf9fb60f59e31d1df383f0e1dd75110fac30bdbce4d818a37de33ddbc",
+      "size": 2353463
+    },
+    "target/x86_64-pc-windows-gnu/release/uw_overlay.dll": {
+      "sha256": "b7551fe1e8edd882af72a84f55091e0160483492725cc8b207a28ce209c7d400",
+      "size": 2974252
+    }
+  },
+  "source_files": {
+    "Cargo.lock": "a9297b0bd35f4785d656e8cbedc999dbde9ff145ff0d39be9c0ee79692a954e4",
+    "crates/uw-frame-channel/Cargo.toml": "963dba599f19b2456f4c5687f69d3ba10a7bc65a58495e5ee96b5f73e733edba",
+    "crates/uw-frame-channel/examples/channel_actor.rs": "1c324a0c452997a71e60e6b75660d5b81de570e66f62bf3a70142f1b5829cef4",
+    "crates/uw-frame-channel/src/budget.rs": "149d2501c96b041e228ab89d583149dc4c87af797fd2e2969fef4168b30459bc",
+    "crates/uw-frame-channel/src/channel.rs": "8c2f221806e76b98e1f53624f0541ff09c2cc777fc3622697e423aa4f3b89ea3",
+    "crates/uw-frame-channel/src/lib.rs": "14248308df6459db57851403b92c7f5573b82939cdeb9d287e20fcecfeebb89e",
+    "crates/uw-frame-channel/src/mapping.rs": "43667d993a657214537ccdfefbc63d3aadbdf3393f82a33d66fffd8365fa59c6",
+    "crates/uw-frame-channel/src/memory.rs": "58373676bbff3604ba2ffb05d596eef9b0f58cd8789b5a0397a37a6a65a87e2c",
+    "crates/uw-frame-channel/src/mutex.rs": "467edd71d68056ee851e51660aa09fee8458bf4539f89ab956248ffaf31513cd",
+    "crates/uw-frame-channel/src/session.rs": "a678e2fddea5c93aa9c0e1a910a49bccac7a8c7cca3571e80b88c3a349493810",
+    "crates/uw-frame-channel/tests/recovery.rs": "c6be042c7a8beeb996e1bc476775b807e46d27695b0f499131220becb857feba",
+    "crates/uw-frame-channel/tests/session.rs": "42aa0d25c4df13b0097bab8ea2b65603192abf0c0a3289f9040328729c33aff5",
+    "crates/uw-frame-channel/tests/shared.rs": "bcf57329aab55d8c205c483c3af1dd112ff5159ea6e3fc102705467c004b6e65",
+    "crates/uw-frame-channel/tests/support/actor.rs": "f27c8b25d660b2915dcef672095bbdaa6e41348294171b0028537f4048fc1921",
+    "crates/uw-frame-channel/tests/transport.rs": "aa27fc1775d96384ca9f806b57d1b772f64cff22c6607395ae76780bf6afdb2c",
     "crates/uw-frame-proto/Cargo.toml": "29e1c4eee2a527aa93f8733701485b9ae970f5a71d6c9a21e7e8901b31f47777",
+    "crates/uw-frame-proto/src/layout.rs": "5e4df7fc4347775a5bdefed4083dbbd21ac6690701842b6f9ea50818c343e164",
     "crates/uw-frame-proto/src/lib.rs": "4581151035457c293a189f40106a61f2bfdcd8edeff76183f8ac98e5625f09a5",
     "crates/uw-frame-proto/src/rect.rs": "55ebfd7acd8e2e723c62523a0b5a22616e25b5f8bc165c9fb60eb8d2602aa46c",
-    "crates/uw-frame-proto/src/layout.rs": "5e4df7fc4347775a5bdefed4083dbbd21ac6690701842b6f9ea50818c343e164",
     "crates/uw-frame-proto/src/state.rs": "18535ab0e7405cebe914259895d99c08e8021c0942be838789d7c54338caccfd",
     "crates/uw-frame-proto/src/wire.rs": "1e4206aaa7760f3e1a083dd555b06cfc3df6083059632b496625e9bdd6f7c415",
     "crates/uw-frame-proto/tests/damage.rs": "0b866be3fc113f27a7dca45cb465e9ddb43cde971fd9ab96bde36216da5c11b8",
-    "crates/uw-frame-proto/tests/state.rs": "4e2e3bae686ec2df06c7f1c932fcc37ee5492a825513db24cf5d8dc7b24c6eb4",
     "crates/uw-frame-proto/tests/pixels.rs": "a1d37b40eed0cf20533edf081c1a6a5e549af9dbe15b4d0b208efbb1421f36fd",
+    "crates/uw-frame-proto/tests/state.rs": "4e2e3bae686ec2df06c7f1c932fcc37ee5492a825513db24cf5d8dc7b24c6eb4",
     "crates/uw-frame-proto/tests/wire.rs": "79b1d27d3a32bc146526605ad20dde62906af79281ac3fb12c10aee010a18c55",
-    "crates/uw-frame-channel/Cargo.toml": "963dba599f19b2456f4c5687f69d3ba10a7bc65a58495e5ee96b5f73e733edba",
-    "crates/uw-frame-channel/src/lib.rs": "14248308df6459db57851403b92c7f5573b82939cdeb9d287e20fcecfeebb89e",
-    "crates/uw-frame-channel/src/budget.rs": "149d2501c96b041e228ab89d583149dc4c87af797fd2e2969fef4168b30459bc",
-    "crates/uw-frame-channel/src/mapping.rs": "43667d993a657214537ccdfefbc63d3aadbdf3393f82a33d66fffd8365fa59c6",
-    "crates/uw-frame-channel/src/mutex.rs": "467edd71d68056ee851e51660aa09fee8458bf4539f89ab956248ffaf31513cd",
-    "crates/uw-frame-channel/src/channel.rs": "8c2f221806e76b98e1f53624f0541ff09c2cc777fc3622697e423aa4f3b89ea3",
-    "crates/uw-frame-channel/src/session.rs": "a678e2fddea5c93aa9c0e1a910a49bccac7a8c7cca3571e80b88c3a349493810",
-    "crates/uw-frame-channel/src/memory.rs": "58373676bbff3604ba2ffb05d596eef9b0f58cd8789b5a0397a37a6a65a87e2c",
-    "crates/uw-frame-channel/tests/shared.rs": "bcf57329aab55d8c205c483c3af1dd112ff5159ea6e3fc102705467c004b6e65",
-    "crates/uw-frame-channel/tests/transport.rs": "aa27fc1775d96384ca9f806b57d1b772f64cff22c6607395ae76780bf6afdb2c",
-    "crates/uw-frame-channel/tests/recovery.rs": "c6be042c7a8beeb996e1bc476775b807e46d27695b0f499131220becb857feba",
-    "crates/uw-frame-channel/tests/session.rs": "42aa0d25c4df13b0097bab8ea2b65603192abf0c0a3289f9040328729c33aff5",
-    "crates/uw-frame-channel/examples/channel_actor.rs": "1c324a0c452997a71e60e6b75660d5b81de570e66f62bf3a70142f1b5829cef4",
-    "crates/uw-frame-channel/tests/support/actor.rs": "f27c8b25d660b2915dcef672095bbdaa6e41348294171b0028537f4048fc1921",
-    "crates/uw-render-bridge/build.rs": "58e2c0871795a062f6a8c71291f794b753c048c71b9678a1eab8f57e1b1dcf67",
-    "crates/uw-render-bridge/src/lib.rs": "16a1594e14fb3598d50dfdfd1a16061f0288be2a0458662d14ef8dd6554cc93e",
-    "crates/uw-render-bridge/src/values.rs": "a183c128e5a2e8f110c694b257b8ba0ad09d17185808d3029e49af298ada0552",
-    "crates/uw-render-bridge/src/producer.rs": "18bad276578a010080e3ac3a45b623182bd483ef700505efd0ab4fc68db3633b",
-    "crates/uw-render-bridge/src/node.rs": "7a245769901e658fdeadd96ed6eb5a34fcb0e0482b9821db9ea0020b5c1ef513",
-    "crates/uw-render-bridge/tests/values.rs": "6b7be2db4c1434f05e5d9ecf4e577504b99a99ea80e1946b6052ee597880bb32",
-    "crates/uw-render-bridge/tests/producer.rs": "b7eefe724c28e9cc9e8a65a13e333a38b3a97320c8dd0f0a3e13058166949b71",
-    "crates/uw-render-bridge/examples/addon_consumer.rs": "8046b3542bd40e2b0c8c56fcdfc7a08b68521445ad61f0e3a36e56fcf83098f9",
     "crates/uw-render-bridge/Cargo.toml": "2980fa9a2c0bd65ad20076e3af390ed4f8fef53d775d5924d23c2e1b4f41400f",
-    "tools/render-fixture/src/bridge-types.ts": "31b2971123b871014dfec8bf16c6224d31c7229947aaba41ee37782fbc065f1e",
-    "tools/render-fixture/src/producer.ts": "da3cad72ee466239900ed63bfd9347077ac1ec22d22d060a66157d28d9635fb4",
-    "tools/render-fixture/src/producer.test.ts": "ffded1c9b6eed2e32bb6e68c958bccd6fec53d2d456fe777bd52cc742af041f6",
-    "tools/render-fixture/src/addon-smoke.ts": "33fd7842ac71c7eebf02651a0964c5f5f142d270642c79ba7114b9c43f588317",
-    "tools/render-fixture/scripts/build-native.cjs": "ab7ca2306db135c2c9d25e400d4328777900fafb5fd455760b5af9be49456613",
+    "crates/uw-render-bridge/build.rs": "58e2c0871795a062f6a8c71291f794b753c048c71b9678a1eab8f57e1b1dcf67",
+    "crates/uw-render-bridge/examples/addon_consumer.rs": "74687b82b048871cb64f1f70d0d2417e7ca7214db06a70aad19d4c3be25425b9",
+    "crates/uw-render-bridge/src/lib.rs": "16a1594e14fb3598d50dfdfd1a16061f0288be2a0458662d14ef8dd6554cc93e",
+    "crates/uw-render-bridge/src/node.rs": "7a245769901e658fdeadd96ed6eb5a34fcb0e0482b9821db9ea0020b5c1ef513",
+    "crates/uw-render-bridge/src/producer.rs": "18bad276578a010080e3ac3a45b623182bd483ef700505efd0ab4fc68db3633b",
+    "crates/uw-render-bridge/src/values.rs": "a183c128e5a2e8f110c694b257b8ba0ad09d17185808d3029e49af298ada0552",
+    "crates/uw-render-bridge/tests/producer.rs": "b7eefe724c28e9cc9e8a65a13e333a38b3a97320c8dd0f0a3e13058166949b71",
+    "crates/uw-render-bridge/tests/values.rs": "6b7be2db4c1434f05e5d9ecf4e577504b99a99ea80e1946b6052ee597880bb32",
     "crates/uw-vk-layer/Cargo.toml": "9ff76fc4900d653ec79223ce233cace8b9d356d8ec87dffc8208d59012377e85",
     "crates/uw-vk-layer/build.rs": "6eac8a966ab2213a76284feb07bdac9f795ef1def59ec682faa034e51a3341db",
-    "crates/uw-vk-layer/underwolf_layer.json.in": "54c84b7fcfeadb0673ed41dde8c5e0fb74cf112bf76d6efce2001bb22606c3b0",
-    "crates/uw-vk-layer/src/lib.rs": "69d089706f19f559a46671e310bb02dabeb5dbc9c40f100c722b16acf162b69e",
-    "crates/uw-vk-layer/src/policy.rs": "03f41e8f6b6a74d3b6185bbb966f222190136e16fc7b2ff9cda8be7cf8d20442",
-    "crates/uw-vk-layer/src/loader_abi.rs": "8c4ebcf81cb724971651870aafc49fd21ce76b363db823187eed692896cc4bdb",
-    "crates/uw-vk-layer/src/config.rs": "84324e29f243a388861c05e42eedbd4daad19841c5c696f4dfefcb62e40f17f4",
-    "crates/uw-vk-layer/src/dispatch.rs": "3f3e21fc58bb52d866299e592cf6151f6ad1f3012c6bd698a72f40da7ab3b4b2",
-    "crates/uw-vk-layer/src/resources.rs": "ff6c54068186112e536dfd78cf1df85f1c89c178a34faeba43e20e73e9f46e2d",
-    "crates/uw-vk-layer/src/lifetime.rs": "c8bd12b40096452de2adab884f7008f4f58c7e3352f6e034a9144d9e6eab43a6",
-    "crates/uw-vk-layer/src/draw.rs": "d8dbeab86af00004752c1a384a7eb65f1316fb8af1cd03afae2452210d88d25c",
-    "crates/uw-vk-layer/src/compositor.rs": "1384c698d7da6c3de641bf3db548927708e417344ae3ee94b6471f7a2759639e",
+    "crates/uw-vk-layer/examples/gpu_probe.rs": "91b7919120a23c150905415e9945d7f6ca0125e38ff08257cf4c670ca92204a3",
+    "crates/uw-vk-layer/examples/render_probe.rs": "7b08a81d4a2f8b6d513aa1790a643a7ce5f66d9e21cc76a1f13c09b0f7514734",
+    "crates/uw-vk-layer/shaders/quad.frag": "601a04a2c08f336e601517fc5c229ea547dd122eb545758cf539b9e02ba08b15",
+    "crates/uw-vk-layer/shaders/quad.vert": "8c9c047ddefab6d5079d043154fac6af80c91a494930d6e0f95dd175434884ba",
+    "crates/uw-vk-layer/shaders/tex.frag": "491343b0a478cac2111bd07e34d70a26e1be833912d4ec9ccabfec8c074cd39b",
     "crates/uw-vk-layer/src/client.rs": "9cd67b4e0bdce3ad8cad0b77b3cac79bce2af3d48c5eaeb57753074530b16383",
-    "crates/uw-vk-layer/tests/present.rs": "460ca50d8f698f58cec1104fb72a27d39f65d33e50afdc2329e91332f830a2d8",
+    "crates/uw-vk-layer/src/compositor.rs": "1384c698d7da6c3de641bf3db548927708e417344ae3ee94b6471f7a2759639e",
+    "crates/uw-vk-layer/src/config.rs": "84324e29f243a388861c05e42eedbd4daad19841c5c696f4dfefcb62e40f17f4",
+    "crates/uw-vk-layer/src/dispatch.rs": "760ed1a450ddf5ebf52666fa7cf1e78849645fb1a242b3bf67275b18a173c446",
+    "crates/uw-vk-layer/src/draw.rs": "d8dbeab86af00004752c1a384a7eb65f1316fb8af1cd03afae2452210d88d25c",
+    "crates/uw-vk-layer/src/hooks/device.rs": "55e09fbbaa31a8105cdd37e87e07910d565a4ec345baf857160e37d03299d1d7",
+    "crates/uw-vk-layer/src/hooks/instance.rs": "33bf0b4473676188b3566284528ff1f62be366b537a04b1bd7065ddaa0b62953",
+    "crates/uw-vk-layer/src/hooks/mod.rs": "9e95d1e5eb6c65974fbfc0b47d71a0b3958491552aa9a4da4bf566854cb0dd28",
+    "crates/uw-vk-layer/src/hooks/present.rs": "9a1800cc05af9471372306ae0bdb16b25cafb6bcce7e02ceb54cd01c7160ffb7",
+    "crates/uw-vk-layer/src/hooks/swapchain.rs": "f25e298ef8e38e8cbc34b0e71308c925e69ed6f609b11817042f7a106b59a302",
+    "crates/uw-vk-layer/src/lib.rs": "88c57d02e12ddcb7aae36b9c945022c38624173b3ab5667fda80fa2e0e39cd2f",
+    "crates/uw-vk-layer/src/lifetime.rs": "c8bd12b40096452de2adab884f7008f4f58c7e3352f6e034a9144d9e6eab43a6",
+    "crates/uw-vk-layer/src/loader_abi.rs": "8c4ebcf81cb724971651870aafc49fd21ce76b363db823187eed692896cc4bdb",
+    "crates/uw-vk-layer/src/policy.rs": "03f41e8f6b6a74d3b6185bbb966f222190136e16fc7b2ff9cda8be7cf8d20442",
+    "crates/uw-vk-layer/src/resources.rs": "ff6c54068186112e536dfd78cf1df85f1c89c178a34faeba43e20e73e9f46e2d",
+    "crates/uw-vk-layer/src/trace.rs": "dc1d57cc7e6128e93c26684fbb4a4d9fe5fadc5d7b75ea02b6ac2392131e9dd0",
+    "crates/uw-vk-layer/tests/gpu.rs": "b39ea908414201a0a5df2c361f9f35ca7625c48276d010dae4c67678343333ec",
     "crates/uw-vk-layer/tests/lifetime.rs": "cdd2baf32fe3776a4830b8769e2c02510fc7dac0cca7c1af15c2bf0618d1fc11",
     "crates/uw-vk-layer/tests/loader.rs": "3176d202d30aaecc105e2913a1d97f53dba90969d777c2d32ffd6d102747d7db",
-    "crates/uw-vk-layer/shaders/quad.vert": "8c9c047ddefab6d5079d043154fac6af80c91a494930d6e0f95dd175434884ba",
-    "crates/uw-vk-layer/shaders/quad.frag": "601a04a2c08f336e601517fc5c229ea547dd122eb545758cf539b9e02ba08b15",
-    "crates/uw-vk-layer/shaders/tex.frag": "491343b0a478cac2111bd07e34d70a26e1be833912d4ec9ccabfec8c074cd39b",
-    "crates/uw-vk-layer/src/hooks/mod.rs": "9e95d1e5eb6c65974fbfc0b47d71a0b3958491552aa9a4da4bf566854cb0dd28",
-    "crates/uw-vk-layer/src/hooks/instance.rs": "33bf0b4473676188b3566284528ff1f62be366b537a04b1bd7065ddaa0b62953",
-    "crates/uw-vk-layer/src/hooks/device.rs": "3e0b12c5a1417f657cfe9c283e601a19076743c090f6e50e82ebb5b6dbcd4df0",
-    "crates/uw-vk-layer/src/hooks/swapchain.rs": "f25e298ef8e38e8cbc34b0e71308c925e69ed6f609b11817042f7a106b59a302",
-    "crates/uw-vk-layer/src/hooks/present.rs": "12010d0eb726b93c29a992a5dd412670fc4513b0e195a4115a20b1ef7c4e1383",
-    "Cargo.lock": "a9297b0bd35f4785d656e8cbedc999dbde9ff145ff0d39be9c0ee79692a954e4",
-    "crates/uw-vk-layer/tests/gpu.rs": "b39ea908414201a0a5df2c361f9f35ca7625c48276d010dae4c67678343333ec",
-    "crates/uw-vk-layer/examples/gpu_probe.rs": "91b7919120a23c150905415e9945d7f6ca0125e38ff08257cf4c670ca92204a3",
-    "crates/uw-vk-layer/examples/render_probe.rs": "425e55eda8a2ca578de8d9beecd56d1cd8f76df7237b92837ecccd6e4377ba4b",
+    "crates/uw-vk-layer/tests/present.rs": "460ca50d8f698f58cec1104fb72a27d39f65d33e50afdc2329e91332f830a2d8",
     "crates/uw-vk-layer/tests/support/gpu.rs": "8bfdd9919947e246e66a3d092163fc013f584cf01e455edd134ba3bfc350b6e1",
     "crates/uw-vk-layer/tests/support/x11.rs": "ed5e509a72349596266fad1f515525b9e1ea075c41e783619c66f70bb8e92bb2",
-    "scripts/render-4-check.py": "442fa0045f746066fda44e72f32b13b93255865a19cdecb2e2d33b86b9fa445a",
-    "tools/render-fixture/src/wsi-smoke.ts": "a1428bfabe21a7108899cbe7b4730f7f1db4f2cc6a1e774295f6af4c670f6550"
+    "crates/uw-vk-layer/underwolf_layer.json.in": "54c84b7fcfeadb0673ed41dde8c5e0fb74cf112bf76d6efce2001bb22606c3b0",
+    "scripts/render-4-check.py": "fa7354c3198d1dc056d5199c6535bd68bb3f5494db58cf940e675fb5fbf837b2",
+    "tools/render-fixture/package-lock.json": "10780bdb4c397f0782692af0cbffc79aba84fef9361117394b93efd0842f63d0",
+    "tools/render-fixture/scripts/build-native.cjs": "ab7ca2306db135c2c9d25e400d4328777900fafb5fd455760b5af9be49456613",
+    "tools/render-fixture/src/addon-smoke.ts": "aff771b3e8dde54df5724f2e25d337a83e7f8e354dde173e8dbb4050ae2c9a55",
+    "tools/render-fixture/src/bridge-types.ts": "31b2971123b871014dfec8bf16c6224d31c7229947aaba41ee37782fbc065f1e",
+    "tools/render-fixture/src/host-smoke.ts": "9b570df1796620bd86205475c6931f08d300f99d59fa4bd988ac03d62689c863",
+    "tools/render-fixture/src/image-contract.ts": "20cf6417ed6a37272354d68b958b3345c4b2c5db181b980e5ed728e19b48da51",
+    "tools/render-fixture/src/image-source.test.ts": "7b343c95dd2102a9bc98608a9a9db994aaec32ea425829b230a9e37e18a0cbf8",
+    "tools/render-fixture/src/image-source.ts": "60ecbc8941c1b186860434f8a89c3dd3ac8eab72f33072988f4f7adeb06ad097",
+    "tools/render-fixture/src/input-consumer.test.ts": "88e3ebb2c6f8cd43334932a9cccb29eeb33682db9d365bdca79b2304cbbd4ee4",
+    "tools/render-fixture/src/input-consumer.ts": "d7f8c7a3e4eb77c14ca139071ca0989c89f9e8db18e7eeda774ef66a6a565056",
+    "tools/render-fixture/src/input-session.test.ts": "b66cfe09375c786f3b0b6f4fdebf4166091cee25dfd6335d6ddbdfa3b9d11ca8",
+    "tools/render-fixture/src/input-session.ts": "93e1b1305ea8466408cc14ad7a2842bb8c93d35a61948e5b4d29e213a719da06",
+    "tools/render-fixture/src/layout.test.ts": "3263f58b684cb271faf9e341712ebcca81e082768e5d865c09948664ea0a5bba",
+    "tools/render-fixture/src/layout.ts": "e24b4fe2f0a9475c1726af7850c98cc93f3186904a1c45d4b0491ed7c7fd3ed0",
+    "tools/render-fixture/src/main.ts": "2d2c9edf6d40b1fa8f0e6afd06130f0a2b2239eb7deacfe31a164d8db676b6b7",
+    "tools/render-fixture/src/producer.test.ts": "a5ba74fdee5feaf70cfff14d1f3776e74a7ce1db871be887e7089fc475fd83e8",
+    "tools/render-fixture/src/producer.ts": "c2cd580055534d973a774c3d76506c84c0b15cd0f14f338946ce3bfdd6910c17",
+    "tools/render-fixture/src/readiness.test.ts": "ec7d3fc1ebc44988031e1fd66637555af16df08819e780dffd4d61553f10575c",
+    "tools/render-fixture/src/readiness.ts": "83f5d3d7e7156ef0ed0a1c21beede5eafe56e93a079f7192991cce7f7de957a5",
+    "tools/render-fixture/src/renderer-smoke.ts": "b64028dfc11beaff58ff817168099dc2bf27cb5b150bd777f402462b66ea5d17",
+    "tools/render-fixture/src/surface.ts": "fb8a23997b38120c3e98fe960a1cc5be1a6556723851e9bfe1661407e0db3c1b",
+    "tools/render-fixture/src/wsi-smoke.ts": "a1428bfabe21a7108899cbe7b4730f7f1db4f2cc6a1e774295f6af4c670f6550",
+    "tools/render-fixture/widgets/animated.html": "23572c6b2f0d3c5415e19f251790b8353047e085ccc8d56cbf168d4bb5d72daa",
+    "tools/render-fixture/widgets/image-contract.html": "a395e04520050dabba14efbc9f2329f09656ccd498eba53504d8f02f0ed42f20",
+    "tools/render-fixture/widgets/input-surface.js": "272fd4d4e6ea80bd46e5ed293b88d246e857a3cb3c11f263831106edb7d34d46",
+    "tools/render-fixture/widgets/input.html": "38c7ad929ea3a5e905f641f48bff96f2c301ff6a81b80f7177ec072068053c39",
+    "tools/render-fixture/widgets/small-damage.html": "3a822631744604bc024224d686585af7ecb9db346a60fb80d0ca91e3ba20f3ee",
+    "tools/render-fixture/widgets/static.html": "f71b58bf7c1c29a5d6c0f215b29c6284ebc81e0bbd3f19559cfe414a19296ec7",
+    "scripts/render-4-report.py": "187245826c1cc9d1d12004c0fa0ffcbbd7bb44edc60097a687fd407d6517ab6b",
+    "scripts/tests/test_render_4_report.py": "9b430973c466897fe9fe3bcee97b0cbd2e16926e58eba206797b4d550de76502"
   },
   "environment": {
     "device": "NVIDIA GeForce RTX 4090",
     "driver": "615.78.08",
     "device_uuid": "08953a99-0737-914c-b467-47c14591ad11",
-    "source": "vulkaninfo --text",
-    "memory_host": true,
-    "swapchain_maintenance1_extension": true,
-    "swapchain_maintenance1_feature": true,
-    "host_pointer_alignment": 4096,
-    "host_visible_coherent": true,
-    "baseline": {
-      "passed": 711,
-      "failed": 0,
-      "ignored": 92
-    },
-    "scope": "capability inventory only; no GPU import or live game verification"
+    "desktop": "KDE / Wayland with Xwayland (:0)",
+    "electron": "44.9.1",
+    "chromium": "152.0.7977.167",
+    "validation": "1.4.363",
+    "image_mode": "retained-full",
+    "scales": [
+      1,
+      1.5
+    ]
   },
   "gates": {
-    "baseline": {
+    "automated": {
       "status": "pass",
-      "passed": 711,
-      "failed": 0,
-      "ignored": 92,
-      "log": ".superpowers/sdd/2026-10-28-rendering-4/baseline.log"
-    },
-    "capability_inventory": {
-      "status": "pass",
-      "scope": "extension/feature inventory, not actual GPU import or compositing",
-      "raw": "target/render-4/preflight/"
-    },
-    "pixel_source": {
-      "status": "pass",
-      "passed": 12,
-      "log": ".superpowers/sdd/2026-10-28-rendering-4/task-1-green.log"
+      "source_head": "78d2cb823126caf9934ddaf91bfd0991c2275edf",
+      "raw": [
+        "target/render-4/automated-report-final/results.json"
+      ],
+      "scope": "16 production/retained/format/report commands; portable tests do not imply GPU/live acceptance",
+      "command_count": 16,
+      "workspace": {
+        "passed": 776,
+        "failed": 0,
+        "ignored": 97
+      },
+      "fixture_cases": 34,
+      "report_cases": 8,
+      "retained_input_cases": 8,
+      "retained_routing_cases": 10
     },
     "electron_images": {
       "status": "pass",
-      "electron": "44.9.1",
-      "modes": [
-        "software",
-        "display GPU compositing enabled"
+      "source_head": "6de3aee7c44477e2af7e0e4dfe81873394c24ea0",
+      "raw": [
+        "target/render-4/production-images/qualification.json",
+        "target/render-4/automated-report-final/images/qualification.json"
       ],
-      "scales": [
-        1,
-        1.5
-      ],
-      "selected_image_mode": "retained-full",
-      "reports": [
-        "target/render-4/image-contract/software/qualification.json",
-        "target/render-4/image-contract/display/qualification.json"
-      ],
-      "gc_forced": false,
-      "scope": "isolated current-driver snapshots only; not renderer transport, input integration or live/performance acceptance"
-    },
-    "transport": {
-      "status": "pass",
-      "native_cases": 20,
-      "harness_entries_ignored": 1,
-      "windows_all_targets": "pass",
-      "strict_clippy": "pass",
-      "workspace": {
-        "passed": 744,
-        "failed": 0,
-        "ignored": 93
-      },
-      "scope": "native CPU shared-memory/IPC ownership only; no GPU import/compositing or live game claim",
-      "logs": ".superpowers/sdd/2026-10-28-rendering-4/task-3-*.log"
+      "scope": "normal display reports GPU compositing enabled; Xvfb may fall back to software; no forced-GC evidence"
     },
     "vulkan_rendering": {
       "status": "pass",
+      "source_head": "1bdd318221fce6735f2a9ec39da8740a8bb88f1d",
+      "raw": [
+        "target/render-4/gpu-drain-fixed/results.json"
+      ],
+      "scope": "owned real GPU/WSI probes only; latest WSI probe CPU-fences its rendering, layer retains actual binary/present-fence path; excludes live game/input/performance",
       "gpu_cases": 4,
-      "cpu_cases_distinct": 20,
       "wsi_resize_generations": 100,
-      "wsi_reconnects": 101,
+      "reconnects": 101,
+      "host_fd_max_delta": 0,
       "validation_errors": 0,
-      "validation_version": "1.4.363",
-      "host_fd_delta": 0,
-      "cpu_bytes": "57236",
-      "gpu_bytes": "57232",
-      "unsubmitted_abandoned_cpu_bytes": "4",
       "steady_state": {
         "imports": 0,
         "images": 0,
         "descriptors": 0,
+        "gpuBytes": "57232",
+        "gpuBudget": 0,
+        "sharedBudget": 0,
         "mappings": 0,
-        "gpu_budget": 0,
-        "shared_budget": 0,
-        "current_swapchain_frames": 3
-      },
-      "presentation_retirement": "observed separate present fences",
-      "scope": "owned RTX 4090 GPU/WSI probes and real producer/addon; excludes live input, live game and whole-overlay performance",
-      "raw": "target/render-4/gpu/results.json",
-      "strict_clippy": "pass",
-      "windows_all_targets": "pass"
+        "frames": 3,
+        "pendingFrames": 0,
+        "inFlightUploads": 0,
+        "activeWidgets": 0,
+        "retiredWidgets": 0,
+        "available": true
+      }
+    },
+    "game_wait_chain": {
+      "status": "pass",
+      "source_head": "4c22ce7ef54494b9c85673f5df152348a2c79931",
+      "raw": [
+        "target/render-4/gpu-acceptance/results.json"
+      ],
+      "scope": "earlier owned WSI run used game wait semaphores; exact same production layer binary as latest probe; final bounded drain was later replaced because reacquisition is not fair"
     },
     "input_integration": {
-      "status": "pending"
+      "status": "pass",
+      "source_head": "6de3aee7c44477e2af7e0e4dfe81873394c24ea0",
+      "raw": [
+        "target/render-4/renderer/results.json",
+        "target/render-4/gpu-drain-fixed/host/results.json"
+      ],
+      "scope": "actual Electron application/cancellation/readiness and full main+layer with an owned protocol input peer; production DLL/helper live acceptance remains pending",
+      "native_chromium_injection": false,
+      "automatic_recapture": false
+    },
+    "trace_instrumentation": {
+      "status": "pass",
+      "source_head": "6de3aee7c44477e2af7e0e4dfe81873394c24ea0",
+      "raw": [
+        "target/render-4/gpu-drain-fixed/results.json"
+      ],
+      "scope": "real inactive-layer trace and active three-widget trace; bounded queue, dropped traces invalid"
+    },
+    "build_and_install_tools": {
+      "status": "pass",
+      "source_head": "6de3aee7c44477e2af7e0e4dfe81873394c24ea0",
+      "raw": [
+        ".superpowers/sdd/2026-10-28-rendering-4/task-8-build.log"
+      ],
+      "scope": "production artifacts built; install/update/restore checked only in owned temporary directories; no user installation"
     },
     "live": {
-      "status": "pending"
+      "status": "pending",
+      "source_head": "6de3aee7c44477e2af7e0e4dfe81873394c24ea0",
+      "raw": [],
+      "scope": "requires coordinated game session and owner observations of visuals, actual production input and recovery"
     },
     "performance": {
-      "status": "pending"
+      "status": "pending",
+      "source_head": "6de3aee7c44477e2af7e0e4dfe81873394c24ea0",
+      "raw": [],
+      "scope": "fresh uninjected A and complete-overlay B; normal/max, three alternating 60-second pairs, >=5 seconds full-workload warmup, both metrics <=3%"
     },
-    "portable_protocol": {
-      "status": "pass",
-      "passed": 13,
-      "schedules": 200,
-      "windows_all_targets": "pass",
-      "strict_clippy": "pass",
-      "workspace": {
-        "passed": 724,
-        "failed": 0,
-        "ignored": 92
-      },
-      "scope": "portable frame state/codec only; not cross-process or GPU behavior",
-      "logs": ".superpowers/sdd/2026-10-28-rendering-4/task-2-*.log"
+    "transport_comparison": {
+      "status": "pending",
+      "source_head": "6de3aee7c44477e2af7e0e4dfe81873394c24ea0",
+      "raw": [],
+      "scope": "same-build full/dirty and sparse/full-damage measurements"
     },
-    "producer_bridge": {
-      "status": "pass",
-      "rust_cases": 7,
-      "fixture_cases": 18,
-      "addon_generations": 100,
-      "exact_sequence": "9007199254740993",
-      "cpu_bytes": "3200",
-      "windows_all_targets": "pass",
-      "strict_clippy": "pass",
-      "scope": "native CPU producer/addon and bounded publisher; no GPU submission or live input acceptance",
-      "logs": ".superpowers/sdd/2026-10-28-rendering-4/task-4-*.log"
+    "gpu_bound": {
+      "status": "unavailable",
+      "source_head": "6de3aee7c44477e2af7e0e4dfe81873394c24ea0",
+      "raw": [],
+      "scope": "no coordinated, verified GPU-bound game workload has been measured"
     },
-    "vulkan_layer": {
-      "status": "pass",
-      "cpu_cases": 17,
-      "release": "pass",
-      "windows_all_targets": "pass",
-      "strict_clippy": "pass",
-      "scope": "loader/driver mocks, CPU shared state and bounded retirement; actual import/compositing/WSI remain pending",
-      "logs": ".superpowers/sdd/2026-10-28-rendering-4/task-5-*.log"
+    "amd": {
+      "status": "unavailable",
+      "source_head": "6de3aee7c44477e2af7e0e4dfe81873394c24ea0",
+      "raw": [],
+      "scope": "distinct before-release gate; no AMD hardware available"
+    },
+    "whole_branch_review": {
+      "status": "pending",
+      "source_head": "6de3aee7c44477e2af7e0e4dfe81873394c24ea0",
+      "raw": [],
+      "scope": "fresh reviewer required before integration"
     }
   },
   "deferred_items": [
     "GameInput adapter remains deferred under 3b",
-    "AMD and GPU-bound coverage unavailable on this machine"
+    "AMD coverage required before release",
+    "No Windows renderer, generic app runtime, persistent layout or native Chromium input injection claim"
   ],
   "integration": {
     "merged": false,
     "pushed": false
   },
-  "completed_tasks": [
+  "completed_implementation_tasks": [
     1,
     2,
     3,
     4,
     5,
-    6
-  ],
-  "pending_tasks": [
+    6,
     7,
     8
+  ],
+  "pending_acceptance": [
+    "live",
+    "performance",
+    "transport_comparison",
+    "gpu_bound",
+    "amd"
   ]
 }
