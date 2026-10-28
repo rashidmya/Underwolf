@@ -10,7 +10,17 @@
     "tools/render-fixture/src/image-source.ts": "613454500add8e3291624472a5a12c6ed718dcbe22d1c51dd58dfbde49f68efb",
     "tools/render-fixture/src/image-source.test.ts": "7b343c95dd2102a9bc98608a9a9db994aaec32ea425829b230a9e37e18a0cbf8",
     "tools/render-fixture/src/image-contract.ts": "20cf6417ed6a37272354d68b958b3345c4b2c5db181b980e5ed728e19b48da51",
-    "tools/render-fixture/widgets/image-contract.html": "a395e04520050dabba14efbc9f2329f09656ccd498eba53504d8f02f0ed42f20"
+    "tools/render-fixture/widgets/image-contract.html": "a395e04520050dabba14efbc9f2329f09656ccd498eba53504d8f02f0ed42f20",
+    "crates/uw-frame-proto/Cargo.toml": "29e1c4eee2a527aa93f8733701485b9ae970f5a71d6c9a21e7e8901b31f47777",
+    "crates/uw-frame-proto/src/lib.rs": "4581151035457c293a189f40106a61f2bfdcd8edeff76183f8ac98e5625f09a5",
+    "crates/uw-frame-proto/src/rect.rs": "55ebfd7acd8e2e723c62523a0b5a22616e25b5f8bc165c9fb60eb8d2602aa46c",
+    "crates/uw-frame-proto/src/layout.rs": "5e4df7fc4347775a5bdefed4083dbbd21ac6690701842b6f9ea50818c343e164",
+    "crates/uw-frame-proto/src/state.rs": "18535ab0e7405cebe914259895d99c08e8021c0942be838789d7c54338caccfd",
+    "crates/uw-frame-proto/src/wire.rs": "1e4206aaa7760f3e1a083dd555b06cfc3df6083059632b496625e9bdd6f7c415",
+    "crates/uw-frame-proto/tests/damage.rs": "0b866be3fc113f27a7dca45cb465e9ddb43cde971fd9ab96bde36216da5c11b8",
+    "crates/uw-frame-proto/tests/state.rs": "4e2e3bae686ec2df06c7f1c932fcc37ee5492a825513db24cf5d8dc7b24c6eb4",
+    "crates/uw-frame-proto/tests/pixels.rs": "a1d37b40eed0cf20533edf081c1a6a5e549af9dbe15b4d0b208efbb1421f36fd",
+    "crates/uw-frame-proto/tests/wire.rs": "79b1d27d3a32bc146526605ad20dde62906af79281ac3fb12c10aee010a18c55"
   },
   "environment": {
     "device": "NVIDIA GeForce RTX 4090",
@@ -80,6 +90,20 @@
     },
     "performance": {
       "status": "pending"
+    },
+    "portable_protocol": {
+      "status": "pass",
+      "passed": 13,
+      "schedules": 200,
+      "windows_all_targets": "pass",
+      "strict_clippy": "pass",
+      "workspace": {
+        "passed": 724,
+        "failed": 0,
+        "ignored": 92
+      },
+      "scope": "portable frame state/codec only; not cross-process or GPU behavior",
+      "logs": ".superpowers/sdd/2026-10-28-rendering-4/task-2-*.log"
     }
   },
   "deferred_items": [
@@ -89,5 +113,17 @@
   "integration": {
     "merged": false,
     "pushed": false
-  }
+  },
+  "completed_tasks": [
+    1,
+    2
+  ],
+  "pending_tasks": [
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+  ]
 }
