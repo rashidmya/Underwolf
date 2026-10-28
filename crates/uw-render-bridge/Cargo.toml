@@ -1,0 +1,24 @@
+[package]
+name = "uw-render-bridge"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[features]
+node = ["dep:napi", "dep:napi-derive"]
+
+[dependencies]
+uw-frame-proto = { path = "../uw-frame-proto" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+uw-frame-channel = { path = "../uw-frame-channel" }
+libc = "0.2"
+napi = { version = "3", optional = true }
+napi-derive = { version = "3", optional = true }
+
+[build-dependencies]
+napi-build = "2"

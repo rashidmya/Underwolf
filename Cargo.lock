@@ -690,6 +690,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "uw-render-bridge"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "napi",
+ "napi-build",
+ "napi-derive",
+ "uw-frame-channel",
+ "uw-frame-proto",
+]
+
+[[package]]
 name = "uw-spike-common"
 version = "0.0.0"
 

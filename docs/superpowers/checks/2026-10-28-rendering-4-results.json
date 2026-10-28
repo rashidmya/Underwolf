@@ -2,9 +2,9 @@
   "schema_version": 1,
   "phase": "rendering 4",
   "status": "implemented_open_acceptance",
-  "implementation_head": "working tree after ba549b9; source-file hashes identify tested code",
+  "implementation_head": "working tree after 76d372d; source-file hashes identify tested code",
   "artifacts": {
-    "tools/render-fixture/package.json": "4a2cc72b1170d2c037f7491b4be963b8182fa8b3da831cb448cb625cf4133bc5",
+    "tools/render-fixture/package.json": "f292c01cd0ba60f3b2d6857ae8ead199da334f4ef374323df3b8bb033c2dd2a6",
     "tools/render-fixture/package-lock.json": "10780bdb4c397f0782692af0cbffc79aba84fef9361117394b93efd0842f63d0",
     "tools/render-fixture/tsconfig.json": "cff9ee06be1a35e967561b9738968d79281f78c12fec64ea0c08d1f71f807d76",
     "tools/render-fixture/src/image-source.ts": "613454500add8e3291624472a5a12c6ed718dcbe22d1c51dd58dfbde49f68efb",
@@ -34,7 +34,21 @@
     "crates/uw-frame-channel/tests/recovery.rs": "c6be042c7a8beeb996e1bc476775b807e46d27695b0f499131220becb857feba",
     "crates/uw-frame-channel/tests/session.rs": "42aa0d25c4df13b0097bab8ea2b65603192abf0c0a3289f9040328729c33aff5",
     "crates/uw-frame-channel/examples/channel_actor.rs": "1c324a0c452997a71e60e6b75660d5b81de570e66f62bf3a70142f1b5829cef4",
-    "crates/uw-frame-channel/tests/support/actor.rs": "f27c8b25d660b2915dcef672095bbdaa6e41348294171b0028537f4048fc1921"
+    "crates/uw-frame-channel/tests/support/actor.rs": "f27c8b25d660b2915dcef672095bbdaa6e41348294171b0028537f4048fc1921",
+    "crates/uw-render-bridge/build.rs": "58e2c0871795a062f6a8c71291f794b753c048c71b9678a1eab8f57e1b1dcf67",
+    "crates/uw-render-bridge/src/lib.rs": "16a1594e14fb3598d50dfdfd1a16061f0288be2a0458662d14ef8dd6554cc93e",
+    "crates/uw-render-bridge/src/values.rs": "a183c128e5a2e8f110c694b257b8ba0ad09d17185808d3029e49af298ada0552",
+    "crates/uw-render-bridge/src/producer.rs": "18bad276578a010080e3ac3a45b623182bd483ef700505efd0ab4fc68db3633b",
+    "crates/uw-render-bridge/src/node.rs": "7a245769901e658fdeadd96ed6eb5a34fcb0e0482b9821db9ea0020b5c1ef513",
+    "crates/uw-render-bridge/tests/values.rs": "6b7be2db4c1434f05e5d9ecf4e577504b99a99ea80e1946b6052ee597880bb32",
+    "crates/uw-render-bridge/tests/producer.rs": "b7eefe724c28e9cc9e8a65a13e333a38b3a97320c8dd0f0a3e13058166949b71",
+    "crates/uw-render-bridge/examples/addon_consumer.rs": "8046b3542bd40e2b0c8c56fcdfc7a08b68521445ad61f0e3a36e56fcf83098f9",
+    "crates/uw-render-bridge/Cargo.toml": "2980fa9a2c0bd65ad20076e3af390ed4f8fef53d775d5924d23c2e1b4f41400f",
+    "tools/render-fixture/src/bridge-types.ts": "31b2971123b871014dfec8bf16c6224d31c7229947aaba41ee37782fbc065f1e",
+    "tools/render-fixture/src/producer.ts": "da3cad72ee466239900ed63bfd9347077ac1ec22d22d060a66157d28d9635fb4",
+    "tools/render-fixture/src/producer.test.ts": "ffded1c9b6eed2e32bb6e68c958bccd6fec53d2d456fe777bd52cc742af041f6",
+    "tools/render-fixture/src/addon-smoke.ts": "33fd7842ac71c7eebf02651a0964c5f5f142d270642c79ba7114b9c43f588317",
+    "tools/render-fixture/scripts/build-native.cjs": "ab7ca2306db135c2c9d25e400d4328777900fafb5fd455760b5af9be49456613"
   },
   "environment": {
     "device": "NVIDIA GeForce RTX 4090",
@@ -129,6 +143,18 @@
       },
       "scope": "portable frame state/codec only; not cross-process or GPU behavior",
       "logs": ".superpowers/sdd/2026-10-28-rendering-4/task-2-*.log"
+    },
+    "producer_bridge": {
+      "status": "pass",
+      "rust_cases": 7,
+      "fixture_cases": 18,
+      "addon_generations": 100,
+      "exact_sequence": "9007199254740993",
+      "cpu_bytes": "3200",
+      "windows_all_targets": "pass",
+      "strict_clippy": "pass",
+      "scope": "native CPU producer/addon and bounded publisher; no GPU submission or live input acceptance",
+      "logs": ".superpowers/sdd/2026-10-28-rendering-4/task-4-*.log"
     }
   },
   "deferred_items": [
@@ -142,10 +168,10 @@
   "completed_tasks": [
     1,
     2,
-    3
+    3,
+    4
   ],
   "pending_tasks": [
-    4,
     5,
     6,
     7,
