@@ -37,6 +37,7 @@ pub struct DeviceData {
     pub queue_present: Option<vk::PFN_vkQueuePresentKHR>,
     pub queue_families: Mutex<HashMap<u64, u32>>,
     pub runtime: Option<Runtime>,
+    pub trace: Option<crate::trace::Trace>,
 }
 static INSTANCES: LazyLock<RwLock<HashMap<usize, Arc<InstanceData>>>> =
     LazyLock::new(Default::default);

@@ -187,6 +187,9 @@ unsafe fn create_device_inner(
             queue_present: cast(p(c"vkQueuePresentKHR")),
             queue_families: Mutex::new(HashMap::new()),
             runtime,
+            trace: target
+                .then(|| crate::trace::Trace::from_env(device.as_raw()))
+                .flatten(),
         });
         result
     }
@@ -253,6 +256,9 @@ pub unsafe extern "system" fn destroy_device(
         return;
     }
     if let Some(d) = dispatch::remove_device(key(device)) {
+        if let Some(trace) = &d.trace {
+            trace.stop();
+        }
         if let Some(runtime) = &d.runtime {
             runtime.stop();
         }

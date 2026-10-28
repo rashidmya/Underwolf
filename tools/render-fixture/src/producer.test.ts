@@ -98,3 +98,14 @@ test('readiness tracks the first baseline and oldest pending damage across Busy 
   assert.equal(producer.snapshot().baselineSeq, '4');
   assert.equal(producer.snapshot().key?.session, bridge.session);
 });
+test('lag counters measure pending damage and receipt of completion for the current allocation', () => {
+  const { bridge, producer, bytes } = fixture(); const key = producer.snapshot().key!;
+  bridge.now = 150n; producer.onPaint(image(bytes), a);
+  bridge.now = 450n; bridge.busy = false;
+  producer.onBridgeEvent({ kind: 'consumed', key, seq: '1' });
+  assert.equal(producer.counters.maxPendingNs, 300n);
+  assert.equal(producer.counters.maxConsumptionNs, 350n);
+  assert.equal(producer.counters.consumptionCount, 1n);
+  producer.onBridgeEvent({ kind: 'consumed', key: { ...key, allocation: '999' }, seq: '2' });
+  assert.equal(producer.counters.consumptionCount, 1n);
+});

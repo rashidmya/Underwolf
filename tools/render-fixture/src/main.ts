@@ -13,7 +13,10 @@ import type { ImageMode } from './image-source';
 const usage = '--pid <pid> --start-ticks <u64> --input-command <absolute launcher> --copy-mode dirty|full --image-mode retained-full|owned-backing --scenario benchmark|input|small-damage --output <dir>';
 if (process.argv.includes('--help')) { console.log(usage); app.exit(0); }
 const args = new Map<string, string>();
-for (let i = 2; i < process.argv.length; i += 2) { const key = process.argv[i], value = process.argv[i + 1]; if (!key.startsWith('--') || !value || args.has(key)) throw Error(usage); args.set(key, value); }
+// Electron retains its switches before the application entry in process.argv.
+const appIndex = process.argv.findIndex((arg, i) => i > 0 && resolve(arg) === __filename);
+if (appIndex < 0) throw Error(usage);
+for (let i = appIndex + 1; i < process.argv.length; i += 2) { const key = process.argv[i], value = process.argv[i + 1]; if (!key.startsWith('--') || !value || args.has(key)) throw Error(usage); args.set(key, value); }
 if ([...args.keys()].some(k => !['--pid', '--start-ticks', '--input-command', '--copy-mode', '--image-mode', '--scenario', '--output'].includes(k))) throw Error(usage);
 const pid = Number(args.get('--pid')), startTicks = args.get('--start-ticks') ?? '';
 const command = args.get('--input-command') ?? '', copyMode = args.get('--copy-mode') ?? 'dirty', imageMode = args.get('--image-mode') ?? 'retained-full', scenario = args.get('--scenario') ?? 'benchmark';

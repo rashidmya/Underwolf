@@ -9,6 +9,19 @@ fn main() {
     };
     use uw_frame_channel::*;
     use uw_frame_proto::*;
+    fn retry_busy<T>(mut operation: impl FnMut() -> uw_frame_proto::Result<T>) -> T {
+        let until = Instant::now() + Duration::from_secs(3);
+        loop {
+            match operation() {
+                Ok(value) => return value,
+                Err(FrameError::Busy) => {
+                    assert!(Instant::now() < until, "metadata stayed busy");
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                Err(error) => panic!("channel operation: {error:?}"),
+            }
+        }
+    }
     fn receive(s: &UnixStream) -> (Message, Vec<std::os::fd::OwnedFd>) {
         loop {
             match recv_message(s) {
@@ -83,13 +96,13 @@ fn main() {
                 let m = mapping.as_ref().unwrap();
                 let until = Instant::now() + Duration::from_secs(3);
                 let l = loop {
-                    if let Some(l) = m.try_claim().unwrap() {
+                    if let Some(l) = retry_busy(|| m.try_claim()) {
                         break l;
                     }
                     assert!(Instant::now() < until);
                     std::thread::sleep(Duration::from_millis(2));
                 };
-                let pixels = l.copy_pixels().unwrap();
+                let pixels = retry_busy(|| l.copy_pixels());
                 println!(
                     "CLAIMED {} {}",
                     l.claim().seq,
@@ -99,8 +112,10 @@ fn main() {
             }
             "complete" => {
                 let l = lease.take().unwrap();
-                // SAFETY: this CPU-only fixture submitted no GPU work.
-                unsafe { l.mapping().try_complete_after_gpu(&l) }.unwrap();
+                retry_busy(|| {
+                    // SAFETY: this CPU-only fixture submitted no GPU work.
+                    unsafe { l.mapping().try_complete_after_gpu(&l) }
+                });
                 send_message(
                     &stream,
                     &Message::Consumed {

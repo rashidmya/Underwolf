@@ -8,12 +8,14 @@ function union(a: RectLike, b: RectLike): RectLike {
     height: Math.max(a.y + a.height, b.y + b.height) - y };
 }
 export class WidgetProducer {
-  readonly counters = { paintCount: 0n, coalescedPaints: 0n, extractedBytes: 0n, extractionNs: 0n, sharedBytes: 0n, lastPublished: 0n };
+  readonly counters = { paintCount: 0n, coalescedPaints: 0n, extractedBytes: 0n, extractionNs: 0n, sharedBytes: 0n, lastPublished: 0n, maxPendingNs: 0n, consumptionCount: 0n, consumptionNs: 0n, maxConsumptionNs: 0n };
   private key?: FrameKey;
   private session?: string;
   private pending?: RectLike;
   private pendingSince?: bigint;
   private baselineSeq?: string;
+  private publishedAt?: bigint;
+  private publishedSeq?: string;
   private hasImage = false;
   private closed = false;
   private seq = 0n;
@@ -23,6 +25,7 @@ export class WidgetProducer {
   private replace(): void {
     this.key = this.bridge.createWidget({ ...this.widget, ...this.source.size() });
     this.baselineSeq = undefined;
+    this.publishedAt = undefined; this.publishedSeq = undefined;
     if (this.hasImage) { this.pending = this.full(); this.pendingSince ??= BigInt(this.bridge.monotonicNowNs()); this.seq++; }
   }
   onPaint(image: NativeImage, dirty: RectLike): void {
@@ -39,6 +42,14 @@ export class WidgetProducer {
   }
   onBridgeEvent(event: BridgeEvent): void {
     if (this.closed) return;
+    if (event.kind === 'consumed' && this.key && event.key.session === this.key.session
+      && sameWidget(event.key.widget, this.widget) && event.key.allocation === this.key.allocation
+      && event.seq === this.publishedSeq && this.publishedAt !== undefined) {
+      const elapsed = BigInt(this.bridge.monotonicNowNs()) - this.publishedAt;
+      this.counters.consumptionCount++; this.counters.consumptionNs += elapsed;
+      if (elapsed > this.counters.maxConsumptionNs) this.counters.maxConsumptionNs = elapsed;
+      this.publishedAt = undefined;
+    }
     if (event.kind === 'ready' && this.session !== event.session) {
       this.session = event.session; this.replace();
     } else if (event.kind === 'need_baseline' && sameWidget(event.widget, this.widget) && this.session) {
@@ -50,6 +61,8 @@ export class WidgetProducer {
     this.flush();
   }
   flush(): void {
+    if (this.pendingSince !== undefined) { const elapsed = BigInt(this.bridge.monotonicNowNs()) - this.pendingSince;
+      if (elapsed > this.counters.maxPendingNs) this.counters.maxPendingNs = elapsed; }
     if (this.closed || !this.key || !this.pending || !this.hasImage || !this.bridge.canPublish(this.key)) return;
     const rect = this.pending, seq = this.seq;
     const start = process.hrtime.bigint(); const patch = this.source.extract(rect);
@@ -57,6 +70,7 @@ export class WidgetProducer {
     this.counters.extractedBytes += BigInt(patch.data.length);
     const result = this.bridge.publishPatch({ ...patch, key: this.key, seq: String(seq) });
     if (result.status === 'published') {
+      this.publishedAt = BigInt(this.bridge.monotonicNowNs()); this.publishedSeq = String(seq);
       this.baselineSeq ??= String(seq);
       this.counters.sharedBytes += BigInt(result.bytes); this.counters.lastPublished = seq;
       if (this.seq === seq && this.pending === rect) { this.pending = undefined; this.pendingSince = undefined; }

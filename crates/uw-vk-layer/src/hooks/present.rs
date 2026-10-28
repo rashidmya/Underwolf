@@ -13,6 +13,7 @@ pub unsafe extern "system" fn queue_present(
     let Some(next) = d.queue_present else {
         return vk::Result::ERROR_EXTENSION_NOT_PRESENT;
     };
+    let mut sample = d.trace.as_ref().map(|trace| trace.begin());
     // SAFETY: valid live game queue and present info. Original arrays, results,
     // pNext and return value remain untouched on every skipped/unsupported path.
     unsafe {
@@ -55,6 +56,9 @@ pub unsafe extern "system" fn queue_present(
         if !matches!(outcome, DrawOutcome::Submitted { .. }) {
             drop(state);
             return next(queue, info);
+        }
+        if let Some(sample) = &mut sample {
+            sample.submitted = true;
         }
         let frame = &mut state
             .swaps
@@ -239,6 +243,7 @@ mod tests {
             queue_present: Some(present),
             queue_families: Mutex::new(families),
             runtime,
+            trace: None,
         });
         (word, queue)
     }

@@ -19,6 +19,8 @@ mod lifetime;
 mod loader_abi;
 #[cfg(target_os = "linux")]
 mod resources;
+#[cfg(target_os = "linux")]
+mod trace;
 
 #[cfg(target_os = "linux")]
 mod exports {

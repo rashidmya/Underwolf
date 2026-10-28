@@ -43,7 +43,7 @@ async function main(): Promise<void> {
     await command('complete', 'COMPLETED');
     const consumed = await event(e => e.kind === 'consumed' && e.key.allocation === key!.allocation);
     assert(consumed.kind === 'consumed'); assert.equal(consumed.seq, seq);
-    assert(bridge.canPublish(key));
+    await wait(() => bridge.canPublish(key!) ? true : undefined);
   }
   await command('progress', 'PROGRESS');
   const progress = await event(e => e.kind === 'progress'); assert(progress.kind === 'progress');

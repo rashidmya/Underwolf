@@ -355,15 +355,22 @@ mod wsi {
     }
     pub fn run() -> Result<serde_json::Value, String> {
         let mut max_frames = 600;
+        let (mut width, mut height) = (320, 240);
         let args: Vec<_> = std::env::args().collect();
         for p in args.windows(2) {
             if p[0] == "--frames" {
                 max_frames = p[1].parse::<u64>().map_err(err)?.min(100000);
             }
+            if p[0] == "--width" {
+                width = p[1].parse::<u32>().map_err(err)?.clamp(64, 1024);
+            }
+            if p[0] == "--height" {
+                height = p[1].parse::<u32>().map_err(err)?.clamp(64, 1024);
+            }
         }
         let identity = uw_frame_channel::PeerIdentity::current().map_err(err)?;
         println!("IDENTITY {} {}", identity.pid, identity.start_ticks);
-        let mut window = x11::Window::new(320, 240)?;
+        let mut window = x11::Window::new(width, height)?;
         let mut gpu = gpu::Gpu::new(true)?;
         // SAFETY: owned mapped Xlib window remains live until after the surface.
         let surface = unsafe {
