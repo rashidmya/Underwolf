@@ -33,7 +33,7 @@ class ReportTests(unittest.TestCase):
                     self.manifest['runs'].append({'scenario': scenario, 'pair': pair, 'arm': arm,
                         'process': {'pid': len(self.manifest['runs']) + 100, 'start_ticks': '123'}, 'source_head': 'head',
                         'artifacts': {'layer': 'abc', 'input': 'def'}, 'settings': {'preset': scenario, 'resolution': [1920,1080], 'scale': 1},
-                        'trace': str(own_trace), 'trace_meta': str(own_meta), 'warmup_seconds': 5, 'sample_seconds': 60,
+                        'trace': str(own_trace), 'trace_meta': str(own_meta), 'workload_ready_seconds': 0, 'warmup_seconds': 5, 'sample_seconds': 60,
                         'focused': True, 'uncapped': True, 'disturbed': False, 'previously_injected': False,
                         'input_loaded': arm == 'B', 'bootstrap_loaded': arm == 'B', 'host_active': arm == 'B', 'helper_active': arm == 'B',
                         'production_layer_loaded': True, 'spike_loaded': False, 'capture': False, 'widgets': 3 if arm == 'B' else 0, 'animation_fps': 60})
@@ -72,7 +72,8 @@ class ReportTests(unittest.TestCase):
             lambda m: m['runs'][0].update(uncapped=False), lambda m: m['runs'][0].update(disturbed=True),
             lambda m: m['runs'][1].update(animation_fps=30), lambda m: m['runs'][1].update(capture=True),
             lambda m: m['runs'][0].update(warmup_seconds=4), lambda m: m['runs'][0].update(sample_seconds=59),
-            lambda m: m['runs'][1].update(trace=m['runs'][0]['trace'])]
+            lambda m: m['runs'][1].update(trace=m['runs'][0]['trace']),
+            lambda m: m['runs'][1].update(workload_ready_seconds=1)]
         for mutate in mutations:
             with self.subTest(mutate=mutate):
                 manifest = copy.deepcopy(self.manifest); mutate(manifest)

@@ -103,6 +103,9 @@ def performance(manifest, root):
             raise ValueError('focus/cap/module/capture violation')
         if not math.isfinite(run['warmup_seconds']) or run['warmup_seconds'] < 5 or run['sample_seconds'] != 60:
             raise ValueError('need five seconds warmup and sixty seconds sampling')
+        ready = run['workload_ready_seconds']
+        if not math.isfinite(ready) or ready < 0 or run['warmup_seconds'] - ready < 5:
+            raise ValueError('full workload must be ready for five seconds before sampling')
         for flag in ('input_loaded', 'bootstrap_loaded', 'host_active', 'helper_active'):
             if run[flag] is not (arm == 'B'):
                 raise ValueError('baseline must be uninjected; B requires the whole overlay')
