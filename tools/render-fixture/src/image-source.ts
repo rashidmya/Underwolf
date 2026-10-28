@@ -14,7 +14,7 @@ export class ImageSource {
       || ![size.width, size.height].every(n => Number.isInteger(n) && n > 0 && n <= 4096)) {
       throw Error('invalid image source dimensions or mode');
     }
-    this.dimensions = { ...size };
+    this.dimensions = { width: size.width, height: size.height };
   }
 
   private check(rect: RectLike, empty = false): void {

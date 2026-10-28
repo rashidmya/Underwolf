@@ -12,6 +12,8 @@ export class WidgetProducer {
   private key?: FrameKey;
   private session?: string;
   private pending?: RectLike;
+  private pendingSince?: bigint;
+  private baselineSeq?: string;
   private hasImage = false;
   private closed = false;
   private seq = 0n;
@@ -20,7 +22,8 @@ export class WidgetProducer {
   private full(): RectLike { return { x: 0, y: 0, ...this.source.size() }; }
   private replace(): void {
     this.key = this.bridge.createWidget({ ...this.widget, ...this.source.size() });
-    if (this.hasImage) { this.pending = this.full(); this.seq++; }
+    this.baselineSeq = undefined;
+    if (this.hasImage) { this.pending = this.full(); this.pendingSince ??= BigInt(this.bridge.monotonicNowNs()); this.seq++; }
   }
   onPaint(image: NativeImage, dirty: RectLike): void {
     if (this.closed) throw Error('widget producer closed');
@@ -30,6 +33,7 @@ export class WidgetProducer {
     if (this.pending) this.counters.coalescedPaints++;
     const damage = !this.hasImage || this.mode === 'full' ? this.full() : dirty;
     this.hasImage = true;
+    this.pendingSince ??= BigInt(this.bridge.monotonicNowNs());
     this.pending = this.pending ? union(this.pending, damage) : { ...damage };
     this.flush();
   }
@@ -40,8 +44,8 @@ export class WidgetProducer {
     } else if (event.kind === 'need_baseline' && sameWidget(event.widget, this.widget) && this.session) {
       this.replace();
     } else if (event.kind === 'disconnected' || event.kind === 'unavailable') {
-      this.key = undefined; this.session = undefined;
-      if (this.hasImage) this.pending = this.full();
+      this.key = undefined; this.session = undefined; this.baselineSeq = undefined;
+      if (this.hasImage) { this.pending = this.full(); this.pendingSince ??= BigInt(this.bridge.monotonicNowNs()); }
     }
     this.flush();
   }
@@ -53,10 +57,11 @@ export class WidgetProducer {
     this.counters.extractedBytes += BigInt(patch.data.length);
     const result = this.bridge.publishPatch({ ...patch, key: this.key, seq: String(seq) });
     if (result.status === 'published') {
+      this.baselineSeq ??= String(seq);
       this.counters.sharedBytes += BigInt(result.bytes); this.counters.lastPublished = seq;
-      if (this.seq === seq && this.pending === rect) this.pending = undefined;
+      if (this.seq === seq && this.pending === rect) { this.pending = undefined; this.pendingSince = undefined; }
     } else if (result.status === 'stale') {
-      this.key = undefined; this.session = undefined; this.pending = this.full();
+      this.key = undefined; this.session = undefined; this.baselineSeq = undefined; this.pending = this.full();
     }
   }
   close(): void {
@@ -66,4 +71,7 @@ export class WidgetProducer {
     finally { this.key = undefined; this.pending = undefined; this.session = undefined; this.hasImage = false; this.source.dispose(); }
   }
   pendingSnapshots(): number { return this.pending ? 1 : 0; }
+  snapshot(): { key?: FrameKey; baselineSeq?: string; pendingSince?: bigint } {
+    return { key: this.key && structuredClone(this.key), baselineSeq: this.baselineSeq, pendingSince: this.pendingSince };
+  }
 }

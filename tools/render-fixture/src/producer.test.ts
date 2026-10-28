@@ -16,6 +16,8 @@ function image(bytes: Buffer, width = 8, height = 4): NativeImage {
       return image(patch, r.width, r.height); } } as NativeImage;
 }
 class FakeBridge {
+  now = 100n;
+  monotonicNowNs(): string { return String(this.now); }
   busy = false; race = false; generation = 0; session = '1a'.repeat(16);
   publications: Array<PixelPatch & { key: FrameKey; seq: string }> = [];
   pixels = Buffer.alloc(128); removed = 0;
@@ -78,4 +80,21 @@ test('same-size replacement uses a new key and close releases retained image', (
   producer.onBridgeEvent({ kind: 'need_baseline', widget }); assert.equal(bridge.generation, 2);
   producer.close(); assert.equal(bridge.removed, 1); assert.equal(producer.pendingSnapshots(), 0);
   assert.throws(() => producer.onPaint(image(Buffer.alloc(128)), full));
+});
+test('readiness tracks the first baseline and oldest pending damage across Busy and reconnect', () => {
+  const { bridge, producer, bytes } = fixture();
+  assert.equal(producer.snapshot().baselineSeq, '1');
+  assert.deepEqual(producer.snapshot().key, bridge.publications[0].key);
+  bridge.now = 200n; producer.onPaint(image(bytes), a);
+  bridge.now = 700n; producer.onPaint(image(bytes), b);
+  assert.equal(producer.snapshot().pendingSince, 200n);
+  bridge.busy = false; producer.flush();
+  assert.equal(producer.snapshot().pendingSince, undefined);
+  assert.equal(producer.snapshot().baselineSeq, '1');
+  producer.onBridgeEvent({ kind: 'disconnected', reason: 'test' });
+  assert.equal(producer.snapshot().key, undefined);
+  bridge.now = 900n; bridge.busy = false; bridge.session = '3c'.repeat(16);
+  producer.onBridgeEvent({ kind: 'ready', session: bridge.session });
+  assert.equal(producer.snapshot().baselineSeq, '4');
+  assert.equal(producer.snapshot().key?.session, bridge.session);
 });

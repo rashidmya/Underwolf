@@ -1,0 +1,11 @@
+<!doctype html>
+<html><head><style>
+  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; font: 600 20px system-ui, sans-serif; color: #fff; }
+  .panel { position: absolute; inset: 0; border-radius: 16px; background: rgba(20, 24, 40, 0.6); border: 2px solid rgba(120, 160, 255, 0.9); }
+  .ball { position: absolute; top: 120px; width: 60px; height: 60px; border-radius: 50%; background: rgba(255, 170, 0, 0.85); animation: move 2s ease-in-out infinite alternate; }
+  .label { position: absolute; left: 20px; top: 16px; }
+  @keyframes move { from { left: 20px; } to { left: 320px; } }
+</style></head>
+<body><div class="panel"></div><div class="label">Underwolf render <span id="t">0</span></div><div class="ball"></div>
+<script>let n = 0; setInterval(() => { document.getElementById('t').textContent = n++; }, 100);</script>
+<script src="input-surface.js"></script></body></html>

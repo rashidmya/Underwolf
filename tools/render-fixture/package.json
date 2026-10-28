@@ -9,7 +9,9 @@
     "test": "npm run build && node --test dist/*.test.js",
     "qualify": "npm run build && electron --ozone-platform=x11 dist/image-contract.js",
     "build:native": "node scripts/build-native.cjs",
-    "test:addon": "npm run build && node dist/addon-smoke.js"
+    "test:addon": "npm run build && node dist/addon-smoke.js",
+    "test:renderer": "npm run build && electron --ozone-platform=x11 dist/renderer-smoke.js",
+    "start": "npm run build && electron --ozone-platform=x11 dist/main.js"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

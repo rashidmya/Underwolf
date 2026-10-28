@@ -1,0 +1,9 @@
+<!doctype html><html><meta charset="utf-8"><title>Sparse damage</title>
+<style>html,body{margin:0;overflow:hidden;background:transparent}canvas{display:block;width:100vw;height:100vh}</style>
+<canvas></canvas><script>
+const canvas=document.querySelector('canvas'),dpr=devicePixelRatio;
+canvas.width=Math.round(innerWidth*dpr);canvas.height=Math.round(innerHeight*dpr);
+const ctx=canvas.getContext('2d');ctx.fillStyle='#102040';ctx.fillRect(0,0,canvas.width,canvas.height);
+window.drawStep=step=>{ctx.fillStyle=step===1?'#ff0000':'#00ff00';ctx.fillRect(step===1?0:canvas.width-6,step===1?0:canvas.height-6,6,6);};
+if(new URLSearchParams(location.search).get('auto')==='1'){let n=0;setInterval(()=>{const x=16+(n++%16)*8;ctx.clearRect(16,32,136,8);ctx.fillStyle='#ffffff';ctx.fillRect(x,32,8,8);},100);}
+</script><script src="input-surface.js"></script></html>
