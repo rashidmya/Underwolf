@@ -9,6 +9,7 @@ import { Readiness } from './readiness';
 import { layout, type Scenario, type Target } from './layout';
 import { createSurface, type Surface } from './surface';
 import type { ImageMode } from './image-source';
+import { renderCall } from './render-session';
 
 const usage = '--pid <pid> --start-ticks <u64> --input-command <absolute launcher> --copy-mode dirty|full --image-mode retained-full|owned-backing --scenario benchmark|input|small-damage --output <dir>';
 if (process.argv.includes('--help')) { console.log(usage); app.exit(0); }
@@ -33,9 +34,21 @@ const recent: Array<{ at: string; event: unknown }> = [];
 const now = (): bigint => BigInt(bridge.monotonicNowNs());
 function record(event: unknown): void { recent.push({ at: String(now()), event }); if (recent.length > 128) recent.shift(); }
 function configure(): void { consumer.configure(targets.map(({ page, ...w }) => w)); }
-function sendLayouts(): void {
-  if (!connected) return;
-  surfaces.forEach((s, i) => { if (s.producer.snapshot().key) { const t = targets[i]; bridge.setLayout({ widget: t.instance, revision: String(++revision), x: t.x, y: t.y, width: t.width, height: t.height, z: t.z, visible: t.visible }); } });
+function renderLost(reason: string): void {
+  connected = false; dimming = false;
+  const event: BridgeEvent = { kind: 'disconnected', reason }; record(event);
+  for (const s of surfaces) s.producer.onBridgeEvent(event);
+  readiness.onBridge(event);
+}
+function sendLayouts(): boolean {
+  if (!connected) return false;
+  for (const [i, s] of surfaces.entries()) {
+    if (s.producer.snapshot().key) {
+      const t = targets[i];
+      if (!renderCall(() => bridge.setLayout({ widget: t.instance, revision: String(++revision), x: t.x, y: t.y, width: t.width, height: t.height, z: t.z, visible: t.visible }), renderLost)) return false;
+    }
+  }
+  return true;
 }
 function writeMetrics(): void {
   const at = now();
@@ -62,15 +75,15 @@ function refresh(): void {
 function onBridge(event: BridgeEvent): void {
   record(event);
   if (event.kind === 'ready') { connected = true; dimming = false; }
-  if (event.kind === 'disconnected' || event.kind === 'unavailable') connected = false;
+  if (event.kind === 'disconnected' || event.kind === 'unavailable') { renderLost(event.reason); return; }
   if (event.kind === 'swapchain') {
     bounds = { width: event.width, height: event.height };
     const modes = targets.map(t => t.mode); targets = layout(scenario as Scenario, bounds); targets.forEach((t, i) => { t.mode = modes[i] ?? t.mode; });
   }
-  for (const s of surfaces) s.producer.onBridgeEvent(event);
-  if (event.kind === 'ready' || event.kind === 'need_baseline' || event.kind === 'swapchain') sendLayouts();
+  for (const s of surfaces) if (!renderCall(() => s.producer.onBridgeEvent(event), renderLost)) return;
+  if ((event.kind === 'ready' || event.kind === 'need_baseline' || event.kind === 'swapchain') && !sendLayouts()) return;
   readiness.onBridge(event);
-  if (event.kind === 'ready') bridge.setDimming({ revision: String(++revision), active: false });
+  if (event.kind === 'ready') renderCall(() => bridge.setDimming({ revision: String(++revision), active: false }), renderLost);
 }
 app.whenReady().then(async () => {
   targets = layout(scenario as Scenario, bounds);
@@ -82,7 +95,7 @@ app.whenReady().then(async () => {
     }
   }, c => input?.send(c), shutdown, g => surfaces.forEach(s => s.invalidate(g)), on => {
     const active = on && connected;
-    if (active !== dimming) { dimming = active; if (connected) bridge.setDimming({ revision: String(++revision), active }); }
+    if (active !== dimming) { dimming = active; if (connected) renderCall(() => bridge.setDimming({ revision: String(++revision), active }), renderLost); }
   }, () => bounds);
   readiness = new Readiness(now, ready => { record({ readiness: ready }); consumer.setRenderingReady(ready); configure(); });
   bridge.startServer({ pid, startTicks });

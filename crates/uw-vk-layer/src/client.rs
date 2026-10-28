@@ -108,7 +108,7 @@ impl Runtime {
                     }
                     if let Some((socket, peer)) = &connection {
                         let outcome = (|| -> Result<()> {
-                            for _ in 0..32 {
+                            for _ in 0..64 {
                                 if stopping.load(Ordering::Acquire) {
                                     break;
                                 }
@@ -118,19 +118,29 @@ impl Runtime {
                                 };
                                 send_message(socket, &message, &[])?;
                             }
-                            let mut p = libc::pollfd {
-                                fd: socket.as_raw_fd(),
-                                events: libc::POLLIN,
-                                revents: 0,
-                            };
-                            // SAFETY: one valid retained socket and stack poll entry.
-                            let ready = unsafe { libc::poll(&mut p, 1, 0) };
-                            if ready < 0 {
-                                return Err(FrameError::Io);
-                            }
-                            if ready > 0 {
-                                let (message, fds) = recv_message(socket)?;
-                                shared.lock().unwrap().incoming(message, fds, *peer)?;
+                            // Drain a bounded readable batch, so supported multi-widget
+                            // traffic cannot backlog behind one packet per 5ms tick.
+                            for _ in 0..64 {
+                                if stopping.load(Ordering::Acquire) {
+                                    break;
+                                }
+                                let mut p = libc::pollfd {
+                                    fd: socket.as_raw_fd(),
+                                    events: libc::POLLIN,
+                                    revents: 0,
+                                };
+                                // SAFETY: one valid retained socket and stack poll entry.
+                                let ready = unsafe { libc::poll(&mut p, 1, 0) };
+                                if ready < 0 {
+                                    return Err(FrameError::Io);
+                                }
+                                if ready == 0 {
+                                    break;
+                                }
+                                if ready > 0 {
+                                    let (message, fds) = recv_message(socket)?;
+                                    shared.lock().unwrap().incoming(message, fds, *peer)?;
+                                }
                             }
                             if shared.lock().unwrap().close_connection {
                                 return Err(FrameError::Unsupported);

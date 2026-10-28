@@ -5,6 +5,7 @@ import { mkdirSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { ImageSource, type RectLike } from './image-source';
+import { ImageQualification } from './image-qualification';
 
 const outputAt = process.argv.indexOf('--output');
 const output = outputAt < 0 ? path.resolve(__dirname, '../../../target/render-4/image-contract') : process.argv[outputAt + 1];
@@ -26,6 +27,7 @@ async function qualify(scale: number) {
   const width = 64 * scale, height = 48 * scale;
   const full = { x: 0, y: 0, width, height };
   const source = new ImageSource('owned-backing', { width, height });
+  const qualification = new ImageQualification({ width, height });
   const win = new BrowserWindow({ show: false, width: 64, height: 48, transparent: true,
     backgroundColor: '#00000000', webPreferences: { offscreen: { useSharedTexture: false, deviceScaleFactor: scale } } });
   win.webContents.setFrameRate(60);
@@ -60,14 +62,12 @@ async function qualify(scale: number) {
     await win.loadFile(path.join(__dirname, '../widgets/image-contract.html'));
     await waitFor(full, [64, 32, 16, 255]);
     assert.ok(last);
-    const initial = last.image;
-    const initialBytes = initial.toBitmap();
     const reference = Buffer.alloc(width * height * 4);
     fill(reference, width, full, [64, 32, 16, 255]);
     assert.deepEqual(source.extract(full).data, reference);
+    qualification.capture(last.image, reference);
     const a = { x: 8 * scale, y: 8 * scale, width: 4 * scale, height: 4 * scale };
     const b = { x: 40 * scale, y: 30 * scale, width: 4 * scale, height: 4 * scale };
-    let snapshotStable = true;
     let extractionNs = 0n, extractedBytes = 0;
     for (const [step, rect, color] of [[1, a, [0, 0, 255, 255]], [2, b, [0, 255, 0, 255]],
       [3, a, [0, 0, 0, 0]]] as const) {
@@ -79,11 +79,12 @@ async function qualify(scale: number) {
       extractionNs += process.hrtime.bigint() - began;
       extractedBytes += actual.length;
       assert.deepEqual(actual, reference, `incorrect complete pixels at scale ${scale}, step ${step}`);
+      assert.ok(last); qualification.capture(last.image, reference);
       (globalThis as { gc?: () => void }).gc?.();
-      snapshotStable &&= initial.toBitmap().equals(initialBytes);
     }
     assert.ok(last);
-    const complete = sizes.every(size => size.width === width && size.height === height);
+    const qualified = qualification.result(), snapshotStable = qualified.snapshotStable;
+    const complete = qualified.checkedSnapshots === 4 && qualified.completeImages && sizes.every(size => size.width === width && size.height === height);
     let cropped = false;
     if (complete) {
       const patch = last.image.crop(b);
@@ -92,6 +93,7 @@ async function qualify(scale: number) {
       assert.equal(cropped, true, 'NativeImage crop must preserve physical-pixel regions');
     }
     return { scale, dimensions: { width, height }, completeImages: complete, snapshotStable,
+      checkedFullSnapshots: qualified.checkedSnapshots,
       cropped, selectedMode: complete && snapshotStable && cropped ? 'retained-full' : 'owned-backing',
       extractionNs: String(extractionNs), extractedBytes, gcAvailable: typeof (globalThis as { gc?: unknown }).gc === 'function', shapes };
   } finally { source.dispose(); win.destroy(); }
@@ -111,7 +113,7 @@ app.whenReady().then(async () => {
       gpu: app.getGPUFeatureStatus(), gpuInfo, results,
       scope: 'isolated paint qualification; no game, input module or render layer started' };
     await writeFile(path.join(output, 'qualification.json'), JSON.stringify(report, null, 2) + '\n');
-    console.log(`PASS Electron ${report.electron}: complete BGRA pixels, disjoint changes, transparent clearing and retained snapshots at scales 1 and 1.5`);
+    console.log(`PASS Electron ${report.electron}: BGRA reconstruction, full-snapshot qualification and transparent clearing at scales 1 and 1.5`);
     console.log(results.map(result => `scale ${result.scale}: ${result.selectedMode}`).join('\n'));
     clearTimeout(timeout); app.exit(0);
   } catch (error) {

@@ -34,13 +34,17 @@ pub unsafe extern "system" fn queue_present(
             drop(state);
             return next(queue, info);
         }
-        let Some(family) = d
-            .queue_family(queue)
-            .filter(|&f| d.family_supports_graphics(f))
-        else {
-            state.fail(2);
-            drop(state);
-            return next(queue, info);
+        let family = match d.queue_family(queue) {
+            Err(()) => {
+                drop(state);
+                return next(queue, info);
+            }
+            Ok(Some(family)) if d.family_supports_graphics(family) => family,
+            _ => {
+                state.fail(2);
+                drop(state);
+                return next(queue, info);
+            }
         };
         let wait = if (*info).wait_semaphore_count == 0 {
             &[]
@@ -275,6 +279,59 @@ mod tests {
             drop(guard);
             dispatch::remove_device(key(q));
         }
+    }
+    #[test]
+    fn busy_queue_map_skips_without_making_the_renderer_unavailable() {
+        let (_word, q) = fixture(Some(Runtime::testing(context())), true);
+        let d = dispatch::device(key(q)).unwrap();
+        let held = d.queue_families.lock().unwrap();
+        let waits = [vk::Semaphore::from_raw(11)];
+        let swaps = [vk::SwapchainKHR::from_raw(9)];
+        let indices = [0];
+        let info = vk::PresentInfoKHR::default()
+            .wait_semaphores(&waits)
+            .swapchains(&swaps)
+            .image_indices(&indices);
+        // SAFETY: valid mock dispatch word and live local present arrays.
+        let result = unsafe { queue_present(q, &info) };
+        assert_eq!(result, vk::Result::SUBOPTIMAL_KHR);
+        SEEN.with(|s| assert_eq!(s.borrow().waits, [11]));
+        assert!(d.runtime.as_ref().unwrap().state.lock().unwrap().available);
+        drop(held);
+        dispatch::remove_device(key(q));
+    }
+    #[test]
+    fn completed_upload_hints_coalesce_per_allocation_without_evicting_controls() {
+        use uw_frame_proto::{AllocationKey, Message, SessionId, WidgetKey};
+        let mut state = crate::compositor::State::new(context());
+        let key = AllocationKey {
+            session: SessionId([1; 16]),
+            widget: WidgetKey {
+                id: 1,
+                generation: 1,
+            },
+            generation: 1,
+        };
+        state.notify(Message::Swapchain {
+            generation: 1,
+            width: 320,
+            height: 240,
+            ready: true,
+        });
+        for consumed in 1..1000 {
+            state.notify(Message::Consumed { key, consumed });
+        }
+        state.notify(Message::Consumed { key, consumed: 3 });
+        assert!(state.available);
+        assert_eq!(state.outgoing.len(), 2);
+        assert!(matches!(
+            state.outgoing.front(),
+            Some(Message::Swapchain { .. })
+        ));
+        assert!(matches!(
+            state.outgoing.back(),
+            Some(Message::Consumed { consumed: 999, .. })
+        ));
     }
     #[test]
     fn unsignaled_frame_and_unsupported_queue_preserve_waits() {

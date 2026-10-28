@@ -83,12 +83,13 @@ pub fn device(k: usize) -> Option<Arc<DeviceData>> {
     DEVICES.load().get(&k).cloned()
 }
 impl DeviceData {
-    pub fn queue_family(&self, q: vk::Queue) -> Option<u32> {
-        self.queue_families
+    pub fn queue_family(&self, q: vk::Queue) -> Result<Option<u32>, ()> {
+        Ok(self
+            .queue_families
             .try_lock()
-            .ok()?
+            .map_err(|_| ())?
             .get(&q.as_raw())
-            .copied()
+            .copied())
     }
     pub fn family_supports_graphics(&self, f: u32) -> bool {
         self.queue_family_props

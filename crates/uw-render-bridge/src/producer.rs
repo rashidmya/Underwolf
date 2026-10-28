@@ -293,7 +293,7 @@ impl ProducerSession {
                     }
                     if let Some(c) = connection.as_ref() {
                         let outcome = (|| -> Result<()> {
-                            for _ in 0..16 {
+                            for _ in 0..64 {
                                 if stopping.load(Ordering::Acquire) {
                                     break;
                                 }
@@ -318,24 +318,32 @@ impl ProducerSession {
                                     descriptors.as_ref().map_or(&[], |fds| &fds[..]),
                                 )?;
                             }
-                            // Idle sockets must not impose recv_message's 100ms
-                            // partial-packet deadline on every publication.
-                            let mut poll = libc::pollfd {
-                                fd: c.stream.as_raw_fd(),
-                                events: libc::POLLIN,
-                                revents: 0,
-                            };
-                            // SAFETY: poll receives one valid stack entry for this call.
-                            let ready = unsafe { libc::poll(&mut poll, 1, 0) };
-                            if ready < 0 {
-                                return Err(FrameError::Io);
-                            }
-                            if ready > 0 {
-                                let (message, fds) = recv_message(&c.stream)?;
-                                if !fds.is_empty() {
-                                    return Err(FrameError::Invalid);
+                            // Drain a bounded readable batch, so supported multi-widget
+                            // traffic cannot backlog behind one packet per 5ms tick.
+                            for _ in 0..64 {
+                                if stopping.load(Ordering::Acquire) {
+                                    break;
                                 }
-                                shared.lock().unwrap().incoming(message)?;
+                                let mut poll = libc::pollfd {
+                                    fd: c.stream.as_raw_fd(),
+                                    events: libc::POLLIN,
+                                    revents: 0,
+                                };
+                                // SAFETY: poll receives one valid stack entry for this call.
+                                let ready = unsafe { libc::poll(&mut poll, 1, 0) };
+                                if ready < 0 {
+                                    return Err(FrameError::Io);
+                                }
+                                if ready == 0 {
+                                    break;
+                                }
+                                if ready > 0 {
+                                    let (message, fds) = recv_message(&c.stream)?;
+                                    if !fds.is_empty() {
+                                        return Err(FrameError::Invalid);
+                                    }
+                                    shared.lock().unwrap().incoming(message)?;
+                                }
                             }
                             shared.lock().unwrap().reconcile()?;
                             Ok(())

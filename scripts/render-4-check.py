@@ -104,6 +104,10 @@ def gpu_check(output: Path) -> int:
             rows = list(csv.DictReader(meta.with_suffix('.csv').read_text().splitlines()))
             if counts['status'] != 'complete' or counts['dropped'] or counts['submitted'] or counts['samples'] != len(rows) or len(rows) < 30:
                 raise RuntimeError("invalid no-host trace")
+        text = run(['node', 'tools/render-fixture/dist/widget-load-smoke.js', str(output / 'widget-load')], output, 'widget-load', wsi_env, 25)
+        report['cases']['widget_load'] = json_line(text)
+        if report['cases']['widget_load'].get('status') != 'pass':
+            raise RuntimeError('supported widget load did not pass')
         report['cases']['trace'] = {'status':'pass','scope':'real loaded inactive layer, bounded trace, zero overlay submissions'}
         text = run(['node', 'tools/render-fixture/dist/host-smoke.js', str(output / 'host')], output, 'host', wsi_env, 40)
         report['cases']['host'] = json_line(text)
@@ -188,6 +192,7 @@ def automated(output):
         ('windows',['cargo','check',*win,'--all-targets','--target','x86_64-pc-windows-gnu']),
         ('node',['npm','test','--prefix','tools/render-fixture']),
         ('addon',['npm','run','test:addon','--prefix','tools/render-fixture']),
+        ('recovery',['python3','scripts/render-4-recovery-smoke.py']),
         ('qualification',['xvfb-run','-a','npm','run','qualify','--prefix','tools/render-fixture','--','--output',str(output/'images')]),
         ('renderer',['xvfb-run','-a','npm','run','test:renderer','--prefix','tools/render-fixture']),
         ('retained-input',['npm','run','test:production-input','--prefix','spikes/osr-host']),

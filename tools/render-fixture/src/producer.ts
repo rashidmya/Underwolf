@@ -1,6 +1,7 @@
 import type { NativeImage } from 'electron';
 import type { ImageSource, RectLike } from './image-source';
 import type { Bridge, BridgeEvent, FrameKey, WidgetKey } from './bridge-types';
+import { renderCall } from './render-session';
 const sameWidget = (a: WidgetKey, b: WidgetKey): boolean => a.id === b.id && a.generation === b.generation;
 function union(a: RectLike, b: RectLike): RectLike {
   const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
@@ -81,7 +82,7 @@ export class WidgetProducer {
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    try { if (this.key) this.bridge.removeWidget(this.widget, '18446744073709551615'); }
+    try { if (this.key) renderCall(() => this.bridge.removeWidget(this.widget, '18446744073709551615'), () => {}); }
     finally { this.key = undefined; this.pending = undefined; this.session = undefined; this.hasImage = false; this.source.dispose(); }
   }
   pendingSnapshots(): number { return this.pending ? 1 : 0; }

@@ -4,6 +4,7 @@ import type { NativeImage } from 'electron';
 import type { Bridge, FrameKey, PublishResult } from './bridge-types';
 import { ImageSource, type RectLike, type PixelPatch } from './image-source';
 import { WidgetProducer } from './producer';
+import { renderCall } from './render-session';
 const full = { x: 0, y: 0, width: 8, height: 4 };
 const a = { x: 0, y: 0, width: 1, height: 1 };
 const b = { x: 7, y: 3, width: 1, height: 1 };
@@ -16,12 +17,13 @@ function image(bytes: Buffer, width = 8, height = 4): NativeImage {
       return image(patch, r.width, r.height); } } as NativeImage;
 }
 class FakeBridge {
+  staleCreate = false; staleRemove = false;
   now = 100n;
   monotonicNowNs(): string { return String(this.now); }
   busy = false; race = false; generation = 0; session = '1a'.repeat(16);
   publications: Array<PixelPatch & { key: FrameKey; seq: string }> = [];
   pixels = Buffer.alloc(128); removed = 0;
-  createWidget(): FrameKey { this.pixels.fill(0); return { session: this.session, widget, allocation: String(++this.generation) }; }
+  createWidget(): FrameKey { if(this.staleCreate)throw Error('UW_RENDER_Stale'); this.pixels.fill(0); return { session: this.session, widget, allocation: String(++this.generation) }; }
   canPublish(): boolean { return !this.busy; }
   publishPatch(p: PixelPatch & { key: FrameKey; seq: string }): PublishResult {
     if (this.race) { this.race = false; return { status: 'busy', seq: p.seq, bytes: '0' }; }
@@ -32,7 +34,7 @@ class FakeBridge {
     this.busy = true;
     return { status: 'published', seq: p.seq, bytes: String(p.width * p.height * 4) };
   }
-  removeWidget(): void { this.removed++; }
+  removeWidget(): void { if(this.staleRemove)throw Error('UW_RENDER_Stale'); this.removed++; }
 }
 function fixture(mode: 'dirty' | 'full' = 'dirty') {
   const bridge = new FakeBridge(); const source = new ImageSource('retained-full', full);
@@ -108,4 +110,25 @@ test('lag counters measure pending damage and receipt of completion for the curr
   assert.equal(producer.counters.consumptionCount, 1n);
   producer.onBridgeEvent({ kind: 'consumed', key: { ...key, allocation: '999' }, seq: '2' });
   assert.equal(producer.counters.consumptionCount, 1n);
+});
+test('a queued Ready racing native disconnection retains static pixels and recovers on a fresh session', () => {
+  const { bridge, producer, bytes } = fixture(); const paints=producer.counters.paintCount;
+  producer.onBridgeEvent({kind:'disconnected',reason:'old peer'});
+  bridge.staleCreate=true;
+  assert.equal(renderCall(()=>producer.onBridgeEvent({kind:'ready',session:'2b'.repeat(16)}),reason=>producer.onBridgeEvent({kind:'disconnected',reason})),false);
+  assert.equal(producer.snapshot().key,undefined);assert.equal(producer.pendingSnapshots(),1);
+  bridge.staleCreate=false;bridge.busy=false;bridge.session='3c'.repeat(16);
+  producer.onBridgeEvent({kind:'ready',session:bridge.session});
+  assert.deepEqual(bridge.pixels,bytes);assert.equal(producer.counters.paintCount,paints);
+});
+test('stale synchronous controls revoke readiness while other bridge errors remain failures', () => {
+  let ready=true;
+  for(const operation of ['layout','dimming'])assert.equal(renderCall(()=>{throw Error('UW_RENDER_Stale');},()=>{ready=false;}),false,operation);
+  assert.equal(ready,false);
+  assert.throws(()=>renderCall(()=>{throw Error('UW_RENDER_Capacity');},()=>{}),/Capacity/);
+});
+test('closing after a native disconnect still releases the retained source', () => {
+  const {bridge,producer}=fixture();bridge.staleRemove=true;
+  assert.doesNotThrow(()=>producer.close());assert.equal(producer.pendingSnapshots(),0);
+  assert.throws(()=>producer.onPaint(image(Buffer.alloc(128)),full),/closed/);
 });

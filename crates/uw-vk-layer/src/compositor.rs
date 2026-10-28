@@ -66,6 +66,17 @@ impl State {
         }
     }
     pub fn notify(&mut self, m: Message) {
+        if let Message::Consumed { key, consumed } = m
+            && let Some(Message::Consumed {
+                consumed: previous, ..
+            }) = self
+                .outgoing
+                .iter_mut()
+                .find(|old| matches!(old, Message::Consumed { key: old, .. } if *old == key))
+        {
+            *previous = (*previous).max(consumed);
+            return;
+        }
         if self.outgoing.len() >= 128 {
             self.available = false;
             self.close_connection = true;

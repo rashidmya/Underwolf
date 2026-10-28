@@ -25,7 +25,7 @@ export async function createSurface(target: Target, bridge: Bridge, options: { s
   win.webContents.setFrameRate(60);
   win.webContents.on('paint', (_event, dirty, image) => { if (!closed) { try { producer.onPaint(image, dirty); } catch (e) { options.failed(String(e)); } } });
   win.webContents.on('render-process-gone', (_event, details) => { if (!closed) options.failed(`renderer lost: ${details.reason}`); });
-  const close = (): void => { if (!closed) { closed = true; cancel(); producer.close(); win.destroy(); } };
+  const close = (): void => { if (!closed) { closed = true; cancel(); try { producer.close(); } finally { win.destroy(); } } };
   try { await win.loadFile(resolve(__dirname, `../widgets/${target.page}.html`), { query: { auto: options.animateSparse ? '1' : '0' } }); }
   catch (e) { close(); throw e; }
   return { win, producer, invalidate, close, async apply(event, application): Promise<void> {
