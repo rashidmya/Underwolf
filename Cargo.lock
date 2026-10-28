@@ -614,6 +614,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "uw-frame-channel"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "rustix",
+ "uw-frame-proto",
+]
+
+[[package]]
 name = "uw-frame-proto"
 version = "0.0.0"
 

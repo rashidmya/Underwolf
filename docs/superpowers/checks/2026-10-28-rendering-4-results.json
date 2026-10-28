@@ -2,7 +2,7 @@
   "schema_version": 1,
   "phase": "rendering 4",
   "status": "implemented_open_acceptance",
-  "implementation_head": "working tree from 34ab1a1; source file hashes below identify tested Task 1 source",
+  "implementation_head": "working tree after ba549b9; source-file hashes identify tested code",
   "artifacts": {
     "tools/render-fixture/package.json": "4a2cc72b1170d2c037f7491b4be963b8182fa8b3da831cb448cb625cf4133bc5",
     "tools/render-fixture/package-lock.json": "10780bdb4c397f0782692af0cbffc79aba84fef9361117394b93efd0842f63d0",
@@ -20,7 +20,21 @@
     "crates/uw-frame-proto/tests/damage.rs": "0b866be3fc113f27a7dca45cb465e9ddb43cde971fd9ab96bde36216da5c11b8",
     "crates/uw-frame-proto/tests/state.rs": "4e2e3bae686ec2df06c7f1c932fcc37ee5492a825513db24cf5d8dc7b24c6eb4",
     "crates/uw-frame-proto/tests/pixels.rs": "a1d37b40eed0cf20533edf081c1a6a5e549af9dbe15b4d0b208efbb1421f36fd",
-    "crates/uw-frame-proto/tests/wire.rs": "79b1d27d3a32bc146526605ad20dde62906af79281ac3fb12c10aee010a18c55"
+    "crates/uw-frame-proto/tests/wire.rs": "79b1d27d3a32bc146526605ad20dde62906af79281ac3fb12c10aee010a18c55",
+    "crates/uw-frame-channel/Cargo.toml": "963dba599f19b2456f4c5687f69d3ba10a7bc65a58495e5ee96b5f73e733edba",
+    "crates/uw-frame-channel/src/lib.rs": "14248308df6459db57851403b92c7f5573b82939cdeb9d287e20fcecfeebb89e",
+    "crates/uw-frame-channel/src/budget.rs": "149d2501c96b041e228ab89d583149dc4c87af797fd2e2969fef4168b30459bc",
+    "crates/uw-frame-channel/src/mapping.rs": "43667d993a657214537ccdfefbc63d3aadbdf3393f82a33d66fffd8365fa59c6",
+    "crates/uw-frame-channel/src/mutex.rs": "467edd71d68056ee851e51660aa09fee8458bf4539f89ab956248ffaf31513cd",
+    "crates/uw-frame-channel/src/channel.rs": "8c2f221806e76b98e1f53624f0541ff09c2cc777fc3622697e423aa4f3b89ea3",
+    "crates/uw-frame-channel/src/session.rs": "a678e2fddea5c93aa9c0e1a910a49bccac7a8c7cca3571e80b88c3a349493810",
+    "crates/uw-frame-channel/src/memory.rs": "58373676bbff3604ba2ffb05d596eef9b0f58cd8789b5a0397a37a6a65a87e2c",
+    "crates/uw-frame-channel/tests/shared.rs": "bcf57329aab55d8c205c483c3af1dd112ff5159ea6e3fc102705467c004b6e65",
+    "crates/uw-frame-channel/tests/transport.rs": "aa27fc1775d96384ca9f806b57d1b772f64cff22c6607395ae76780bf6afdb2c",
+    "crates/uw-frame-channel/tests/recovery.rs": "c6be042c7a8beeb996e1bc476775b807e46d27695b0f499131220becb857feba",
+    "crates/uw-frame-channel/tests/session.rs": "42aa0d25c4df13b0097bab8ea2b65603192abf0c0a3289f9040328729c33aff5",
+    "crates/uw-frame-channel/examples/channel_actor.rs": "1c324a0c452997a71e60e6b75660d5b81de570e66f62bf3a70142f1b5829cef4",
+    "crates/uw-frame-channel/tests/support/actor.rs": "f27c8b25d660b2915dcef672095bbdaa6e41348294171b0028537f4048fc1921"
   },
   "environment": {
     "device": "NVIDIA GeForce RTX 4090",
@@ -77,7 +91,18 @@
       "scope": "isolated current-driver snapshots only; not renderer transport, input integration or live/performance acceptance"
     },
     "transport": {
-      "status": "pending"
+      "status": "pass",
+      "native_cases": 20,
+      "harness_entries_ignored": 1,
+      "windows_all_targets": "pass",
+      "strict_clippy": "pass",
+      "workspace": {
+        "passed": 744,
+        "failed": 0,
+        "ignored": 93
+      },
+      "scope": "native CPU shared-memory/IPC ownership only; no GPU import/compositing or live game claim",
+      "logs": ".superpowers/sdd/2026-10-28-rendering-4/task-3-*.log"
     },
     "vulkan_rendering": {
       "status": "pending"
@@ -116,10 +141,10 @@
   },
   "completed_tasks": [
     1,
-    2
+    2,
+    3
   ],
   "pending_tasks": [
-    3,
     4,
     5,
     6,
