@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::sync::LazyLock;
 pub static IS_TARGET: LazyLock<bool> = LazyLock::new(|| {
     if std::env::var("UW_LAYER_ENABLE").as_deref() != Ok("1")
@@ -9,7 +10,14 @@ pub static IS_TARGET: LazyLock<bool> = LazyLock::new(|| {
         .ok()
         .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
         .unwrap_or_default();
-    crate::target_process(&exe, std::env::var("UW_RENDER_PROBE").as_deref() == Ok("1"))
+    let mut cmdline = Vec::new();
+    let _ = std::fs::File::open("/proc/self/cmdline")
+        .and_then(|f| f.take(4096).read_to_end(&mut cmdline));
+    crate::target_identity(
+        &exe,
+        &cmdline,
+        std::env::var("UW_RENDER_PROBE").as_deref() == Ok("1"),
+    )
 });
 pub fn monotonic_ns() -> u64 {
     let mut t = libc::timespec {

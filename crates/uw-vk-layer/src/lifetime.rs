@@ -2,7 +2,10 @@
 //! semaphore/presentation resources. Neither time nor receipt is completion.
 use crate::resources::{Context, Texture};
 use ash::vk;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use uw_frame_channel::{CompleteResult, ReadLease};
 use uw_frame_proto::{AllocationKey, FrameError};
 pub type PollResult = (Vec<(AllocationKey, u64)>, Option<u64>);
@@ -16,6 +19,7 @@ pub struct Frame {
     pub semaphore: vk::Semaphore,
     pub submitted: bool,
     pub present_pending: bool,
+    pub present_active: Arc<AtomicBool>,
     pub failed: bool,
     pub draw_reported: bool,
     pub epoch: u64,
@@ -34,6 +38,7 @@ impl Frame {
             semaphore: vk::Semaphore::null(),
             submitted: false,
             present_pending: false,
+            present_active: Arc::new(AtomicBool::new(false)),
             failed: false,
             draw_reported: false,
             epoch: 0,
@@ -42,10 +47,17 @@ impl Frame {
         }
     }
     pub fn reusable(&self) -> bool {
-        !self.failed && !self.submitted && !self.present_pending && self.leases.is_empty()
+        !self.failed
+            && !self.submitted
+            && !self.present_pending
+            && !self.present_active.load(Ordering::Acquire)
+            && self.leases.is_empty()
     }
     pub fn safe_to_retire(&self) -> bool {
-        !self.submitted && !self.present_pending && self.leases.is_empty()
+        !self.submitted
+            && !self.present_pending
+            && !self.present_active.load(Ordering::Acquire)
+            && self.leases.is_empty()
     }
     /// # Safety
     /// Called under render-state serialization for this live device; frame
@@ -61,6 +73,7 @@ impl Frame {
         // upload fence proves all GPU reads; a present fence proves semaphore use.
         unsafe {
             if self.present_pending
+                && !self.present_active.load(Ordering::Acquire)
                 && d.get_fence_status(self.present_fence)
                     .map_err(|_| FrameError::Io)?
             {
@@ -153,6 +166,8 @@ mod tests {
             )
         };
         let ctx = Arc::new(Context {
+            handles_live: AtomicBool::new(false),
+            counts: crate::resources::ResourceCounts::default(),
             life: Arc::new(DeviceLife {
                 device,
                 live: AtomicBool::new(false),
@@ -269,5 +284,23 @@ mod tests {
         assert_eq!(mapping.try_state().unwrap().consumed, 0);
         assert_eq!(frame.leases.len(), 1);
         assert!(!frame.safe_to_retire());
+    }
+    #[test]
+    fn an_active_present_host_call_excludes_driver_fence_queries() {
+        let _serial = SERIAL.lock().unwrap();
+        UPLOAD.store(1, Ordering::SeqCst);
+        PRESENT.store(vk::Result::ERROR_DEVICE_LOST.as_raw(), Ordering::SeqCst);
+        let (mut frame, _mapping) = frame();
+        frame.present_active.store(true, Ordering::Release);
+        // SAFETY: CPU-only mock; its present-fence query deliberately errors, so
+        // a successful poll proves no query occurs during the active host call.
+        let during = unsafe { frame.poll() };
+        assert!(during.is_ok());
+        assert!(frame.present_pending);
+        frame.present_active.store(false, Ordering::Release);
+        // SAFETY: after the host call returns, ordinary fence error handling resumes.
+        let after = unsafe { frame.poll() };
+        assert!(after.is_err());
+        assert!(frame.present_pending);
     }
 }

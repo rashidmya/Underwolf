@@ -162,6 +162,12 @@ unsafe fn create_device_inner(
             f(pd, &mut n, queue_family_props.as_mut_ptr());
             queue_family_props.truncate(n as usize);
         }
+        if std::env::var("UW_RENDER_DIAGNOSTICS").as_deref() == Ok("1") {
+            eprintln!(
+                "[underwolf-render] target={target}, instance={}, device={capable}",
+                inst.render_capable
+            );
+        }
         let runtime = if capable {
             make_context(&inst, pd, ash.clone(), gdpa).and_then(|ctx| Runtime::start(ctx).ok())
         } else {
@@ -250,6 +256,13 @@ pub unsafe extern "system" fn destroy_device(
         if let Some(runtime) = &d.runtime {
             runtime.stop();
         }
+        let pins = if let Some(runtime) = &d.runtime {
+            // SAFETY: worker is stopped; a valid application device teardown has
+            // ordered queue work, and pins are held through the driver call below.
+            unsafe { runtime.state.lock().unwrap().teardown() }
+        } else {
+            vec![]
+        };
         // SAFETY: all native workers stopped; unresolved GPU/import resources stay
         // retained until driver teardown returns. No callbacks run on the dead device.
         unsafe { (d.destroy_device)(device, alloc) }
@@ -263,6 +276,7 @@ pub unsafe extern "system" fn destroy_device(
                 .live
                 .store(false, Ordering::Release);
         }
+        drop(pins);
     }
 }
 pub unsafe extern "system" fn get_device_queue(

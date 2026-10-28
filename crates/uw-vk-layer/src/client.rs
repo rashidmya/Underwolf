@@ -45,6 +45,9 @@ impl Runtime {
                 let Ok(path) = session_endpoint(&identity) else {
                     return;
                 };
+                let stats_dir =
+                    std::env::var_os("UW_RENDER_STATS_DIR").map(std::path::PathBuf::from);
+                let mut stats_at = std::time::Instant::now();
                 let mut connection: Option<(Arc<UnixStream>, PeerIdentity)> = None;
                 let mut retry = std::time::Instant::now();
                 while !stopping.load(Ordering::Acquire) {
@@ -142,6 +145,18 @@ impl Runtime {
                         }
                         *shared_stream.lock().unwrap() = None;
                         shared.lock().unwrap().disconnected();
+                    }
+                    if let Some(dir) = &stats_dir
+                        && std::time::Instant::now() >= stats_at
+                    {
+                        stats_at = std::time::Instant::now() + Duration::from_millis(100);
+                        let metrics = shared.lock().unwrap().metrics();
+                        let _ = std::fs::create_dir_all(dir);
+                        let path = dir.join(format!("{}-resources.json", std::process::id()));
+                        let temporary = path.with_extension("tmp");
+                        if std::fs::write(&temporary, metrics).is_ok() {
+                            let _ = std::fs::rename(temporary, path);
+                        }
                     }
                     thread::sleep(Duration::from_millis(5));
                 }

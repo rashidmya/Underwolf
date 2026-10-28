@@ -49,6 +49,12 @@ pub fn target_process(path: &str, probe: bool) -> bool {
         || base.eq_ignore_ascii_case("deadlock")
         || (base == "uw-render-probe" && probe)
 }
+/// Proton exposes Wine's preloader via /proc/self/exe and the Windows game via
+/// argv0. Probe opt-in additionally requires the real native probe basename.
+pub fn target_identity(executable: &str, cmdline: &[u8], probe: bool) -> bool {
+    let argv0 = cmdline.split(|b| *b == 0).next().unwrap_or_default();
+    target_process(&String::from_utf8_lossy(argv0), false) || target_process(executable, probe)
+}
 pub struct RetireQueue<T> {
     items: Vec<(Vec<u64>, T)>,
     limit: usize,

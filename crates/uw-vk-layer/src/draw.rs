@@ -36,6 +36,7 @@ pub struct Renderer {
     pub format: vk::Format,
     pub extent: vk::Extent2D,
     pub generation: u64,
+    target_layout: vk::ImageLayout,
     render_pass: vk::RenderPass,
     set_layout: Option<vk::DescriptorSetLayout>,
     layout: vk::PipelineLayout,
@@ -59,6 +60,7 @@ impl Renderer {
                 height: 4,
             },
             generation: 1,
+            target_layout: vk::ImageLayout::PRESENT_SRC_KHR,
             render_pass: vk::RenderPass::null(),
             set_layout: None,
             layout: vk::PipelineLayout::null(),
@@ -81,6 +83,53 @@ impl Renderer {
         images: &[vk::Image],
         generation: u64,
     ) -> Result<Self, vk::Result> {
+        // SAFETY: forward the caller's live swapchain-image contract.
+        unsafe {
+            Self::new_target(
+                ctx,
+                set_loader_data,
+                format,
+                extent,
+                images,
+                generation,
+                vk::ImageLayout::PRESENT_SRC_KHR,
+            )
+        }
+    }
+    /// # Safety
+    /// Offscreen image is in COLOR_ATTACHMENT_OPTIMAL and remains alive until
+    /// every renderer submission completes; used by the owned GPU readback probe.
+    #[allow(dead_code)]
+    pub unsafe fn new_offscreen(
+        ctx: Arc<Context>,
+        loader: PfnSetDeviceLoaderData,
+        format: vk::Format,
+        extent: vk::Extent2D,
+        image: vk::Image,
+    ) -> Result<Self, vk::Result> {
+        // SAFETY: forward the caller's retained offscreen target contract.
+        unsafe {
+            Self::new_target(
+                ctx,
+                loader,
+                format,
+                extent,
+                &[image],
+                1,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            )
+        }
+    }
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn new_target(
+        ctx: Arc<Context>,
+        set_loader_data: PfnSetDeviceLoaderData,
+        format: vk::Format,
+        extent: vk::Extent2D,
+        images: &[vk::Image],
+        generation: u64,
+        target_layout: vk::ImageLayout,
+    ) -> Result<Self, vk::Result> {
         if images.is_empty() || images.len() > 8 || extent.width == 0 || extent.height == 0 {
             return Err(vk::Result::ERROR_FEATURE_NOT_PRESENT);
         }
@@ -90,6 +139,7 @@ impl Renderer {
             format,
             extent,
             generation,
+            target_layout,
             render_pass: vk::RenderPass::null(),
             set_layout: Some(ctx.layout),
             layout: vk::PipelineLayout::null(),
@@ -119,8 +169,8 @@ impl Renderer {
             .store_op(vk::AttachmentStoreOp::STORE)
             .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
             .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .initial_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-            .final_layout(vk::ImageLayout::PRESENT_SRC_KHR)];
+            .initial_layout(self.target_layout)
+            .final_layout(self.target_layout)];
         let color_ref = [vk::AttachmentReference {
             attachment: 0,
             layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,

@@ -847,8 +847,10 @@ dependencies = [
  "arc-swap",
  "ash",
  "libc",
+ "serde_json",
  "uw-frame-channel",
  "uw-frame-proto",
+ "uw-render-bridge",
 ]
 
 [[package]]

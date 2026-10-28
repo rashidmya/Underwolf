@@ -16,3 +16,11 @@ ash = "0.38"
 arc-swap = "1.9"
 libc = "0.2"
 uw-frame-channel = { path = "../uw-frame-channel" }
+
+[dev-dependencies]
+uw-render-bridge = { path = "../uw-render-bridge" }
+serde_json = "1"
+
+[[example]]
+name = "uw-render-probe"
+path = "examples/render_probe.rs"

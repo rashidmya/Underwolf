@@ -3,7 +3,7 @@
 use ash::vk;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use uw_frame_channel::{Budget, BudgetReservation, FrameMapping, ReadLease};
 pub const COLOR_RANGE: vk::ImageSubresourceRange = vk::ImageSubresourceRange {
@@ -22,7 +22,24 @@ impl DeviceLife {
         self.live.load(Ordering::Acquire)
     }
 }
+#[derive(Default)]
+pub struct ResourceCounts {
+    pub imports: AtomicU64,
+    pub images: AtomicU64,
+    pub descriptors: AtomicU64,
+}
+impl ResourceCounts {
+    pub fn snapshot(&self) -> (u64, u64, u64) {
+        (
+            self.imports.load(Ordering::Relaxed),
+            self.images.load(Ordering::Relaxed),
+            self.descriptors.load(Ordering::Relaxed),
+        )
+    }
+}
 pub struct Context {
+    pub handles_live: AtomicBool,
+    pub counts: ResourceCounts,
     pub life: Arc<DeviceLife>,
     pub host: ash::ext::external_memory_host::DeviceFn,
     pub props: vk::PhysicalDeviceMemoryProperties,
@@ -64,6 +81,8 @@ impl Context {
             return Err(vk::Result::ERROR_FEATURE_NOT_PRESENT);
         }
         let mut ctx = Self {
+            handles_live: AtomicBool::new(true),
+            counts: ResourceCounts::default(),
             life: Arc::new(DeviceLife {
                 device,
                 live: AtomicBool::new(true),
@@ -112,18 +131,29 @@ impl Context {
         Ok(Arc::new(ctx))
     }
 }
-impl Drop for Context {
-    fn drop(&mut self) {
-        if !self.life.is_live() {
+impl Context {
+    /// # Safety
+    /// All objects using the pool/layout/sampler have been released. The caller
+    /// has stopped workers and ordered all healthy-device queue operations before
+    /// device destruction; imported mappings remain pinned through that call.
+    pub unsafe fn destroy_handles(&self) {
+        if !self.life.is_live() || !self.handles_live.swap(false, Ordering::AcqRel) {
             return;
         }
-        // SAFETY: textures/renderers retain Context, so the last owner has no GPU
-        // references or is still in an unsubmitted failed construction.
+        // SAFETY: explicit teardown/last-owner contract excludes outstanding use.
         unsafe {
             let d = &self.life.device;
             d.destroy_descriptor_pool(self.pool, None);
             d.destroy_sampler(self.sampler, None);
             d.destroy_descriptor_set_layout(self.layout, None);
+        }
+    }
+}
+impl Drop for Context {
+    fn drop(&mut self) {
+        // SAFETY: textures/renderers retain Context; last-owner drop has no children.
+        unsafe {
+            self.destroy_handles();
         }
     }
 }
@@ -175,6 +205,7 @@ impl Texture {
                     .push_next(&mut external),
                 None,
             )?;
+            t.ctx.counts.imports.fetch_add(1, Ordering::Relaxed);
             let req = d.get_buffer_memory_requirements(t.buffer);
             if req.size > layout.pixel_len {
                 return Err(vk::Result::ERROR_INVALID_EXTERNAL_HANDLE);
@@ -215,6 +246,7 @@ impl Texture {
                     .initial_layout(vk::ImageLayout::UNDEFINED),
                 None,
             )?;
+            t.ctx.counts.images.fetch_add(1, Ordering::Relaxed);
             let image_req = d.get_image_memory_requirements(t.image);
             let total = layout
                 .pixel_len
@@ -268,6 +300,7 @@ impl Texture {
                         .descriptor_pool(t.ctx.pool)
                         .set_layouts(&layouts),
                 )?[0];
+                t.ctx.counts.descriptors.fetch_add(1, Ordering::Relaxed);
                 let info = [vk::DescriptorImageInfo {
                     sampler: t.ctx.sampler,
                     image_view: t.views[i],
@@ -288,6 +321,20 @@ impl Texture {
 }
 impl Drop for Texture {
     fn drop(&mut self) {
+        if self.buffer != vk::Buffer::null() {
+            self.ctx.counts.imports.fetch_sub(1, Ordering::Relaxed);
+        }
+        if self.image != vk::Image::null() {
+            self.ctx.counts.images.fetch_sub(1, Ordering::Relaxed);
+        }
+        self.ctx.counts.descriptors.fetch_sub(
+            self.sets
+                .iter()
+                .filter(|s| **s != vk::DescriptorSet::null())
+                .count() as u64,
+            Ordering::Relaxed,
+        );
+
         if !self.ctx.life.is_live() {
             return;
         }

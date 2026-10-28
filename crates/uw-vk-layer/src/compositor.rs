@@ -28,6 +28,7 @@ pub struct State {
     retired: Vec<Widget>,
     pub swaps: HashMap<u64, Renderer>,
     pub old_swaps: RetireQueue<Renderer>,
+    pub gpu_bytes: u64,
     pub next_swap: u64,
     pub queue: Option<u64>,
     epoch: u64,
@@ -50,6 +51,7 @@ impl State {
             retired: vec![],
             swaps: HashMap::new(),
             old_swaps: RetireQueue::new(256),
+            gpu_bytes: 0,
             next_swap: 0,
             queue: None,
             epoch: 0,
@@ -77,6 +79,67 @@ impl State {
         }
         self.available = false;
         self.close_connection = true;
+    }
+    /// # Safety
+    /// Called after worker stop for a valid vkDestroyDevice call. The application
+    /// has ordered all healthy-device queue work before teardown. Pins survive
+    /// driver destruction even when a lost device cannot prove fence completion.
+    pub unsafe fn teardown(&mut self) -> Vec<Arc<FrameMapping>> {
+        let mut pins: Vec<_> = self
+            .active
+            .values()
+            .chain(self.retired.iter())
+            .map(|w| w.mapping.clone())
+            .collect();
+        for r in self.swaps.values().chain(self.old_swaps.iter()) {
+            for f in &r.frames {
+                pins.extend(f.leases.iter().map(|l| l.mapping().clone()));
+                pins.extend(f.assets.iter().map(|t| t.mapping.clone()));
+            }
+        }
+        self.active.clear();
+        self.retired.clear();
+        self.swaps.clear();
+        drop(self.old_swaps.sweep(|_| true));
+        // SAFETY: every layer-owned child was released under the caller's device
+        // teardown contract; mapped payloads stay owned by the returned pins.
+        unsafe {
+            self.ctx.destroy_handles();
+        }
+        pins
+    }
+    pub fn metrics(&self) -> String {
+        let (imports, images, descriptors) = self.ctx.counts.snapshot();
+        let frames: usize = self
+            .swaps
+            .values()
+            .chain(self.old_swaps.iter())
+            .map(|r| r.frames.len())
+            .sum();
+        let pending: usize = self
+            .swaps
+            .values()
+            .chain(self.old_swaps.iter())
+            .flat_map(|r| r.frames.iter())
+            .filter(|f| !f.safe_to_retire())
+            .count();
+        let uploads: usize = self
+            .swaps
+            .values()
+            .chain(self.old_swaps.iter())
+            .flat_map(|r| r.frames.iter())
+            .map(|f| f.leases.len())
+            .sum();
+        format!(
+            "{{\"imports\":{imports},\"images\":{images},\"descriptors\":{descriptors},\"gpuBytes\":\"{}\",\"gpuBudget\":{},\"sharedBudget\":{},\"mappings\":{},\"frames\":{frames},\"pendingFrames\":{pending},\"inFlightUploads\":{uploads},\"activeWidgets\":{},\"retiredWidgets\":{},\"available\":{}}}",
+            self.gpu_bytes,
+            self.ctx.budget.used(),
+            self.shared_budget.used(),
+            uw_frame_channel::live_mapping_count(),
+            self.active.len(),
+            self.retired.len(),
+            self.available
+        )
     }
     pub fn connected(&mut self, session: SessionId) {
         self.session = Some(session);
@@ -415,10 +478,17 @@ impl State {
             return DrawOutcome::Unavailable;
         };
         self.epoch = epoch;
+        let upload_bytes: u64 = uploads
+            .iter()
+            .map(|u| u64::from(u.damage.width) * u64::from(u.damage.height) * 4)
+            .sum();
         // SAFETY: caller's queue/index contract and retained assets; all mutable
         // state is serialized by this render lock, uploads have live leases.
         let outcome =
             unsafe { renderer.draw(queue, family, index, waits, &quads, &uploads, self.epoch) };
+        if matches!(outcome, DrawOutcome::Submitted { .. }) {
+            self.gpu_bytes += upload_bytes;
+        }
         if renderer.frames[index].submitted {
             let frame = &mut renderer.frames[index];
             frame.assets = assets;

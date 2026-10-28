@@ -64,9 +64,12 @@ pub unsafe extern "system" fn queue_present(
         let signal = frame.semaphore;
         let fence = frame.present_fence;
         frame.present_pending = true;
+        let present_active = frame.present_active.clone();
+        present_active.store(true, std::sync::atomic::Ordering::Release);
         let generation = state.swaps[&ash::vk::Handle::as_raw(swapchain)].generation;
         drop(state);
         let result = forward_submitted_present(next, queue, info, signal, fence);
+        present_active.store(false, std::sync::atomic::Ordering::Release);
         if result != vk::Result::SUCCESS
             && result != vk::Result::SUBOPTIMAL_KHR
             && let Ok(mut state) = runtime.state.try_lock()
@@ -194,6 +197,8 @@ mod tests {
         // suppresses all drops. Uncalled missing function stubs are sufficient.
         let ash = unsafe { dispatch::ash_device(gdpa, vk::Device::null()) };
         Arc::new(Context {
+            handles_live: AtomicBool::new(false),
+            counts: crate::resources::ResourceCounts::default(),
             life: Arc::new(DeviceLife {
                 device: ash,
                 live: AtomicBool::new(false),
