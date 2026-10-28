@@ -1,0 +1,16 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>
+html, body { margin: 0; background: transparent; overflow: hidden; }
+canvas { display: block; width: 64px; height: 48px; }
+</style></head><body><canvas width="64" height="48"></canvas><script>
+const canvas = document.querySelector('canvas');
+canvas.width = 64 * devicePixelRatio; canvas.height = 48 * devicePixelRatio;
+const ctx = canvas.getContext('2d');
+ctx.scale(devicePixelRatio, devicePixelRatio);
+ctx.fillStyle = 'rgb(16,32,64)'; ctx.fillRect(0, 0, 64, 48);
+window.drawStep = step => {
+  if (step === 1) { ctx.fillStyle = 'red'; ctx.fillRect(8, 8, 4, 4); }
+  if (step === 2) { ctx.fillStyle = 'lime'; ctx.fillRect(40, 30, 4, 4); }
+  if (step === 3) ctx.clearRect(8, 8, 4, 4);
+};
+</script></body></html>

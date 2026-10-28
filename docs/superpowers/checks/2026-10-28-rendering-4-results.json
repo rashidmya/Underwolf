@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "phase": "rendering 4",
+  "status": "implemented_open_acceptance",
+  "implementation_head": "working tree from 34ab1a1; source file hashes below identify tested Task 1 source",
+  "artifacts": {
+    "tools/render-fixture/package.json": "4a2cc72b1170d2c037f7491b4be963b8182fa8b3da831cb448cb625cf4133bc5",
+    "tools/render-fixture/package-lock.json": "10780bdb4c397f0782692af0cbffc79aba84fef9361117394b93efd0842f63d0",
+    "tools/render-fixture/tsconfig.json": "cff9ee06be1a35e967561b9738968d79281f78c12fec64ea0c08d1f71f807d76",
+    "tools/render-fixture/src/image-source.ts": "613454500add8e3291624472a5a12c6ed718dcbe22d1c51dd58dfbde49f68efb",
+    "tools/render-fixture/src/image-source.test.ts": "7b343c95dd2102a9bc98608a9a9db994aaec32ea425829b230a9e37e18a0cbf8",
+    "tools/render-fixture/src/image-contract.ts": "20cf6417ed6a37272354d68b958b3345c4b2c5db181b980e5ed728e19b48da51",
+    "tools/render-fixture/widgets/image-contract.html": "a395e04520050dabba14efbc9f2329f09656ccd498eba53504d8f02f0ed42f20"
+  },
+  "environment": {
+    "device": "NVIDIA GeForce RTX 4090",
+    "driver": "615.78.08",
+    "device_uuid": "08953a99-0737-914c-b467-47c14591ad11",
+    "source": "vulkaninfo --text",
+    "memory_host": true,
+    "swapchain_maintenance1_extension": true,
+    "swapchain_maintenance1_feature": true,
+    "host_pointer_alignment": 4096,
+    "host_visible_coherent": true,
+    "baseline": {
+      "passed": 711,
+      "failed": 0,
+      "ignored": 92
+    },
+    "scope": "capability inventory only; no GPU import or live game verification"
+  },
+  "gates": {
+    "baseline": {
+      "status": "pass",
+      "passed": 711,
+      "failed": 0,
+      "ignored": 92,
+      "log": ".superpowers/sdd/2026-10-28-rendering-4/baseline.log"
+    },
+    "capability_inventory": {
+      "status": "pass",
+      "scope": "extension/feature inventory, not actual GPU import or compositing",
+      "raw": "target/render-4/preflight/"
+    },
+    "pixel_source": {
+      "status": "pass",
+      "passed": 12,
+      "log": ".superpowers/sdd/2026-10-28-rendering-4/task-1-green.log"
+    },
+    "electron_images": {
+      "status": "pass",
+      "electron": "44.9.1",
+      "modes": [
+        "software",
+        "display GPU compositing enabled"
+      ],
+      "scales": [
+        1,
+        1.5
+      ],
+      "selected_image_mode": "retained-full",
+      "reports": [
+        "target/render-4/image-contract/software/qualification.json",
+        "target/render-4/image-contract/display/qualification.json"
+      ],
+      "gc_forced": false,
+      "scope": "isolated current-driver snapshots only; not renderer transport, input integration or live/performance acceptance"
+    },
+    "transport": {
+      "status": "pending"
+    },
+    "vulkan_rendering": {
+      "status": "pending"
+    },
+    "input_integration": {
+      "status": "pending"
+    },
+    "live": {
+      "status": "pending"
+    },
+    "performance": {
+      "status": "pending"
+    }
+  },
+  "deferred_items": [
+    "GameInput adapter remains deferred under 3b",
+    "AMD and GPU-bound coverage unavailable on this machine"
+  ],
+  "integration": {
+    "merged": false,
+    "pushed": false
+  }
+}

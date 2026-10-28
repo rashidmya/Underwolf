@@ -1,0 +1,17 @@
+{
+  "name": "uw-render-fixture",
+  "private": true,
+  "version": "0.0.0",
+  "license": "MIT",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "test": "npm run build && node --test dist/*.test.js",
+    "qualify": "npm run build && electron --ozone-platform=x11 dist/image-contract.js"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "electron": "44.9.1",
+    "typescript": "~5.9.0"
+  }
+}

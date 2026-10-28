@@ -3,7 +3,7 @@
 **Date:** 2026-10-28
 
 **Status:** Approved by the owner on 2026-10-28, following review of draft commit
-`9adc270`. Implementation planning is authorized; implementation has not started.
+`9adc270`. The implementation plan was subsequently approved for native execution; implementation is in progress in its isolated worktree.
 
 **Starting point:** `main` at `7023ccc`, after local integration of input 3b.
 
