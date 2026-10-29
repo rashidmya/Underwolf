@@ -312,8 +312,28 @@
     "Owned-backing accept extraction/backing-copy work is omitted from producer extraction counters; retained-full and whole-overlay FPS/p99 unaffected"
   ],
   "integration": {
-    "merged": false,
-    "pushed": false
+    "merged": true,
+    "pushed": false,
+    "branch": "main",
+    "strategy": "fast-forward",
+    "previous_head": "34ab1a1c365997756b65f18be717bf2e58888dad",
+    "merged_head": "da1945b5e9b4ead6d6162405e931acf05fe89bdd",
+    "date": "2026-10-29",
+    "evidence_worktree": "/home/buga/.codex/worktrees/fa7f/underwolf",
+    "verification": {
+      "status": "pass",
+      "source_head": "da1945b5e9b4ead6d6162405e931acf05fe89bdd",
+      "raw": [
+        "target/render-4/merge-checks/results.json"
+      ],
+      "command_count": 17,
+      "workspace": {
+        "passed": 778,
+        "failed": 0,
+        "ignored": 97
+      },
+      "fixture_cases": 39
+    }
   },
   "completed_implementation_tasks": [
     1,
